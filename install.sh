@@ -88,10 +88,11 @@ verify_continuity() {
   verify_signed_app "$2"
   requirement="$(codesign -dr - "$1" 2>&1 | sed -n 's/^designated => //p')"
   [[ -n "$requirement" ]] || fail "無法讀取既有簽章身分"
-  codesign --verify --deep --strict -R "$requirement" "$2" || fail "新版簽章身分不相容"
+  # codesign -R 的引數若不以 = 開頭會被當成檔案路徑；= 才是 inline requirement 文字。
+  codesign --verify --deep --strict -R "=$requirement" "$2" || fail "新版簽章身分不相容"
   requirement="$(codesign -dr - "$2" 2>&1 | sed -n 's/^designated => //p')"
   [[ -n "$requirement" ]] || fail "無法讀取新版簽章身分"
-  codesign --verify --deep --strict -R "$requirement" "$1" || fail "新版簽章要求不相容"
+  codesign --verify --deep --strict -R "=$requirement" "$1" || fail "新版簽章要求不相容"
 }
 verify_signed_app "$SOURCE"
 [[ -w /Applications ]] || fail "沒有 /Applications 寫入權限，請使用具權限的帳號"
