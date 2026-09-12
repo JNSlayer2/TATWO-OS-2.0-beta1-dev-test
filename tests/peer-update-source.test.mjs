@@ -157,9 +157,9 @@ ${fixtureTypes}
     for (const option of ['ControlMaster=no', 'ControlPath=none', 'ForwardAgent=no']) assert.ok(ssh.includes(option));
     assert.equal(ssh.at(-1), "cat ~/'Library/Application Support/TATWO OS/Updater/available.json'");
     const rsync = commands.find(c => c[0] === '/usr/bin/rsync' && !c.includes('--relative'));
-    assert.deepEqual(rsync.slice(1, 4), ['-az', '--partial', '--timeout=5']);
-    assert.match(rsync[5], /StrictHostKeyChecking=accept-new.*-p 2222$/);
-    assert.match(rsync[6], /^sample@sample\.local:'\/Users\/sample\/Library\/Application Support/);
+    assert.deepEqual(rsync.slice(1, 5), ['-az', '--partial', '--inplace', '--timeout=5']);
+    assert.match(rsync[6], /StrictHostKeyChecking=accept-new.*-p 2222$/);
+    assert.match(rsync[7], /^sample@sample\.local:'\/Users\/sample\/Library\/Application Support/);
     assert.equal(rsync.at(-1), join(root, 'app.zip'));
     const installed = commands.find(c => c.includes('--relative'));
     assert.equal(installed.at(-2), "sample@sample.local:'/Applications/TATWO OS.app/Contents/./Resources/runtime'");
@@ -173,6 +173,8 @@ test('production prefetch decision executes SHA gates and per-archive fallback w
     const prefetch = updater.slice(updater.indexOf('    private func prefetch('), updater.indexOf('    private func recordDownloadProgress'))
       .replace('private func prefetch', 'func prefetch');
     const digest = updater.slice(updater.indexOf('    private nonisolated static func digest'), updater.indexOf('    private func handOff'));
+    const policy = updater.slice(updater.indexOf('    static func retryable'), updater.indexOf('    private func finish'));
+    const retry = updater.slice(updater.indexOf('    private func retryDownload'), updater.indexOf('    private func helperIsActive'));
     const entry = peer.slice(peer.indexOf('struct PeerUpdateEntry'), peer.indexOf('enum PeerUpdateSource'));
     const harness = `
 import Foundation
@@ -234,7 +236,9 @@ enum PeerUpdateSource {
 }
 final class UpdateDownloadProgress {
   let destination: URL
-  init(destination: URL, report: @escaping @Sendable (Int64, Int64) -> Void) { self.destination = destination }
+${policy}
+  init(destination: URL, rebase: @escaping @Sendable (Int64, Int64) -> Void,
+       report: @escaping @Sendable (Int64, Int64) -> Void) { self.destination = destination }
   func download(from url: URL) async throws -> URL {
     IO.events.append("github:" + url.lastPathComponent)
     try IO.bytes(url.lastPathComponent).write(to: destination)
@@ -245,12 +249,14 @@ final class UpdateDownloadProgress {
   enum Phase { case starting }
   var phase = Phase.starting, downloadID = UUID(), downloadSource = ""
   var totalBytes: Int64 = 0, downloadProgress: Double?
+  var downloadedBytes: Int64 = 0, downloadBytesPerSecond: Double = 0
   var speedSamples: [(TimeInterval, Int64)] = []
   let fileManager = FileManager.default, directory: URL
   static let destinationApp = "/nonexistent-fixture/TATWO OS.app"
   init(_ root: URL) { directory = root }
   func recordDownloadProgress(_ bytes: Int64, total: Int64) {}
 ${prefetch}
+${retry}
 ${digest}
 }
 @main struct Main {

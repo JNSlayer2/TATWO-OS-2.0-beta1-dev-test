@@ -9,16 +9,28 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
     private let lock = NSLock()
     private var continuation: CheckedContinuation<URL, Error>?
     private var outcome: Result<URL, Error>?
+    private var cancelled = false
+    private var savedBytes: Int64 = 0
+    private let rebase: @Sendable (Int64, Int64) -> Void
+    private var resumeURL: URL { destination.appendingPathExtension("resume") }
     // Only the serial session delegate queue accesses fileResult.
     private var fileResult: Result<URL, Error>?
 
-    init(destination: URL, report: @escaping @Sendable (Int64, Int64) -> Void) {
-        self.destination = destination; self.report = report
+    init(destination: URL, rebase: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in },
+         report: @escaping @Sendable (Int64, Int64) -> Void) {
+        self.destination = destination; self.report = report; self.rebase = rebase
     }
 
     func download(from url: URL) async throws -> URL {
+        try Task.checkCancellation()
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
-        let task = session.downloadTask(with: url)
+        let resume = try? Data(contentsOf: resumeURL)
+        if resume?.isEmpty == false {
+            savedBytes = Int64((try? String(contentsOf: resumeURL.appendingPathExtension("bytes"), encoding: .utf8)) ?? "") ?? 0
+        }
+        let task = resume.flatMap { $0.isEmpty ? nil : session.downloadTask(withResumeData: $0) }
+            ?? session.downloadTask(with: url)
+        if resume?.isEmpty != false { rebase(0, -1) }
         let polling = Task {
             while !Task.isCancelled {
                 report(task.countOfBytesReceived, task.countOfBytesExpectedToReceive)
@@ -36,8 +48,35 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
                 if let completed { continuation.resume(with: completed) } else { task.resume() }
             }
         } onCancel: {
-            session.invalidateAndCancel()
-            self.finish(.failure(CancellationError()))
+            self.lock.withLock { self.cancelled = true }
+            task.cancel(byProducingResumeData: { data in
+                do { try self.saveResume(data); self.finish(.failure(CancellationError())) }
+                catch { self.finish(.failure(error)) }
+            })
+        }
+    }
+
+    private func saveResume(_ data: Data?) throws {
+        if let data {
+            try Data(String(lock.withLock { savedBytes }).utf8).write(to: resumeURL.appendingPathExtension("bytes"), options: .atomic)
+            try data.write(to: resumeURL, options: .atomic)
+        }
+    }
+
+    static func retryable(_ error: Error) -> Bool {
+        let error = error as NSError
+        return (error.domain == NSURLErrorDomain && [
+            URLError.networkConnectionLost, .timedOut, .cannotConnectToHost,
+            .notConnectedToInternet, .secureConnectionFailed
+        ].contains(URLError.Code(rawValue: error.code)))
+            || (error.domain == "UpdaterHTTP" && (500...599).contains(error.code))
+    }
+    static func nextDelay(_ seconds: Int) -> Int { min(60, seconds * 2) }
+    static func check(_ response: URLResponse?, resumed: Bool = false) throws {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 || (resumed && status == 206) else {
+            throw NSError(domain: "UpdaterHTTP", code: status,
+                          userInfo: [NSLocalizedDescriptionKey: "下載失敗（HTTP \(status)）"])
         }
     }
 
@@ -53,15 +92,20 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        lock.withLock { savedBytes = totalBytesWritten }
         report(totalBytesWritten, totalBytesExpectedToWrite)
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didResumeAtOffset fileOffset: Int64, expectedTotalBytes: Int64) {
+        lock.withLock { savedBytes = fileOffset }
+        rebase(fileOffset, expectedTotalBytes)
+        report(fileOffset, expectedTotalBytes)
     }
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         fileResult = Result {
             try lock.withLock {
-                guard outcome == nil else { throw CancellationError() }
-                guard (downloadTask.response as? HTTPURLResponse)?.statusCode == 200 else {
-                    throw NSError(domain: "Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: "下載失敗，請稍後重試"])
-                }
+                guard outcome == nil, !cancelled else { throw CancellationError() }
+                try Self.check(downloadTask.response, resumed: true)
                 // location expires when this callback returns: move synchronously, fenced against cancellation.
                 try FileManager.default.moveItem(at: location, to: destination)
                 report(downloadTask.countOfBytesReceived, downloadTask.countOfBytesExpectedToReceive)
@@ -70,6 +114,11 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
         }
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !lock.withLock({ cancelled }) else { return } // Cancellation finishes only after resume data is durable.
+        do {
+            try saveResume((error as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
+            if error == nil { try Data().write(to: resumeURL, options: .atomic) } // A completed HTTP response consumes the old resume request.
+        } catch { finish(.failure(error)); return }
         finish(error.map { .failure($0) } ?? fileResult ?? .failure(URLError(.unknown)))
     }
 }
@@ -151,7 +200,8 @@ final class InAppUpdater: ObservableObject {
         else { phase = .failed("版本或倉庫格式無效"); return }
         guard !helperIsActive() else { phase = .failed("更新已在進行"); return }
         phase = .starting
-        downloadProgress = nil; downloadedBytes = 0; totalBytes = 0
+        downloadProgress = nil; downloadedBytes = resumableBytes(for: tag) ?? 0; totalBytes = 0
+        downloadSource = "從 GitHub 下載…"
         downloadBytesPerSecond = 0; speedSamples = []
         let id = UUID(); downloadID = id
         download = Task {
@@ -168,6 +218,48 @@ final class InAppUpdater: ObservableObject {
     }
 
     func cancelUpdate() { download?.cancel() }
+
+    func resumableBytes(for tag: String) -> Int64? {
+        guard PeerUpdateSource.validTag(tag),
+              let files = fileManager.enumerator(at: directory.appendingPathComponent("download/\(tag)"),
+                                                includingPropertiesForKeys: [.fileSizeKey]) else { return nil }
+        var bytes: [String: Int64] = [:]
+        for case let file as URL in files {
+            if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                if !file.lastPathComponent.hasPrefix("peer-") { files.skipDescendants() }
+                continue
+            }
+            let name = (file.pathExtension == "resume" ? file.deletingPathExtension() : file).lastPathComponent
+            guard ["TATWO-OS.zip", "TATWO-OS-app.zip"].contains(name)
+                || name.range(of: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$", options: .regularExpression) != nil else { continue }
+            if file.pathExtension == "resume", let data = try? Data(contentsOf: file), !data.isEmpty {
+                bytes[name] = max(bytes[name] ?? 0, Int64((try? String(contentsOf: file.appendingPathExtension("bytes"), encoding: .utf8)) ?? "") ?? 0)
+            } else if file.pathExtension == "zip", !file.lastPathComponent.hasPrefix("invalid-") {
+                bytes[file.lastPathComponent] = max(bytes[file.lastPathComponent] ?? 0, Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0))
+            }
+        }
+        return bytes.isEmpty ? nil : bytes.values.reduce(0, +)
+    }
+
+    private func retryDownload<T>(_ operation: () async throws -> T) async throws -> T {
+        var delay = 2
+        while true {
+            try Task.checkCancellation()
+            do { return try await operation() }
+            catch {
+                try Task.checkCancellation()
+                guard UpdateDownloadProgress.retryable(error) else { throw error }
+                let source = downloadSource
+                for seconds in stride(from: delay, through: 1, by: -1) {
+                    downloadBytesPerSecond = 0
+                    downloadSource = String(format: "連線中斷，%d 秒後自動續傳（已下載 %.1f MB）", seconds, Double(downloadedBytes) / 1_000_000)
+                    try await Task.sleep(for: .seconds(1))
+                }
+                downloadSource = source; speedSamples = []
+                delay = UpdateDownloadProgress.nextDelay(delay)
+            }
+        }
+    }
 
     private func helperIsActive() -> Bool {
         guard let data = try? Data(contentsOf: pendingURL),
@@ -186,14 +278,15 @@ final class InAppUpdater: ObservableObject {
         struct Release: Decodable { let tag_name: String; let draft: Bool; let assets: [Asset] }
         func failure(_ message: String) -> NSError { NSError(domain: "Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
         func check(_ response: URLResponse) throws {
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw failure("下載失敗，請稍後重試") }
+            try UpdateDownloadProgress.check(response)
         }
         var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/releases/tags/\(tag)")!,
                                  cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("TATWO-OS-UpdateChecker", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request)
-        try check(response)
+        let (data, _) = try await retryDownload {
+            let result = try await session.data(for: request); try check(result.1); return result
+        }
         let release = try JSONDecoder().decode(Release.self, from: data)
         guard release.tag_name == tag, !release.draft,
               release.assets.contains(where: { $0.name == "TATWO-OS.install-ready" }) else { throw failure("此版本尚未完成安裝驗收") }
@@ -222,9 +315,11 @@ final class InAppUpdater: ObservableObject {
         var expectedHashes: [String: String] = [:]
         for archive in archives {
             let checksum = try asset(archive.name + ".sha256")
-            let (sha, shaResponse) = try await session.data(for: URLRequest(url: URL(string: checksum.browser_download_url)!,
-                cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
-            try check(shaResponse)
+            let (sha, _) = try await retryDownload {
+                let result = try await session.data(for: URLRequest(url: URL(string: checksum.browser_download_url)!,
+                    cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
+                try check(result.1); return result
+            }
             let expected = String(decoding: sha, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
             guard expected.range(of: "^[0-9A-Fa-f]{64}$", options: .regularExpression) != nil else { throw failure("校驗失敗：SHA-256 格式錯誤") }
             try sha.write(to: folder.appendingPathComponent(checksum.name), options: .atomic)
@@ -246,24 +341,34 @@ final class InAppUpdater: ObservableObject {
             for offer in offers {
                 try Task.checkCancellation()
                 downloadSource = "從『\(offer.device.name)』取得…"
-                if let candidate = try? await PeerUpdateSource.pull(offer, tag: tag, name: archive.name, folder: folder),
-                   let actual = try? await Self.digest(candidate), actual == expected {
+                if let candidate = try? await PeerUpdateSource.pull(offer, tag: tag, name: archive.name, folder: folder) {
+                    if let actual = try? await Self.digest(candidate), actual == expected {
+                        try Task.checkCancellation()
+                        try fileManager.moveItem(at: candidate, to: zip)
+                        downloadSource = String(format: "從『%@』取得 %.1f MB", offer.device.name, Double(archive.size) / 1_000_000)
+                        return zip
+                    }
                     try Task.checkCancellation()
-                    try fileManager.moveItem(at: candidate, to: zip)
-                    downloadSource = String(format: "從『%@』取得 %.1f MB", offer.device.name, Double(archive.size) / 1_000_000)
-                    return zip
+                    try fileManager.moveItem(at: candidate, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
                 }
-                // Failed candidates stay isolated in peer-UUID; never advertised or passed to install.sh.
+                // Interrupted candidates stay in peer-key; corrupt files stay quarantined, never handed off.
             }
             try Task.checkCancellation()
             downloadSource = "從 GitHub 下載…"
-            let progress = UpdateDownloadProgress(destination: zip) { [weak self] written, total in
-                Task { @MainActor in
-                    guard let self, self.downloadID == id, self.phase == .starting else { return }
-                    self.recordDownloadProgress(offset + written, total: max(plannedBytes, offset + max(0, total)))
+            _ = try await retryDownload {
+                let progress = UpdateDownloadProgress(destination: zip, rebase: { [weak self] written, _ in
+                    Task { @MainActor in
+                        guard let self, self.downloadID == id, self.phase == .starting else { return }
+                        self.downloadedBytes = offset + written; self.speedSamples = []
+                    }
+                }) { [weak self] written, total in
+                    Task { @MainActor in
+                        guard let self, self.downloadID == id, self.phase == .starting else { return }
+                        self.recordDownloadProgress(offset + written, total: max(plannedBytes, offset + max(0, total)))
+                    }
                 }
+                return try await progress.download(from: URL(string: archive.browser_download_url)!)
             }
-            _ = try await progress.download(from: URL(string: archive.browser_download_url)!)
             try Task.checkCancellation()
             guard try await Self.digest(zip) == expected.lowercased() else {
                 try fileManager.moveItem(at: zip, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))

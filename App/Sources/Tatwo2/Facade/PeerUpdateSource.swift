@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 struct PeerUpdateEntry: Codable, Sendable {
     var app: String?
@@ -49,7 +50,7 @@ enum PeerUpdateSource {
         ["/usr/bin/ssh"] + options(device) + ["\(device.user)@\(host)", "cat ~/\(quote(relativeRoot + "/available.json"))"]
     }
     static func rsync(_ offer: Offer, path: String, destination: URL, relative: Bool = false) -> [String] {
-        ["/usr/bin/rsync", "-az", "--partial", "--timeout=5"] + (relative ? ["--relative"] : []) +
+        ["/usr/bin/rsync", "-az", "--partial", "--inplace", "--timeout=5"] + (relative ? ["--relative"] : []) +
         ["-e", (["/usr/bin/ssh"] + options(offer.device)).joined(separator: " "),
          "\(offer.device.user)@\(offer.host):\(quote(path))", destination.path]
     }
@@ -125,18 +126,19 @@ enum PeerUpdateSource {
         guard validTag(tag), let entry = offer.entries[tag] else { return nil }
         let runtime = safe(name, pattern: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$")
         guard runtime || ["TATWO-OS.zip", "TATWO-OS-app.zip"].contains(name) else { return nil }
-        let stage = folder.appendingPathComponent("peer-\(UUID())", isDirectory: true)
+        let key = SHA256.hash(data: Data("\(offer.device.id)/\(name)".utf8)).map { String(format: "%02x", $0) }.joined()
+        let stage = folder.appendingPathComponent("peer-\(key)", isDirectory: true)
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let output = stage.appendingPathComponent(name)
         if let path = runtime ? entry.runtime : entry.app, cachePath(path, tag: tag, name: name) {
-            _ = try await run(rsync(offer, path: path, destination: output), seconds: 30)
+            _ = try await run(rsync(offer, path: path, destination: output), seconds: 86_400)
         } else if runtime, entry.installedApp == "/Applications/TATWO OS.app",
                   let sha = entry.runtimeSha, safe(sha, pattern: "^[0-9a-f]{64}$"),
                   name == "TATWO-OS-runtime-\(sha.prefix(12)).zip" {
             let contents = stage.appendingPathComponent("runtime", isDirectory: true)
             try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
             for path in runtimePaths {
-                _ = try await run(rsync(offer, path: "/Applications/TATWO OS.app/Contents/./\(path)", destination: contents, relative: true), seconds: 30)
+                _ = try await run(rsync(offer, path: "/Applications/TATWO OS.app/Contents/./\(path)", destination: contents, relative: true), seconds: 86_400)
             }
             _ = try await run(["/usr/bin/ditto", "-c", "-k", "--norsrc", contents.path, output.path], seconds: 30)
         } else { return nil }

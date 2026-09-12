@@ -113,7 +113,11 @@ struct UpdateAvailableCard: View {
 
     private var updateButtonTitle: String {
         switch updater.phase {
-        case .idle, .failed: return "下載並更新"
+        case .idle, .failed:
+            if let tag = checker.availableRelease?.tag_name, let bytes = updater.resumableBytes(for: tag) {
+                return String(format: "繼續下載（已 %.1f MB）", Double(bytes) / 1_000_000)
+            }
+            return "下載並更新"
         case .starting: return "下載與校驗中…"
         case .handedOff: return "更新中，App 即將關閉"
         }
