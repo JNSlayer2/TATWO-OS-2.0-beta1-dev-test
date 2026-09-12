@@ -8,6 +8,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const install = readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
+const transport = install.split('# DOWNLOAD-RETRY-BEGIN\n')[1].split('# DOWNLOAD-RETRY-END')[0];
 const publicInstall = readFileSync(new URL('../public/install.sh', import.meta.url), 'utf8');
 
 test('install.sh and public/install.sh stay byte-identical', () => {
@@ -18,7 +19,7 @@ test('W22 production selection falls through delta, layer, then full without rep
   const selection = install.slice(install.indexOf('SOURCE="$TEMP/split/TATWO OS.app"'), install.indexOf('# Do not silently'));
   for (const [delta, layer, expected] of [[0, 0, 'delta'], [1, 0, 'delta layer'], [1, 1, 'delta layer full']]) {
     const temp = mkdtempSync(join(tmpdir(), 'w22-order-'));
-    const result = spawnSync('bash', ['-c', `set -eu; TEMP=${JSON.stringify(temp)}; APP_URL=yes
+    const result = spawnSync('bash', ['-c', `set -eu; TEMP=${JSON.stringify(temp)}; APP_URL=yes; STAGE="$TEMP/stage"
       TATWO_OS_PREFETCHED_DELTA_ZIP=yes; TATWO_OS_PREFETCHED_MANIFEST=yes
       assemble_delta() { echo delta >> "$TEMP/order"; return ${delta}; }
       assemble_runtime() { echo layer >> "$TEMP/order"; return ${layer}; }
@@ -48,7 +49,7 @@ test('codesign really rejects the bare form and accepts the = form (Apple-signed
 
 test('archives never carry AppleDouble sidecars and the installer extracts with ditto', () => {
   const pkg = readFileSync(new URL('../scripts/package-release.sh', import.meta.url), 'utf8');
-  assert.match(pkg, /xattr -cr "\$OUT\/TATWO OS\.app"/);
+  assert.doesNotMatch(pkg, /xattr -cr/);
   assert.match(pkg, /ditto -c -k --norsrc --keepParent/);
   assert.match(install, /ditto -x -k "\$ZIP" "\$TEMP\/unpacked"/);
   assert.doesNotMatch(install, /unzip -q /);
@@ -65,7 +66,7 @@ test('archives never carry AppleDouble sidecars and the installer extracts with 
 test('prefetch skips only ZIP; remote checksum and SHA comparison remain mandatory', () => {
   assert.match(install, /if \[\[ -n "\$\{TATWO_OS_PREFETCHED_ZIP:-\}" \]\]; then/);
   assert.match(install, /\[\[ -f "\$TATWO_OS_PREFETCHED_ZIP" \]\] \|\| fail/);
-  assert.match(install, /ZIP="\$TATWO_OS_PREFETCHED_ZIP"\nelse\n  curl[^\n]*"\$ZIP" "\$ZIP_URL"\nfi/);
+  assert.match(install, /ditto "\$TATWO_OS_PREFETCHED_ZIP" "\$ZIP"\nelse\n  retry_download "\$ZIP" "\$ZIP_URL"\nfi/);
   assert.match(install, /fi\ncurl[^\n]*"\$TEMP\/TATWO-OS\.zip\.sha256" "\$SHA_URL"/);
   assert.match(install, /ACTUAL="\$\(shasum -a 256 "\$ZIP"\)"/);
   assert.match(install, /\[\[ "\$ACTUAL" == "\$EXPECTED" \]\] \|\| fail/);
@@ -96,6 +97,8 @@ test('real installer download/checksum block accepts cache, rejects tampering an
           *) cp "$FIXTURE_ZIP" "$output";;
         esac
       }
+      ${transport}
+      printf '%s  TATWO-OS.zip\\n' "$FIXTURE_SHA" > "$TEMP/install-ready"
       ${block}
     `;
     const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', env: {
@@ -149,7 +152,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
     createHash('sha256').update(readFileSync(join(assets, 'TATWO-OS.zip'))).digest('hex') + '  TATWO-OS.zip\n');
   const runtimeName = readdirSync(assets).find(n => /^TATWO-OS-runtime-.*\.zip$/.test(n));
   const repo = 'fixture/repo', base = `https://github.com/${repo}/releases/download/v9.9.9`;
-  const functions = install.slice(install.indexOf('download_full() {'), install.indexOf('# RUNTIME-ASSEMBLY-END'));
+  const functions = transport + install.slice(install.indexOf('download_full() {'), install.indexOf('# RUNTIME-ASSEMBLY-END'));
   const selection = install.slice(install.indexOf('SOURCE="$TEMP/split/TATWO OS.app"'),
     install.indexOf('# Do not silently move development copies')).replace('/Applications/.tatwo-update.XXXXXX', '$TEMP/stage.XXXXXX');
   for (const mode of ['reuse', 'changed', 'cached', 'missing', 'corrupt', 'old-release', 'bad-prefetch', 'no-runtime-asset']) {
@@ -170,6 +173,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
       assets: readdirSync(assets).filter(n => n.endsWith('.zip') || n.endsWith('.sha256'))
         .map(name => ({ name, browser_download_url: `${base}/${name}` })),
     }));
+    writeFileSync(join(temp, 'install-ready'), readdirSync(assets).filter(n => n.endsWith('.zip')).map(n => createHash('sha256').update(readFileSync(join(assets,n))).digest('hex') + '  ' + n + '\n').join(''));
     const result = spawnSync('bash', ['-c', `
       set -euo pipefail
       fail() { echo "$1" >&2; exit 1; }
@@ -215,13 +219,121 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
   }
 });
 
-test('large archive downloads resume and retry on slow links (curl 92 seen on the room mini)', () => {
-  const fresh = readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
-  const bigDownloads = fresh.split('\n').filter(line => line.includes('-o "$ZIP" "$ZIP_URL"') || line.includes('-o "$output" "$url"'));
-  assert.equal(bigDownloads.length, 2);
-  for (const line of bigDownloads) {
-    assert.match(line, /--http1\.1/);
-    assert.match(line, /-C - /);
-    assert.match(line, /--retry 5 --retry-all-errors/);
+test('W26 curl 18 re-invokes curl and resumes from existing bytes on second attempt', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w26-resume-'));
+  const r = spawnSync('bash', ['-c', `set -eu
+    ${transport}
+    sleep() { :; }
+    curl() {
+      local output=""; while [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then shift; output="$1"; fi; shift; done
+      if [ ! -f "$output" ]; then printf 'partial' > "$output"; return 18; fi
+      printf '%s' "$(wc -c < "$output" | tr -d ' ')" > "$TEMP/offset"
+      printf 'rest' >> "$output"
+    }
+    retry_download "$TEMP/archive" https://fixture.invalid/archive
+  `], {encoding:'utf8', env:{...process.env, TEMP:dir}});
+  assert.equal(r.status,0,r.stderr);
+  assert.equal(readFileSync(join(dir,'offset'),'utf8'),'7');
+  assert.equal(readFileSync(join(dir,'archive'),'utf8'),'partialrest');
+  assert.match(transport, /-C - .*--max-time 3600 .*--speed-limit 1024 --speed-time 60/);
+  assert.doesNotMatch(transport, /--retry/);
+  assert.match(install, /retry_download "\$ZIP" "\$ZIP_URL"/);
+  assert.match(install, /retry_download "\$output" "\$url"/);
+});
+
+test('W26 install-ready requires one matching candidate hash; legacy name-only marker binds via .sha256 instead', () => {
+  const dir = mkdtempSync(join(tmpdir(),'w26-ready-')), hash = 'a'.repeat(64);
+  for (const [content, ok] of [[`${hash}  file.zip\n`, true], ['ready', true], [`${'b'.repeat(64)}  file.zip`, false], [`${hash}  file.zip\n${hash}  file.zip`, false]]) {
+    writeFileSync(join(dir,'install-ready'),content);
+    const legacy = /^[0-9a-f]{64}  /m.test(content) ? '0' : '1';
+    const r=spawnSync('bash',['-c',`${transport}\nLEGACY_READY=${legacy}\nready_matches file.zip ${hash}`],{env:{...process.env,TEMP:dir}});
+    assert.equal(r.status,ok?0:1);
   }
+});
+
+test('W26 persisted transactions restore interrupted rename and leave live/committed runs alone', () => {
+  const functions=install.split('# TRANSACTION-BEGIN\n')[1].split('# TRANSACTION-END')[0];
+  for(const [phase,owner,restore] of [['replacing','99999999',true],['prepared','99999999',true],['committed','99999999',false],['replacing',String(process.pid),false]]) {
+    const dir=mkdtempSync(join(tmpdir(),'w26-reconcile-')), dest=join(dir,'TATWO OS.app'), stage=join(dir,'.tatwo-update.fixture.noindex');
+    mkdirSync(stage); mkdirSync(dest+'.old'); writeFileSync(join(dest+'.old','intact'),'old');
+    writeFileSync(join(stage,'transaction.json'), JSON.stringify({phase,owner,backup:dest+'.old'}));
+    const r=spawnSync('bash',['-c',`set -eu\n${functions}\nreconcile_transactions`],{encoding:'utf8',env:{...process.env,DEST:dest}});
+    assert.equal(r.status,0,r.stderr); assert.equal(existsSync(dest),restore);
+    if(restore) {
+      assert.equal(readFileSync(join(dest,'intact'),'utf8'),'old');
+      assert.equal(JSON.parse(readFileSync(join(stage,'transaction.json'))).phase,'recovered');
+      assert.equal(JSON.parse(readFileSync(join(stage,'result.json'))).message,'interrupted_restored');
+    }
+  }
+  assert.match(install,/mv "\$STAGE\/TATWO OS.app" "\$DEST.new"/);
+  assert.match(install,/mv "\$DEST" "\$DEST.old"; fi\nmv "\$DEST.new" "\$DEST"/);
+  assert.ok(install.indexOf('write_transaction replacing') < install.indexOf('mv "$DEST" "$DEST.old"'));
+});
+
+test('W25 production version binding: equality mandatory, downgrade opt-in never bypasses binding', () => {
+  const functions = install.split('# VERSION-BINDING-BEGIN\n')[1].split('# VERSION-BINDING-END')[0];
+  const dir = mkdtempSync(join(tmpdir(), 'w25-binding-'));
+  const app = (name, version) => {
+    const path = join(dir,name); mkdirSync(join(path,'Contents'),{recursive:true});
+    writeFileSync(join(path,'Contents/Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>`);
+    return path;
+  };
+  for(const [old,next,tag,override,ok] of [
+    ['2.0.5','2.0.5.001','v2.0.5.001','',true],
+    ['2.0.5.001','2.0.5.002','v2.0.5.002','',true],
+    ['2.0.5.999','2.0.6','v2.0.6','',true],
+    ['2.0.5.010','2.0.5.002','v2.0.5.002','',false],
+    ['2.0.6','2.0.5.999','v2.0.5.999','',false],
+    ['2.0.6','2.0.5.999','v2.0.5.999','1',true],
+    ['2.0.5','2.0.5.001','v2.0.6','1',false],
+    ['invalid','2.0.6','v2.0.6','',false],
+    ['2.0','2.0.0','v2.0.0','',true],
+  ]) {
+    const result=spawnSync('bash',['-c',`set -euo pipefail\nfail() { echo "$1" >&2; exit 1; }\n${functions}\nverify_version_binding "$CANDIDATE"`],{
+      encoding:'utf8',env:{...process.env,DEST:app('old',old),CANDIDATE:app('new',next),TAG:tag,TATWO_OS_ALLOW_DOWNGRADE:override}
+    });
+    assert.equal(result.status,ok?0:1,`${old} -> ${next}: ${result.stderr}`);
+  }
+  assert.match(install,/verify_version_binding "\$SOURCE"/);
+  assert.match(install,/verify_version_binding "\$STAGE\/TATWO OS.app"/);
+  assert.match(readFileSync(new URL('../scripts/install-private.sh',import.meta.url),'utf8'),/source "\$PRIVATE_WORK\/install.sh"/);
+});
+
+test('W26 SIGKILL inside production rename window is recovered by the next installer', () => {
+  const dir=mkdtempSync(join(tmpdir(),'w26-kill-')), dest=join(dir,'TATWO OS.app'), stage=join(dir,'.tatwo-update.fixture.noindex');
+  mkdirSync(stage); mkdirSync(dest); writeFileSync(join(dest,'intact'),'old');
+  const candidate=join(stage,'TATWO OS.app'); mkdirSync(candidate); writeFileSync(join(candidate,'intact'),'new');
+  writeFileSync(join(dir,'install-ready'),'a'.repeat(64)+'  TATWO-OS.zip\n');
+  const functions=install.split('# TRANSACTION-BEGIN\n')[1].split('# TRANSACTION-END')[0];
+  const replace=install.slice(install.indexOf('# Staging and destination'), install.indexOf('verify_signed_app "$DEST"'));
+  const env={...process.env,DEST:dest,STAGE:stage,TEMP:dir,TAG:'v2.0.6',REPO:'fixture/repo'};
+  let r=spawnSync('bash',['-c',`set -eu
+    ${functions}
+    fail() { echo "$1" >&2; exit 1; }
+    mv() { command mv "$@"; if [[ "$1" == "$DEST" && "$2" == "$DEST.old" ]]; then kill -KILL $$; fi; }
+    ${replace}`],{encoding:'utf8',env});
+  assert.equal(r.signal,'SIGKILL',r.stderr);
+  assert.ok(!existsSync(dest)); assert.ok(existsSync(dest+'.old')); assert.ok(existsSync(dest+'.new'));
+  assert.equal(JSON.parse(readFileSync(join(stage,'transaction.json'))).phase,'replacing');
+  r=spawnSync('bash',['-c',`set -eu\n${functions}\nreconcile_transactions`],{encoding:'utf8',env});
+  assert.equal(r.status,0,r.stderr); assert.equal(readFileSync(join(dest,'intact'),'utf8'),'old');
+  assert.ok(!existsSync(dest+'.new')); assert.ok(existsSync(join(stage,'interrupted-new.app.disabled')));
+});
+
+test('W26 24-hour cleanup trashes only stale owned temp directories and writes restore manifest', () => {
+  const dir=mkdtempSync(join(tmpdir(),'w26-retention-'));
+  for(const name of ['tatwo-install.old','tatwo-install.active','tatwo-install.fresh','keep-other']) mkdirSync(join(dir,name));
+  writeFileSync(join(dir,'tatwo-install.active/owner'),String(process.pid));
+  for(const name of ['tatwo-install.old','tatwo-install.active','keep-other']) {
+    assert.equal(spawnSync('touch',['-t','202001010000',join(dir,name)]).status,0);
+  }
+  const code=install.split('# TEMP-RETENTION-BEGIN\n')[1].split('# TEMP-RETENTION-END')[0];
+  const r=spawnSync('bash',['-c',`set -eu
+    trash() { command mv "$1" "$TMPDIR/retained-trash"; }
+    ${code}
+    archive_old_downloads`],{encoding:'utf8',env:{...process.env,TMPDIR:dir}});
+  assert.equal(r.status,0,r.stderr); assert.ok(existsSync(join(dir,'retained-trash')));
+  for(const name of ['tatwo-install.active','tatwo-install.fresh','keep-other']) assert.ok(existsSync(join(dir,name)));
+  const manifest=readdirSync(dir).find(n=>n.endsWith('.md'));
+  assert.match(readFileSync(join(dir,manifest),'utf8'),/Restore from macOS Trash/);
 });

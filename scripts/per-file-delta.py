@@ -52,15 +52,20 @@ def checksum(path):
     path.with_name(path.name + ".sha256").write_text(f"{digest(path)}  {path.name}\n")
 
 
+def version(tag):
+    parts = tuple(map(int, tag[1:].split(".")))
+    return parts + (0,) * (4 - len(parts))
+
+
 def main():
     app, out, tag, *previous = sys.argv[1:]
     app, out = Path(app).absolute(), Path(out).absolute()
-    assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag)
+    assert re.fullmatch(r"v[0-9]+(?:\.[0-9]+){1,3}", tag)
     try:
         old = json.loads(Path(previous[0]).read_text()) if previous and previous[0] else None
         assert not old or (old["schema"] == 1 and isinstance(old["files"], list) and
-                           re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", old["tag"]) and
-                           tuple(map(int, old["tag"][1:].split("."))) < tuple(map(int, tag[1:].split("."))))
+                           re.fullmatch(r"v[0-9]+(?:\.[0-9]+){1,3}", old["tag"]) and
+                           version(old["tag"]) < version(tag))
     except (ValueError, KeyError, TypeError, AssertionError) as error:
         print(f"略過 delta：上一版 manifest 無效 ({type(error).__name__})")
         old = None

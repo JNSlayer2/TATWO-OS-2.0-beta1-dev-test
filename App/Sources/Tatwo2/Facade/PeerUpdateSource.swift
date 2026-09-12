@@ -35,7 +35,7 @@ enum PeerUpdateSource {
     static func safe(_ value: String, pattern: String) -> Bool {
         value.range(of: pattern, options: .regularExpression).map { String(value[$0]) == value } ?? false
     }
-    static func validTag(_ tag: String) -> Bool { safe(tag, pattern: #"^v?[0-9]+[.][0-9]+([.][0-9]+)?([-+][A-Za-z0-9.-]+)?$"#) }
+    static func validTag(_ tag: String) -> Bool { safe(tag, pattern: #"^v?[0-9]+[.][0-9]+([.][0-9]+){0,2}([-+][A-Za-z0-9.-]+)?$"#) }
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     static func options(_ device: DeviceRecord) -> [String] {
         ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=2",
@@ -127,7 +127,7 @@ enum PeerUpdateSource {
     static func pull(_ offer: Offer, tag: String, name: String, folder: URL) async throws -> URL? {
         guard validTag(tag), let entry = offer.entries[tag] else { return nil }
         let runtime = safe(name, pattern: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$")
-        let delta = safe(name, pattern: #"^TATWO-OS-delta-v[0-9]+[.][0-9]+[.][0-9]+-v[0-9]+[.][0-9]+[.][0-9]+[.]zip$"#)
+        let delta = safe(name, pattern: #"^TATWO-OS-delta-v[0-9]+([.][0-9]+){1,3}-v[0-9]+([.][0-9]+){1,3}[.]zip$"#)
         guard runtime || delta || ["TATWO-OS.zip", "TATWO-OS-app.zip", "TATWO-OS.manifest.json"].contains(name) else { return nil }
         let key = SHA256.hash(data: Data("\(offer.device.id)/\(name)".utf8)).map { String(format: "%02x", $0) }.joined()
         let stage = folder.appendingPathComponent("peer-\(key)", isDirectory: true)

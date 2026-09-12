@@ -1,6 +1,6 @@
-Source commit: d81b1d57684638172753d4ceed1bbfd2da00c535
+Source commit: 6e0292efe51debcb99d9fda2be0c712cfac7050f
 Source worktree: clean
-Files: 1422
+Files: 1426
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -1142,6 +1142,7 @@ scripts/copy-audit-waivers.txt
 scripts/install-j2-temp.sh
 scripts/install-tatwo-ultrawork.sh
 scripts/make-beta-signing-cert.sh
+scripts/package-release-gates.py
 scripts/package-release.sh
 scripts/per-file-delta.py
 scripts/public-export.sh
@@ -1289,6 +1290,7 @@ scripts/tests/browser-staging-loopback-policy.m
 scripts/tests/browser-staging-loopback-startup.py
 scripts/update-blocklists.sh
 scripts/validate-tatwo-sync-catalog.mjs
+scripts/verify-release-train.py
 skills/tatwo-ultrawork/SKILL.md
 skills/tatwo-ultrawork/agents/openai.yaml
 tests/agent-kernel-driver-k3-source-contract.test.mjs
@@ -1340,6 +1342,7 @@ tests/ipad-use-mcp.test.mjs
 tests/ipad-use-packaging.test.mjs
 tests/ipad-use-ui-source.test.mjs
 tests/os-upstream-refresh.test.mjs
+tests/package-release-gates.test.mjs
 tests/peer-update-source.test.mjs
 tests/per-file-delta.test.mjs
 tests/plan-canvas.test.mjs
@@ -1423,3 +1426,4 @@ tests/tatwo2-os-principles.test.mjs
 tests/tatwo2-readonly-dispatch.test.mjs
 tests/tatwo2-scroll-follow.test.mjs
 tests/tatwo2-sidebar-regression.test.mjs
+tests/update-channels.test.mjs

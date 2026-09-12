@@ -948,6 +948,7 @@ final class TatwoUltraworkAppDelegate: NSObject, NSApplicationDelegate {
     private var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        InAppUpdater.reconcileOnLaunch()
         let upstream = OSUpstreamRefresh.applyOnLaunch()
         fputs("tatwo_os_upstream=\(upstream.logMessage)\n", stderr)
         NSApp.setActivationPolicy(TatwoLaunchSurfacePolicy.initialActivationPolicy())

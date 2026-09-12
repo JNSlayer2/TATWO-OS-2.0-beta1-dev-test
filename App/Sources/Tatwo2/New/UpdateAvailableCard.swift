@@ -23,7 +23,7 @@ struct UpdateAvailableCard: View {
             Text("目前版本 v\(currentVersion)（build \(currentBuild)）")
                 .font(.footnote).foregroundStyle(.secondary)
             if let release = checker.availableRelease {
-                Text("目前 v\(currentVersion) → 可更新到 \(release.tag_name.hasPrefix("v") ? release.tag_name : "v" + release.tag_name)")
+                Text("\(checker.isPrivateChannel ? "私人通道 · " : "")目前 v\(currentVersion) → 可更新到 \(release.tag_name.hasPrefix("v") ? release.tag_name : "v" + release.tag_name)")
                     .font(.headline)
             }
             if checker.status == "目前沒有較新的正式版本", let checkedAt = checker.lastCheckedAt {
@@ -69,14 +69,14 @@ struct UpdateAvailableCard: View {
                     Text(reason).font(.footnote).foregroundStyle(.red)
                 }
                 DisclosureGroup("進階：用終端機更新") {
-                    Text(GitHubReleaseUpdateChecker.installCommand)
+                    Text(checker.terminalInstallCommand)
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Button("複製") {
                             NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(GitHubReleaseUpdateChecker.installCommand, forType: .string)
+                            NSPasteboard.general.setString(checker.terminalInstallCommand, forType: .string)
                         }
                         Button("在 CLI 分頁執行") { executeInCLI() }
                             .disabled(isExecuting)
@@ -136,7 +136,7 @@ struct UpdateAvailableCard: View {
         Task {
             defer { isExecuting = false }
             do {
-                try await session.sendLineAwaited(GitHubReleaseUpdateChecker.installCommand)
+                try await session.sendLineAwaited(checker.terminalInstallCommand)
                 model.mode = .cli
                 onOpenCLI()
             }
@@ -154,7 +154,7 @@ struct SidebarUpdateShortcut: View {
             Button(action: openUpdateSettings) {
                 Text(updater.phase == .starting
                      ? updater.downloadProgress.map { "下載 \(Int($0 * 100))%" } ?? "準備下載…"
-                     : "有新版 \(release.tag_name)")
+                     : "\(checker.isPrivateChannel ? "私人通道 · " : "有新版 ")\(release.tag_name)")
                     .font(.caption.weight(.semibold)).lineLimit(1)
                     .frame(minHeight: 26).contentShape(Rectangle())
             }

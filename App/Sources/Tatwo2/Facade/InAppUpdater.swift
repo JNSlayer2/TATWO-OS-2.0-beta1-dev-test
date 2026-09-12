@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CryptoKit
+import Darwin
 
 /// 先在 App 內下載校驗，再交給 launchd 執行原安裝器；簽章、替換與回復仍由 install.sh 負責。
 private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
@@ -11,6 +12,7 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
     private var outcome: Result<URL, Error>?
     private var cancelled = false
     private var savedBytes: Int64 = 0
+    private var authenticated = false
     private let rebase: @Sendable (Int64, Int64) -> Void
     private var resumeURL: URL { destination.appendingPathExtension("resume") }
     // Only the serial session delegate queue accesses fileResult.
@@ -21,15 +23,18 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
         self.destination = destination; self.report = report; self.rebase = rebase
     }
 
-    func download(from url: URL) async throws -> URL {
+    func download(from url: URL) async throws -> URL { try await download(request: URLRequest(url: url)) }
+
+    func download(request: URLRequest) async throws -> URL {
+        authenticated = request.value(forHTTPHeaderField: "Authorization") != nil
         try Task.checkCancellation()
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
-        let resume = try? Data(contentsOf: resumeURL)
+        let resume = authenticated ? nil : try? Data(contentsOf: resumeURL)
         if resume?.isEmpty == false {
             savedBytes = Int64((try? String(contentsOf: resumeURL.appendingPathExtension("bytes"), encoding: .utf8)) ?? "") ?? 0
         }
         let task = resume.flatMap { $0.isEmpty ? nil : session.downloadTask(withResumeData: $0) }
-            ?? session.downloadTask(with: url)
+            ?? session.downloadTask(with: request)
         if resume?.isEmpty != false { rebase(0, -1) }
         let polling = Task {
             while !Task.isCancelled {
@@ -56,8 +61,19 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
         }
     }
 
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        guard request.url?.scheme == "https" else { completionHandler(nil); return }
+        var redirected = request
+        if request.url?.host != task.originalRequest?.url?.host {
+            redirected.setValue(nil, forHTTPHeaderField: "Authorization")
+        }
+        completionHandler(redirected)
+    }
+
     private func saveResume(_ data: Data?) throws {
-        if let data {
+        if let data, !authenticated {
             try Data(String(lock.withLock { savedBytes }).utf8).write(to: resumeURL.appendingPathExtension("bytes"), options: .atomic)
             try data.write(to: resumeURL, options: .atomic)
         }
@@ -117,7 +133,7 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
         guard !lock.withLock({ cancelled }) else { return } // Cancellation finishes only after resume data is durable.
         do {
             try saveResume((error as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
-            if error == nil { try Data().write(to: resumeURL, options: .atomic) } // A completed HTTP response consumes the old resume request.
+            if error == nil && !authenticated { try Data().write(to: resumeURL, options: .atomic) } // A completed HTTP response consumes the old resume request.
         } catch { finish(.failure(error)); return }
         finish(error.map { .failure($0) } ?? fileResult ?? .failure(URLError(.unknown)))
     }
@@ -146,6 +162,8 @@ private struct UpdateArchives {
     var runtimeZip: URL?
     var deltaZip: URL?
     var manifest: URL?
+    var privateInstaller: URL?
+    var username: String?
 }
 
 private enum UpdateDelta {
@@ -153,7 +171,7 @@ private enum UpdateDelta {
         guard let installed else { return nil }
         let from = installed.hasPrefix("v") ? installed : "v" + installed
         guard from != tag, [from, tag].allSatisfy({
-            $0.range(of: #"^v[0-9]+[.][0-9]+[.][0-9]+$"#, options: .regularExpression) != nil
+            $0.range(of: #"^v[0-9]+([.][0-9]+){1,3}$"#, options: .regularExpression) != nil
         }) else { return nil }
         return "TATWO-OS-delta-\(from)-\(tag).zip"
     }
@@ -196,9 +214,59 @@ final class InAppUpdater: ObservableObject {
                 .appendingPathComponent("Library/Application Support/TATWO OS/Updater", isDirectory: true)
     }
 
-    var resultURL: URL { directory.appendingPathComponent("result.json") }
-    var pendingURL: URL { directory.appendingPathComponent("pending.json") }
-    var logURL: URL { directory.appendingPathComponent("update.log") }
+    private var runID = UUID().uuidString
+    var resultURL: URL { directory.appendingPathComponent("results/\(runID).json") }
+    var pendingURL: URL { directory.appendingPathComponent("runs/\(runID).json") }
+    var logURL: URL { directory.appendingPathComponent("logs/\(runID).log") }
+
+    static func reconcileOnLaunch(destination: String = destinationApp) {
+        let fm = FileManager.default, dest = URL(fileURLWithPath: destination)
+        var backupDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: destination + ".old", isDirectory: &backupDirectory), backupDirectory.boolValue else { return }
+        let parent = dest.deletingLastPathComponent(), lock = parent.appendingPathComponent(".tatwo-update.lock")
+        let owned = mkdir(lock.path, 0o700) == 0
+        if owned { try? Data("\(getpid())".utf8).write(to: lock.appendingPathComponent("owner"), options: .atomic) }
+        else {
+            guard let text = try? String(contentsOf: lock.appendingPathComponent("owner"), encoding: .utf8),
+                  let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0,
+                  kill(pid, 0) != 0, errno == ESRCH else { return }
+        }
+        let guardPath = lock.appendingPathComponent("reconcile")
+        guard mkdir(guardPath.path, 0o700) == 0 else { return }
+        defer {
+            rmdir(guardPath.path)
+            if owned { try? fm.moveItem(at: lock, to: parent.appendingPathComponent(".tatwo-lock-retained.\(UUID().uuidString)")) }
+        }
+        for stage in (try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? []
+            where stage.lastPathComponent.hasPrefix(".tatwo-update.") && stage.pathExtension == "noindex" {
+            let file = stage.appendingPathComponent("transaction.json")
+            guard let data = try? Data(contentsOf: file),
+                  var record = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                  let phase = record["phase"], !["committed", "recovered", "rolled_back"].contains(phase),
+                  let owner = record["owner"].flatMap(Int32.init), owner > 0, kill(owner, 0) != 0, errno == ESRCH,
+                  record["backup"] == destination + ".old" else { continue }
+            let backup = URL(fileURLWithPath: destination + ".old")
+            do {
+                guard (try? backup.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
+                      (try? stage.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false else { continue }
+                if fm.fileExists(atPath: destination) {
+                    try fm.moveItem(at: dest, to: stage.appendingPathComponent("interrupted.app.disabled"))
+                }
+                try fm.moveItem(at: backup, to: dest)
+                record["phase"] = "recovered"
+                try JSONSerialization.data(withJSONObject: record).write(to: file, options: .atomic)
+                try Data(#"{"ok":false,"message":"interrupted_restored_on_launch"}"#.utf8)
+                    .write(to: stage.appendingPathComponent("result.json"), options: .atomic)
+            } catch { fputs("tatwo_update_reconcile=failed\n", stderr) }
+        }
+    }
+
+    private func records(_ subdirectory: String) -> [URL] {
+        ((try? fileManager.contentsOfDirectory(at: directory.appendingPathComponent(subdirectory),
+            includingPropertiesForKeys: [.contentModificationDateKey])) ?? []).filter { $0.pathExtension == "json" }
+            .sorted { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
+    }
 
     static func installScriptURL(repository: String) -> String {
         "https://raw.githubusercontent.com/\(repository)/main/install.sh"
@@ -209,7 +277,7 @@ final class InAppUpdater: ObservableObject {
         let checker = GitHubReleaseUpdateChecker.shared
         let repository = repository ?? checker.repository
         guard phase == .idle || { if case .failed = phase { return true }; return false }() else { return }
-        guard PeerUpdateSource.validTag(tag), tag.range(of: #"^v?[0-9]+[.][0-9]+([.][0-9]+)?([-+][A-Za-z0-9.-]+)?$"#, options: .regularExpression) != nil,
+        guard PeerUpdateSource.validTag(tag), tag.range(of: #"^v?[0-9]+[.][0-9]+([.][0-9]+){0,2}([-+][A-Za-z0-9.-]+)?$"#, options: .regularExpression) != nil,
               repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil
         else { phase = .failed("版本或倉庫格式無效"); return }
         guard !helperIsActive() else { phase = .failed("更新已在進行"); return }
@@ -276,40 +344,85 @@ final class InAppUpdater: ObservableObject {
         }
     }
 
-    private func helperIsActive() -> Bool {
-        guard let data = try? Data(contentsOf: pendingURL),
-              let pending = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-              let label = pending["label"], label.hasPrefix("ai.tatwo.tatwo2.updater.") else { return false }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["list", label]
-        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-        do { try process.run(); process.waitUntilExit(); return process.terminationStatus == 0 }
-        catch { return true } // 無法確認時不重派。
+    private func helperIsActive(launchctl: String = "/bin/launchctl") -> Bool {
+        for record in records("runs") {
+            let id = record.deletingPathExtension().lastPathComponent
+            guard UUID(uuidString: id) != nil else { continue } // Preserve unrelated files without treating them as runs.
+            let data = try? Data(contentsOf: record)
+            var pending = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] } ?? [:]
+            let label = "ai.tatwo.tatwo2.updater.\(id)"
+            pending["runID"] = id; pending["label"] = label
+            if pending["state"] == "reconciled" { continue }
+            let process = Process(), output = Pipe()
+            process.executableURL = URL(fileURLWithPath: launchctl)
+            process.arguments = ["list", label]
+            process.standardOutput = output; process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+                // submit may be between persisted run creation and launchd assigning a PID.
+                if pending["state"] == "submitted", let started = pending["submittedAt"].flatMap(Double.init),
+                   Date().timeIntervalSince1970 - started < 30 { return true }
+                guard [0, 113].contains(process.terminationStatus) else { return true }
+                if process.terminationStatus == 0 {
+                    let text = String(decoding: data, as: UTF8.self)
+                    if text.range(of: #""PID"\s*=\s*[1-9][0-9]*"#, options: .regularExpression) != nil { return true }
+                    // A loaded job without PID is not running. Remove stale launchd state.
+                    let remove = Process(); remove.executableURL = process.executableURL
+                    remove.arguments = ["remove", label]; try remove.run(); remove.waitUntilExit()
+                    if remove.terminationStatus != 0 { return true }
+                }
+                if let id = pending["runID"], UUID(uuidString: id) != nil {
+                    let result = directory.appendingPathComponent("results/\(id).json")
+                    if !fileManager.fileExists(atPath: result.path) {
+                        try JSONSerialization.data(withJSONObject: ["runID": id, "ok": false,
+                            "tag": pending["tag"] ?? "", "message": "helper_exited_abnormally"])
+                            .write(to: result, options: .atomic)
+                    }
+                }
+                var reconciled = pending; reconciled["state"] = "reconciled"
+                try JSONSerialization.data(withJSONObject: reconciled).write(to: record, options: .atomic)
+            } catch { return true } // Unable to establish liveness: fail closed.
+        }
+        return false
     }
 
     private func prefetch(tag: String, repository: String, session: URLSession, id: UUID) async throws -> UpdateArchives {
-        struct Asset: Decodable { let name: String; let browser_download_url: String; let size: Int64 }
-        struct Release: Decodable { let tag_name: String; let draft: Bool; let assets: [Asset] }
+        struct Asset: Decodable { let id: Int64?; let name: String; let browser_download_url: String; let size: Int64 }
+        struct Release: Decodable { let tag_name: String; let draft: Bool; let prerelease: Bool; let assets: [Asset] }
         func failure(_ message: String) -> NSError { NSError(domain: "Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
         func check(_ response: URLResponse) throws {
             try UpdateDownloadProgress.check(response)
         }
+        let channel = UpdateChannel.current()
+        if repository == UpdateChannel.privateRepository && !channel.isPrivate { throw failure("私人通道需要 GitHub 登入") }
         var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/releases/tags/\(tag)")!,
                                  cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("TATWO-OS-UpdateChecker", forHTTPHeaderField: "User-Agent")
+        channel.authorize(&request)
         let (data, _) = try await retryDownload {
             let result = try await session.data(for: request); try check(result.1); return result
         }
         let release = try JSONDecoder().decode(Release.self, from: data)
-        guard release.tag_name == tag, !release.draft,
+        guard release.tag_name == tag, !release.draft, !release.prerelease,
               release.assets.contains(where: { $0.name == "TATWO-OS.install-ready" }) else { throw failure("此版本尚未完成安裝驗收") }
         func asset(_ name: String) throws -> Asset {
             guard let asset = release.assets.first(where: { $0.name == name }),
                   asset.browser_download_url.hasPrefix("https://github.com/\(repository)/releases/download/"),
                   URL(string: asset.browser_download_url) != nil else { throw failure("版本附件缺少或下載網址不符") }
             return asset
+        }
+        func assetRequest(_ asset: Asset) throws -> URLRequest {
+            var url = URL(string: asset.browser_download_url)!
+            if repository == UpdateChannel.privateRepository {
+                guard let id = asset.id, id > 0 else { throw failure("私人附件缺少 ID") }
+                url = URL(string: "https://api.github.com/repos/\(repository)/releases/assets/\(id)")!
+            }
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+            channel.authorize(&request)
+            return request
         }
         let split = release.assets.contains { $0.name == "TATWO-OS-app.zip" }
         var archives = [try asset(split ? "TATWO-OS-app.zip" : "TATWO-OS.zip")]
@@ -340,8 +453,7 @@ final class InAppUpdater: ObservableObject {
         for archive in archives {
             let checksum = try asset(archive.name + ".sha256")
             let (sha, _) = try await retryDownload {
-                let result = try await session.data(for: URLRequest(url: URL(string: checksum.browser_download_url)!,
-                    cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
+                let result = try await session.data(for: try assetRequest(checksum))
                 try check(result.1); return result
             }
             let expected = String(decoding: sha, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
@@ -391,7 +503,7 @@ final class InAppUpdater: ObservableObject {
                         self.recordDownloadProgress(offset + written, total: max(plannedBytes, offset + max(0, total)))
                     }
                 }
-                return try await progress.download(from: URL(string: archive.browser_download_url)!)
+                return try await progress.download(request: try assetRequest(archive))
             }
             try Task.checkCancellation()
             guard try await Self.digest(zip) == expected.lowercased() else {
@@ -416,6 +528,17 @@ final class InAppUpdater: ObservableObject {
             else if archive.name == "TATWO-OS.manifest.json" { result.manifest = zip }
             else if archive.name == deltaName { result.deltaZip = zip }
             else { result.runtimeZip = zip }
+        }
+        if repository == UpdateChannel.privateRepository {
+            // Fetch the installer at the selected tag; never serialize Authorization into the helper.
+            var scriptRequest = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/contents/scripts/install-private.sh?ref=\(tag)")!)
+            scriptRequest.setValue("application/vnd.github.raw+json", forHTTPHeaderField: "Accept")
+            channel.authorize(&scriptRequest)
+            let (script, response) = try await session.data(for: scriptRequest)
+            try check(response)
+            let local = folder.appendingPathComponent("install-private.sh")
+            try script.write(to: local, options: .atomic)
+            result.privateInstaller = local; result.username = channel.username
         }
         downloadProgress = 1
         return result
@@ -451,21 +574,31 @@ final class InAppUpdater: ObservableObject {
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
                                             attributes: [.posixPermissions: 0o700])
-            try? fileManager.removeItem(at: resultURL)
             let stamp = ISO8601DateFormatter().string(from: Date())
                 .replacingOccurrences(of: ":", with: "-")
-            let label = "ai.tatwo.tatwo2.updater.\(stamp).\(UUID().uuidString)"
-            let script = directory.appendingPathComponent("update-\(stamp).sh")
+            let lock = directory.appendingPathComponent("dispatch.lock")
+            let descriptor = Darwin.open(lock.path, O_CREAT | O_RDWR, 0o600)
+            guard descriptor >= 0 else { phase = .failed("無法取得更新派送鎖"); return }
+            defer { flock(descriptor, LOCK_UN); close(descriptor) }
+            guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { phase = .failed("更新派送中"); return }
+            guard !helperIsActive() else { phase = .failed("更新已在進行"); return }
+            runID = UUID().uuidString
+            for folder in ["runs", "results", "logs", "acks"] {
+                try fileManager.createDirectory(at: directory.appendingPathComponent(folder), withIntermediateDirectories: true)
+            }
+            let label = "ai.tatwo.tatwo2.updater.\(runID)"
+            let script = directory.appendingPathComponent("update-\(runID).sh")
             try Self.helperScript(
                 tag: tag, pid: ProcessInfo.processInfo.processIdentifier,
                 installURL: Self.installScriptURL(repository: repository),
                 resultPath: resultURL.path, logPath: logURL.path,
                 destination: Self.destinationApp, label: label, prefetchedZip: zip.zip?.path ?? "",
                 prefetchedAppZip: zip.appZip?.path ?? "", prefetchedRuntimeZip: zip.runtimeZip?.path ?? "",
-                prefetchedDeltaZip: zip.deltaZip?.path ?? "", prefetchedManifest: zip.manifest?.path ?? ""
+                prefetchedDeltaZip: zip.deltaZip?.path ?? "", prefetchedManifest: zip.manifest?.path ?? "",
+                privateInstaller: zip.privateInstaller?.path ?? "", githubUsername: zip.username ?? ""
             ).write(to: script, atomically: true, encoding: .utf8)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-            let pending = ["label": label, "tag": tag, "startedAt": stamp, "log": logURL.path]
+            let pending = ["label": label, "tag": tag, "startedAt": stamp, "log": logURL.path, "runID": runID, "state": "submitted", "submittedAt": String(Date().timeIntervalSince1970)]
             try JSONSerialization.data(withJSONObject: pending).write(to: pendingURL, options: .atomic)
 
             // launchd 接手：不是 App 的子進程，App 退出後仍存活。
@@ -478,7 +611,7 @@ final class InAppUpdater: ObservableObject {
             launch.waitUntilExit()
             guard launch.terminationStatus == 0 else {
                 phase = .failed("無法啟動更新程序（launchctl \(launch.terminationStatus)）")
-                try? fileManager.removeItem(at: pendingURL)
+                // Preserve the run record for reconciliation.
                 return
             }
             phase = .handedOff
@@ -488,32 +621,30 @@ final class InAppUpdater: ObservableObject {
             }
         } catch {
             phase = .failed("無法準備更新：\(error.localizedDescription)")
-            try? fileManager.removeItem(at: pendingURL)
+            // Preserve the run record for reconciliation.
         }
     }
 
-    /// 啟動時呼叫一次：把上一輪 helper 的結果搬進 UI，並清掉檔案。
+    /// Read immutable per-run receipts; acknowledge by run ID, never delete a result.
     func consumeResultOnLaunch() {
         Task { await PeerUpdateSource.publishInstalled(directory) }
-        defer { try? fileManager.removeItem(at: resultURL) }
-        if let data = try? Data(contentsOf: resultURL),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let ok = object["ok"] as? Bool ?? false
-            let tag = object["tag"] as? String ?? ""
-            let message = object["message"] as? String ?? ""
-            lastResult = ok
-                ? "已更新到 \(tag)"
-                : "更新 \(tag) 未完成（\(Self.describe(message))）；原版已保留。紀錄：\(logURL.path)"
-            if !helperIsActive() { try? fileManager.removeItem(at: pendingURL) }
+        let active = helperIsActive()
+        defer { if active { Task { try? await Task.sleep(for: .seconds(2)); consumeResultOnLaunch() } } }
+        for result in records("results").prefix(1) {
+            let id = result.deletingPathExtension().lastPathComponent
+            let ack = directory.appendingPathComponent("acks/\(id).ack")
+            guard UUID(uuidString: id) != nil, !fileManager.fileExists(atPath: ack.path),
+                  let data = try? Data(contentsOf: result),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["runID"] as? String == id else { continue }
+            let tag = object["tag"] as? String ?? "", message = object["message"] as? String ?? ""
+            lastResult = (object["ok"] as? Bool == true) ? "已更新到 \(tag)" : "更新 \(tag) 未完成（\(Self.describe(message))）"
+            try? fileManager.createDirectory(at: ack.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(id.utf8).write(to: ack, options: .atomic)
             return
         }
-        // 有 pending 但沒 result：helper 還在等，或 App 被人手動重開。不擋使用者，只提示。
-        if helperIsActive() { lastResult = "更新已在進行"; return }
-        if let data = try? Data(contentsOf: pendingURL),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let tag = object["tag"] as? String {
-            lastResult = "上次更新 \(tag) 沒有留下結果；若沒有自動完成，請再按一次更新。"
-            try? fileManager.removeItem(at: pendingURL)
+        if active {
+            lastResult = "更新已在進行"
         }
     }
 
@@ -536,7 +667,8 @@ final class InAppUpdater: ObservableObject {
                              resultPath: String, logPath: String,
                              destination: String, label: String, prefetchedZip: String,
                              prefetchedAppZip: String = "", prefetchedRuntimeZip: String = "",
-                             prefetchedDeltaZip: String = "", prefetchedManifest: String = "") -> String {
+                             prefetchedDeltaZip: String = "", prefetchedManifest: String = "",
+                             privateInstaller: String = "", githubUsername: String = "") -> String {
         """
         #!/bin/bash
         set -u
@@ -547,17 +679,33 @@ final class InAppUpdater: ObservableObject {
         LOG=\(quoted(logPath))
         DEST=\(quoted(destination))
         LABEL=\(quoted(label))
+        RUN_ID="${LABEL##*.}"
+        RUN="$(dirname "$(dirname "$RESULT")")/runs/$RUN_ID.json"
         PREFETCHED_ZIP=\(quoted(prefetchedZip))
         export TATWO_OS_PREFETCHED_APP_ZIP=\(quoted(prefetchedAppZip))
         export TATWO_OS_PREFETCHED_RUNTIME_ZIP=\(quoted(prefetchedRuntimeZip))
         export TATWO_OS_PREFETCHED_DELTA_ZIP=\(quoted(prefetchedDeltaZip))
         export TATWO_OS_PREFETCHED_MANIFEST=\(quoted(prefetchedManifest))
+        PRIVATE_INSTALLER=\(quoted(privateInstaller))
+        export TATWO_OS_GITHUB_USERNAME=\(quoted(githubUsername))
         WAIT=\(helperWaitSeconds)
         export PATH=/usr/bin:/bin:/usr/sbin:/sbin
         write_result() {
-          printf '{"ok":%s,"tag":"%s","message":"%s"}\\n' "$1" "$TAG" "$2" > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
+          printf '{"ok":%s,"tag":"%s","message":"%s","runID":"%s"}\\n' "$1" "$TAG" "$2" "$RUN_ID" > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
         }
+        abnormal_exit() {
+          trap - EXIT INT TERM
+          write_result false helper_exited_abnormally
+          if [ -f "$RUN" ]; then plutil -replace state -string abnormal_exit "$RUN"; fi
+          launchctl remove "$LABEL" >/dev/null 2>&1
+          exit 0
+        }
+        trap abnormal_exit EXIT INT TERM
+        # launchd must not rerun installation after any terminal receipt.
+        if [ -f "$RESULT" ]; then trap - EXIT INT TERM; launchctl remove "$LABEL" >/dev/null 2>&1; exit 0; fi
         finish() {
+          trap - EXIT INT TERM
+          if [ -f "$RUN" ]; then plutil -replace state -string terminal "$RUN"; fi
           # 同步移除，允許 launchd 結束自己；若 remove 返回也只 exit 0，絕不觸發失敗重跑。
           launchctl remove "$LABEL" >/dev/null 2>&1
           exit 0
@@ -574,7 +722,9 @@ final class InAppUpdater: ObservableObject {
           write_result false app_relaunched
           finish
         fi
-        if [ -n "${TATWO2_UPDATE_INSTALL_SCRIPT:-}" ]; then
+        if [ -n "$PRIVATE_INSTALLER" ]; then
+          SCRIPT="$PRIVATE_INSTALLER"
+        elif [ -n "${TATWO2_UPDATE_INSTALL_SCRIPT:-}" ]; then
           SCRIPT="$TATWO2_UPDATE_INSTALL_SCRIPT"
         else
           SCRIPT="$(mktemp "${TMPDIR:-/tmp}/tatwo-install.XXXXXX")" || {

@@ -23,7 +23,7 @@ test('update card offers a one-click update and keeps the terminal path as an ad
   assert.match(card, /Button\(updateButtonTitle\) \{ updater\.update\(to: release\.tag_name\) \}/);
   assert.match(card, /\.buttonStyle\(\.borderedProminent\)/);
   assert.match(card, /DisclosureGroup\("進階：用終端機更新"\)/);
-  assert.match(card, /GitHubReleaseUpdateChecker\.installCommand/);
+  assert.match(card, /checker\.terminalInstallCommand/);
   assert.match(stubs, /InAppUpdater\.shared\.consumeResultOnLaunch\(\)/);
 });
 
@@ -52,7 +52,7 @@ function renderHelper({ pid, resultPath, logPath, destination, label, prefetched
     .replace('\\(helperWaitSeconds)', String(wait))
     .replace(/\\\(quoted\((\w+)\)\)/g, (_, key) => {
       const values = { tag: 'v9.9.9', installURL: 'https://invalid.example/install.sh',
-        resultPath, logPath, destination, label, prefetchedZip, prefetchedAppZip, prefetchedRuntimeZip, prefetchedDeltaZip, prefetchedManifest };
+        resultPath, logPath, destination, label, prefetchedZip, prefetchedAppZip, prefetchedRuntimeZip, prefetchedDeltaZip, prefetchedManifest, privateInstaller: "", githubUsername: "" };
       return "'" + values[key].replaceAll("'", "'\\''") + "'";
     });
 }
@@ -99,9 +99,9 @@ function run(fakeInstallExit, options = {}) {
   const script = join(dir, 'helper.sh');
   const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
   writeFileSync(script, renderHelper({
-    pid, resultPath: join(dir, 'result.json'), logPath: join(dir, 'update.log'),
+    pid, resultPath: join(dir, options.runID ? options.runID + '.json' : 'result.json'), logPath: join(dir, 'update.log'),
     destination, prefetchedZip, prefetchedAppZip: options.appZip ?? '', prefetchedRuntimeZip: options.runtimeZip ?? '', prefetchedDeltaZip: options.deltaZip ?? '', prefetchedManifest: options.manifest ?? '',
-    label: 'ai.tatwo.tatwo2.updater.test', wait: options.stillRunning ? 0 : 10,
+    label: 'ai.tatwo.tatwo2.updater.' + (options.runID ?? 'test'), wait: options.stillRunning ? 0 : 10,
   }).replace('export PATH=/usr/bin:/bin:/usr/sbin:/sbin', `export PATH=${quote(bin)}:/usr/bin:/bin:/usr/sbin:/sbin`));
   const started = Date.now();
   const result = spawnSync('bash', [script], { env: { ...process.env,
@@ -112,14 +112,14 @@ function run(fakeInstallExit, options = {}) {
   assert.equal(result.status, 0, result.stderr.toString());
   assert.match(readFileSync(join(dir, 'launchctl.calls'), 'utf8'), /remove ai\.tatwo\.tatwo2\.updater\.test/);
   return { dir, result, prefetchedZip, waited: Date.now() - started,
-    receipt: JSON.parse(readFileSync(join(dir, 'result.json'), 'utf8')) };
+    receipt: JSON.parse(readFileSync(join(dir, options.runID ? options.runID + '.json' : 'result.json'), 'utf8')) };
 }
 
 test('helper waits for exit, passes pinned version and prefetched path, and records success', () => {
   const { dir, waited, prefetchedZip, receipt } = run(0, { waitForApp: true });
   assert.ok(waited >= 1500, `helper must wait for the app pid to exit (waited ${waited}ms)`);
   assert.equal(readFileSync(join(dir, 'install.calls'), 'utf8'), `version=v9.9.9\nzip=${prefetchedZip}\n`);
-  assert.deepEqual(receipt, { ok: true, tag: 'v9.9.9', message: 'installed' });
+  assert.deepEqual(receipt, { ok: true, tag: 'v9.9.9', message: 'installed', runID: 'test' });
   assert.ok(!existsSync(join(dir, 'open.calls')), 'installer opens the new app itself');
 });
 
@@ -365,7 +365,7 @@ ${resumeBytes}
 
 test('failure reopens only a stopped App and exits zero even if launchctl removal fails', () => {
   const { dir, receipt } = run(3, { removeFail: true });
-  assert.deepEqual(receipt, { ok: false, tag: 'v9.9.9', message: 'install_failed_exit_3' });
+  assert.deepEqual(receipt, { ok: false, tag: 'v9.9.9', message: 'install_failed_exit_3', runID: 'test' });
   assert.match(readFileSync(join(dir, 'open.calls'), 'utf8'), /TATWO OS\.app/);
   const restarted = run(3, { relaunchDuring: true });
   assert.equal(restarted.receipt.message, 'install_failed_exit_3');
@@ -383,7 +383,7 @@ for (const relaunchAt of [1, 2]) {
 
 test('real suffix-free mktemp succeeds twice in the same TMPDIR', () => {
   const { dir } = run(0, { fetchScript: true });
-  run(0, { dir, fetchScript: true });
+  run(0, { dir, fetchScript: true, runID: 'second' });
   const paths = readFileSync(join(dir, 'curl.calls'), 'utf8').trim().split('\n');
   assert.equal(new Set(paths).size, 2);
   for (const path of paths) {
@@ -420,7 +420,7 @@ test('source guards: progress, cancel, verified cache, active helper, zero exits
   assert.match(updater, /guard !helperIsActive\(\)/);
   assert.match(updater, /case "app_relaunched"/);
   const helper = updater.split('// UPDATE-HELPER-BEGIN')[1];
-  assert.doesNotMatch(helper, /exit (?!0\b)/);
+  assert.doesNotMatch(helper, /\bexit (?!0\b)/);
   assert.doesNotMatch(helper, /launchctl remove[^\n]*&\s*$/m);
   assert.doesNotMatch(helper, /tatwo-install\.XXXXXX\.sh/);
 });
@@ -429,7 +429,7 @@ test('sidebar observes releases/progress and opens the existing GitHub settings 
   const source = path => readFileSync(new URL(`../App/Sources/Tatwo2/${path}`, import.meta.url), 'utf8');
   assert.match(card, /struct SidebarUpdateShortcut/);
   assert.match(card, /if let release = checker\.availableRelease, !checker\.dismissed/);
-  assert.ok(card.includes('有新版 \\(release.tag_name)'));
+  assert.ok(card.includes('checker.isPrivateChannel ? "私人通道 · " : "有新版 "'));
   assert.match(card, /updater\.downloadProgress\.map/);
   assert.match(source('Chat/ChatPage+Sidebar.swift'), /SidebarUpdateShortcut \{\s*updateSettingsSection = \.github/);
   assert.match(source('Chat/ChatPage+Panels.swift'), /TatwoSettingsPage\(model: model, initialSection: updateSettingsSection\)/);
@@ -447,7 +447,7 @@ test('relaunch checks use the packaged executable name, not the SwiftPM product 
 
 test('W19 source guards: session delegate, synchronous move, polling, monotonic progress and speed copy', () => {
   assert.match(updater, /URLSession\(configuration: \.ephemeral, delegate: self, delegateQueue: nil\)/);
-  assert.match(updater, /session\.downloadTask\(with: url\)/);
+  assert.match(updater, /session\.downloadTask\(with: request\)/);
   assert.match(updater, /withCheckedThrowingContinuation/);
   assert.match(updater, /task\.cancel\(byProducingResumeData:/);
   const finish = updater.slice(updater.indexOf('didFinishDownloadingTo location:'),
@@ -593,3 +593,108 @@ ${status}
       await new Promise(resolve => server.close(resolve));
     }
   });
+
+test('W26 terminal helper receipt is idempotent; two run IDs never overwrite each other', () => {
+  const first = run(0);
+  run(3, {dir:first.dir}); // Simulated launchd rerun of the same run: installer must not execute again.
+  assert.equal(readFileSync(join(first.dir,'install.calls'),'utf8').split('version=').length-1,1);
+  assert.equal(JSON.parse(readFileSync(join(first.dir,'result.json'))).ok,true);
+  const second = run(3,{dir:first.dir,runID:'second'});
+  assert.equal(second.receipt.runID,'second'); assert.equal(second.receipt.ok,false);
+  assert.equal(JSON.parse(readFileSync(join(first.dir,'result.json'))).ok,true);
+  assert.match(updater,/update-\\\(runID\)\.sh/);
+  assert.match(updater,/results\/\\\(runID\)\.json/);
+  assert.match(updater,/flock\(descriptor, LOCK_EX \| LOCK_NB\)/);
+});
+
+test('W26 actual Swift run liveness removes stale labels and acknowledges newest result by UUID', () => {
+  const dir=mkdtempSync(join(tmpdir(),'w26-runs-'));
+  const reconcile=updater.slice(updater.indexOf('    static func reconcileOnLaunch('),updater.indexOf('    private func records('));
+  const records=updater.slice(updater.indexOf('    private func records('),updater.indexOf('    static func installScriptURL'));
+  const active=updater.slice(updater.indexOf('    private func helperIsActive('),updater.indexOf('    private func prefetch(')).replace('private func','func');
+  const consume=updater.slice(updater.indexOf('    func consumeResultOnLaunch()'),updater.indexOf('    static func describe('));
+  const script=join(dir,'launchctl');
+  writeFileSync(script,`#!/bin/bash
+if [ "$1" = list ]; then
+ case "$(cat '${dir}/state')" in
+ running) echo '\"PID\" = 12345;'; exit 0;;
+ absent) exit 113;;
+ *) echo '\"LastExitStatus\" = 0;'; exit 0;;
+ esac
+fi
+echo "$*" >> '${dir}/removed'
+[ "$(cat '${dir}/state')" != remove-fails ]
+`,{mode:0o755});
+  writeFileSync(join(dir,'probe.swift'),`
+import Foundation
+import Darwin
+@MainActor enum PeerUpdateSource { static func publishInstalled(_ u: URL) async {} }
+@MainActor final class Probe {
+ let fileManager=FileManager.default
+ let directory=URL(fileURLWithPath:${JSON.stringify(dir)})
+ var lastResult: String?
+ static let destinationApp="/fixture/not-used"
+ ${reconcile}
+ ${records}
+ ${active.replace('launchctl: String = "/bin/launchctl"',`launchctl: String = ${JSON.stringify(script)}`)}
+ ${consume}
+ static func describe(_ message: String) -> String { message }
+}
+@main struct Main {
+ @MainActor static func main() throws {
+ let p=Probe(), fm=FileManager.default
+ let parent=p.directory.appendingPathComponent("Applications"), dest=parent.appendingPathComponent("TATWO OS.app")
+ let stage=parent.appendingPathComponent(".tatwo-update.fixture.noindex")
+ try fm.createDirectory(at:stage,withIntermediateDirectories:true)
+ try fm.createDirectory(atPath:dest.path+".old",withIntermediateDirectories:true)
+ try JSONSerialization.data(withJSONObject:["owner":"99999999","phase":"replacing","backup":dest.path+".old"])
+   .write(to:stage.appendingPathComponent("transaction.json"))
+ Probe.reconcileOnLaunch(destination:dest.path)
+ precondition(fm.fileExists(atPath:dest.path))
+ precondition(fm.fileExists(atPath:stage.appendingPathComponent("result.json").path))
+ let before=try fm.contentsOfDirectory(atPath:parent.path).sorted()
+ Probe.reconcileOnLaunch(destination:dest.path)
+ let after=try fm.contentsOfDirectory(atPath:parent.path).sorted(); precondition(before==after)
+ for name in ["runs","results","acks"] { try fm.createDirectory(at:p.directory.appendingPathComponent(name),withIntermediateDirectories:true) }
+ let id=UUID().uuidString
+ let record=p.directory.appendingPathComponent("runs/\\(id).json")
+ try JSONSerialization.data(withJSONObject:["runID":id,"label":"ai.tatwo.tatwo2.updater."+id,"tag":"v2.0.6"]).write(to:record)
+ func state(_ s:String) throws { try s.write(to:p.directory.appendingPathComponent("state"),atomically:true,encoding:.utf8) }
+ try Data("broken-json".utf8).write(to:record)
+ try state("running"); precondition(p.helperIsActive())
+ try state("remove-fails"); precondition(p.helperIsActive())
+ try state("stale"); precondition(!p.helperIsActive())
+ let result=p.directory.appendingPathComponent("results/\\(id).json")
+ let data=try Data(contentsOf:result)
+ var pending = ["runID":id,"label":"ai.tatwo.tatwo2.updater."+id,"tag":"v2.0.6", "state":"submitted", "submittedAt":String(Date().timeIntervalSince1970)]
+ try JSONSerialization.data(withJSONObject:pending).write(to:record)
+ try state("absent"); precondition(p.helperIsActive())
+ pending["submittedAt"]="0"; try JSONSerialization.data(withJSONObject:pending).write(to:record)
+ precondition(!p.helperIsActive())
+ precondition(String(decoding:data,as:UTF8.self).contains("helper_exited_abnormally"))
+ try state("absent"); p.consumeResultOnLaunch()
+ precondition(fm.fileExists(atPath:p.directory.appendingPathComponent("acks/\\(id).ack").path))
+ precondition(try Data(contentsOf:result)==data)
+ print("stale label + run result + ack PASS")
+ }
+}
+`.replace('precondition(try Data(contentsOf:result)==data)','let retained=try Data(contentsOf:result); precondition(retained==data)'));
+  let r=spawnSync('swiftc',['-parse-as-library','-num-threads','2',join(dir,'probe.swift'),'-o',join(dir,'probe')],{encoding:'utf8',timeout:120000});
+  assert.equal(r.status,0,r.stderr);
+  r=spawnSync(join(dir,'probe'),[],{encoding:'utf8'}); assert.equal(r.status,0,r.stderr);
+  assert.match(readFileSync(join(dir,'removed'),'utf8'),/remove ai\.tatwo\.tatwo2\.updater\./);
+});
+
+test('W26 helper abnormal TERM writes a terminal failure instead of restart installation', () => {
+  const dir=mkdtempSync(join(tmpdir(),'w26-helper-term-'));
+  const destination=join(dir,'App'); mkdirSync(destination);
+  const result=join(dir,'receipt.json');
+  let body=renderHelper({pid:99999999,resultPath:result,logPath:join(dir,'log'),destination,
+    label:'ai.tatwo.tatwo2.updater.test',prefetchedZip:''});
+  // Signal the real rendered helper immediately after trap installation; no system launchd access.
+  body=body.replace('trap abnormal_exit EXIT INT TERM',() => 'trap abnormal_exit EXIT INT TERM\nkill -TERM $$');
+  body=body.replaceAll('launchctl remove "$LABEL" >/dev/null 2>&1',':');
+  const r=spawnSync('bash',['-c',body],{encoding:'utf8'});
+  assert.equal(r.status,0,r.stderr);
+  assert.equal(JSON.parse(readFileSync(result)).message,'helper_exited_abnormally');
+});

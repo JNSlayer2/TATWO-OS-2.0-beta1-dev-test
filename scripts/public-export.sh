@@ -48,6 +48,7 @@ roots.push('config/tatwo-sync-catalog-v1.json', 'config/tatwo-durable-surface-in
 const files = execFileSync('git', ['-C', process.env.SOURCE, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...roots], { maxBuffer: 64 * 1024 * 1024 }).toString().split('\0').filter(Boolean);
 const banned = new Set(['docs', 'note.md', '經驗.md', 'CLAUDE.md', 'AGENTS.md', '.seedmux', '.tatwo2', '.review-tmp', 'output', 'goldens', 'shots', 'runtime-backups', '.git', 'node_modules', 'dist']);
 for (const file of [...new Set(files)].sort()) {
+  if (['scripts/install-private.sh', 'scripts/promote-release.sh', 'scripts/withdraw-release.sh'].includes(file)) continue;
   if (file.startsWith('App/Sources/Tatwo2/_archived/')) continue;
   if (file.split('/').some(part => banned.has(part) || part.startsWith('.build') || /\.sqlite/.test(part))) continue;
   process.stdout.write(file + '\0');

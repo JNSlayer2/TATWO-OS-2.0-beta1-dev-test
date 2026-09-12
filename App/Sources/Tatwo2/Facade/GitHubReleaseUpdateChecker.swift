@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 
-/// SemVer precedence; accepts Apple's two-component bundle versions as x.y.0.
+/// Release-train precedence; accepts 2–4 numeric components, padding missing components with zero.
 /// Invalid input fails closed. Numeric strings avoid integer overflow.
 enum ReleaseVersionCompare {
     private struct Version {
@@ -24,10 +24,10 @@ enum ReleaseVersionCompare {
             }
             let parts = build[0].split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
             let numbers = parts[0].split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-            guard (2...3).contains(numbers.count),
-                  numbers.allSatisfy({ ReleaseVersionCompare.numeric($0) && ($0 == "0" || !$0.hasPrefix("0")) })
+            guard (2...4).contains(numbers.count),
+                  numbers.enumerated().allSatisfy({ index, value in ReleaseVersionCompare.numeric(value) && (index == 3 || value == "0" || !value.hasPrefix("0")) })
             else { return nil }
-            core = numbers.count == 2 ? numbers + ["0"] : numbers
+            core = numbers.map { String($0.drop(while: { $0 == "0" })).isEmpty ? "0" : String($0.drop(while: { $0 == "0" })) } + Array(repeating: "0", count: 4 - numbers.count)
             if parts.count == 2 {
                 let ids = parts[1].split(separator: ".", omittingEmptySubsequences: false)
                 guard ids.allSatisfy(validIdentifier),
@@ -66,6 +66,31 @@ enum ReleaseVersionCompare {
     }
 }
 
+/// A credential stays in memory; marker alone never authorizes the private repository.
+struct UpdateChannel {
+    static let privateRepository = "tatwo214/TATWO-OS-2.0-private"
+    let requestedPrivate: Bool
+    let username: String?
+    let token: String?
+    var isPrivate: Bool { requestedPrivate && token?.isEmpty == false }
+    static func current() -> Self {
+        let marker = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/tatwo2/os/update-channel")
+        let requested = (try? String(contentsOf: marker, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "private"
+        guard requested else { return Self(requestedPrivate: false, username: nil, token: nil) }
+        let store = GitHubAccountsStore()
+        let account = try? store.loadAccounts().first
+        let token = account.flatMap { try? store.mcpToken(username: $0.username) }
+        return Self(requestedPrivate: true, username: account?.username, token: token)
+    }
+    func authorize(_ request: inout URLRequest) {
+        guard isPrivate, request.url?.scheme == "https", request.url?.host == "api.github.com",
+              request.url?.path.hasPrefix("/repos/\(Self.privateRepository)/") == true else { return }
+        request.setValue("Bearer \(token!)", forHTTPHeaderField: "Authorization")
+    }
+}
+
 @MainActor
 final class GitHubReleaseUpdateChecker: ObservableObject {
     struct Release: Decodable, Equatable {
@@ -78,16 +103,23 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
     static let shared = GitHubReleaseUpdateChecker()
     static let defaultRepository = "tatwo214/TATWO-OS-2.0-beta1-dev-test"
     static let installCommand = "curl -fsSL https://raw.githubusercontent.com/tatwo214/TATWO-OS-2.0-beta1-dev-test/main/install.sh | bash"
+    var terminalInstallCommand: String {
+        isPrivateChannel
+            ? "gh api 'repos/\(UpdateChannel.privateRepository)/contents/scripts/install-private.sh?ref=beta1/integration' -H 'Accept: application/vnd.github.raw+json' | bash"
+            : Self.installCommand
+    }
     @Published private(set) var availableRelease: Release?
     @Published private(set) var isChecking = false
     @Published private(set) var status = ""
+    @Published private(set) var isPrivateChannel = false
     @Published private(set) var lastCheckedAt: Date?
     @Published private(set) var dismissed = false
     private var schedule: Task<Void, Never>?
     private let defaults: UserDefaults
     let session: URLSession
     var repository: String {
-        (defaults.string(forKey: "tatwo2.feedback.repository") ?? Self.defaultRepository)
+        if UpdateChannel.current().isPrivate { return UpdateChannel.privateRepository }
+        return (defaults.string(forKey: "tatwo2.feedback.repository") ?? Self.defaultRepository)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
     private let installedVersion: String
@@ -121,6 +153,10 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
         guard !isChecking else { return }
         isChecking = true
         defer { lastCheckedAt = Date(); isChecking = false }
+        let channel = UpdateChannel.current()
+        if isPrivateChannel != channel.isPrivate { availableRelease = nil }
+        isPrivateChannel = channel.isPrivate
+        defer { if channel.requestedPrivate && !channel.isPrivate { status = "私人通道需要 GitHub 登入" } }
         let repository = self.repository
         guard repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil,
               let url = URL(string: "https://api.github.com/repos/\(repository)/releases/latest")
@@ -128,6 +164,7 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("TATWO-OS-UpdateChecker", forHTTPHeaderField: "User-Agent")
+        channel.authorize(&request)
         do {
             let (data, response) = try await session.data(for: request)
             guard let response = response as? HTTPURLResponse else {

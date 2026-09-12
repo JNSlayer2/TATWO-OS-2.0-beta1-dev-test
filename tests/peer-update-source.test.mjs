@@ -17,12 +17,12 @@ test('GitHub release and all fresh checksums precede peer lookup; misses alone d
   const positions = ['let release =', 'var expectedHashes:', 'expectedHashes[archive.name] =',
     'PeerUpdateSource.discover(DeviceRegistry().list())', 'for offer in offers',
     'Self.digest(candidate), actual == expected', 'moveItem(at: candidate, to: zip)',
-    'progress.download(from:', 'Self.digest(zip) == expected.lowercased()',
+    'progress.download(request:', 'Self.digest(zip) == expected.lowercased()',
     'PeerUpdateSource.publish(directory, tag: tag)'].map(s => updater.indexOf(s, updater.indexOf('private func prefetch')));
   // The first digest(zip) belongs to the independently revalidated local cache.
   positions[8] = updater.indexOf('Self.digest(zip) == expected.lowercased()', positions[7]);
   assert.ok(positions.every((n, i) => n >= 0 && (!i || n > positions[i - 1])), positions);
-  assert.match(updater, /session\.data\(for: URLRequest[\s\S]*reloadIgnoringLocalCacheData/);
+  assert.match(updater, /session\.data\(for: try assetRequest\(checksum\)\)/);
   assert.match(updater, /try\? await PeerUpdateSource\.pull[\s\S]*try\? await Self\.digest/);
   assert.match(updater, /try Task\.checkCancellation\(\)\s+downloadSource = deltaProgress \+ "從 GitHub 下載…"/);
   assert.match(updater, /invalid-\\\(UUID\(\)\.uuidString\)/);
@@ -180,13 +180,23 @@ test('production prefetch decision executes SHA gates and per-archive fallback w
 import Foundation
 import CryptoKit
 ${entry}
-struct Asset: Codable { let name: String; let browser_download_url: String; let size: Int64 }
-struct Release: Codable { let tag_name: String; let draft: Bool; let assets: [Asset] }
+struct UpdateChannel {
+  static let privateRepository = "tatwo214/TATWO-OS-2.0-private"
+  var isPrivate: Bool { IO.mode == "private" }
+  var username: String? { "fixture" }
+  static func current() -> Self { Self() }
+  func authorize(_ request: inout URLRequest) {
+    if isPrivate { request.setValue("Bearer fixture-only", forHTTPHeaderField: "Authorization") }
+  }
+}
+struct Asset: Codable { let id: Int; let name: String; let browser_download_url: String; let size: Int64 }
+struct Release: Codable { let tag_name: String; let draft: Bool; var prerelease = false; let assets: [Asset] }
 ${updater.slice(updater.indexOf('private struct UpdateArchives'), updater.indexOf('@MainActor\nfinal class InAppUpdater')).replaceAll('private ', '')}
 enum UpdateRuntimeLayer { static func canReuse(contents: URL, archiveName: String) -> Bool { false } }
 struct DeviceRegistry { func list() -> [String] { ["paired"] } }
 enum IO {
   static var mode = "", events: [String] = [], published: [String: PeerUpdateEntry] = [:]
+  static var assetNames: [String] = []
   static let runtime = "TATWO-OS-runtime-123456789abc.zip"
   static func bytes(_ name: String) -> Data { Data(("verified fixture " + name).utf8) }
 }
@@ -194,13 +204,23 @@ final class ProtocolStub: URLProtocol {
   override class func canInit(with request: URLRequest) -> Bool { true }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
   override func startLoading() {
-    let url = request.url!, name = url.lastPathComponent
+    let url = request.url!
+    let privateAsset = url.path.contains("/releases/assets/")
+    let name = privateAsset ? IO.assetNames[Int(url.lastPathComponent)! - 1] : url.lastPathComponent
     let data: Data
-    if url.host == "api.github.com" {
+    if IO.mode == "private" {
+      precondition(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-only")
+      if privateAsset { precondition(request.value(forHTTPHeaderField: "Accept") == "application/octet-stream") }
+    } else { precondition(request.value(forHTTPHeaderField: "Authorization") == nil) }
+    if url.path.contains("/contents/") {
+      precondition(url.query == "ref=v9.9.9"); data = Data("#!/bin/bash\\nexit 0\\n".utf8)
+    } else if url.host == "api.github.com" && !privateAsset {
       IO.events.append("release")
       let names = IO.mode == "delta" ? ["TATWO-OS-app.zip", "TATWO-OS.manifest.json", "TATWO-OS-delta-v2.0.5-v9.9.9.zip"] : IO.mode == "legacy" ? ["TATWO-OS.zip"] : ["TATWO-OS-app.zip", IO.runtime]
-      let assets = (names + names.map { $0 + ".sha256" } + ["TATWO-OS.install-ready"]).map {
-        Asset(name: $0, browser_download_url: "https://github.com/demo/repo/releases/download/v9.9.9/" + $0, size: $0 == "TATWO-OS-app.zip" ? 1000 : Int64(IO.bytes($0).count))
+      IO.assetNames = names + names.map { $0 + ".sha256" } + ["TATWO-OS.install-ready"]
+      let repo = IO.mode == "private" ? UpdateChannel.privateRepository : "demo/repo"
+      let assets = IO.assetNames.enumerated().map { i, name in
+        Asset(id:i+1, name:name, browser_download_url: "https://github.com/" + repo + "/releases/download/v9.9.9/" + name, size:name == "TATWO-OS-app.zip" ? 1000 : Int64(IO.bytes(name).count))
       }
       data = try! JSONEncoder().encode(Release(tag_name: "v9.9.9", draft: false, assets: assets))
     } else {
@@ -224,7 +244,7 @@ enum PeerUpdateSource {
   }
   static func pull(_ offer: Offer, tag: String, name: String, folder: URL) async throws -> URL? {
     IO.events.append("peer:" + name)
-    if IO.mode == "offline" { throw URLError(.timedOut) }
+    if IO.mode == "offline" || IO.mode == "private" { throw URLError(.timedOut) }
     if IO.mode == "partial" && name == IO.runtime { return nil }
     let candidate = folder.appendingPathComponent(UUID().uuidString)
     try (IO.mode == "badsha" ? Data("bad".utf8) : IO.bytes(name)).write(to: candidate)
@@ -239,9 +259,17 @@ final class UpdateDownloadProgress {
 ${policy}
   init(destination: URL, rebase: @escaping @Sendable (Int64, Int64) -> Void,
        report: @escaping @Sendable (Int64, Int64) -> Void) { self.destination = destination }
-  func download(from url: URL) async throws -> URL {
-    IO.events.append("github:" + url.lastPathComponent)
-    try IO.bytes(url.lastPathComponent).write(to: destination)
+  func download(request: URLRequest) async throws -> URL {
+    let url = request.url!
+    let name: String
+    if IO.mode == "private" {
+      precondition(url.host == "api.github.com" && url.path.contains("/releases/assets/"))
+      precondition(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-only")
+      precondition(request.value(forHTTPHeaderField: "Accept") == "application/octet-stream")
+      name = IO.assetNames[Int(url.lastPathComponent)! - 1]
+    } else { name = url.lastPathComponent }
+    IO.events.append("github:" + name)
+    try IO.bytes(name).write(to: destination)
     return destination
   }
 }
@@ -272,13 +300,17 @@ ${digest}
     let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ProtocolStub.self]
     let session = URLSession(configuration: config), probe = Probe(root)
     do {
-      let result = try await probe.prefetch(tag: "v9.9.9", repository: "demo/repo", session: session, id: probe.downloadID)
+      let result = try await probe.prefetch(tag: "v9.9.9", repository: IO.mode == "private" ? UpdateChannel.privateRepository : "demo/repo", session: session, id: probe.downloadID)
       precondition(!["malformedsha", "cancel"].contains(IO.mode))
       let paths = [result.zip, result.appZip, result.runtimeZip, result.deltaZip, result.manifest].compactMap { $0 }
       precondition(paths.count == (IO.mode == "legacy" ? 1 : 2))
       if IO.mode == "delta" { precondition(result.deltaZip != nil && result.manifest != nil && probe.downloadSource.hasPrefix("差異更新：")) }
       for path in paths { let bytes = try Data(contentsOf: path); precondition(bytes == IO.bytes(path.lastPathComponent)) }
       precondition(IO.published["v9.9.9"]?.sha256.count == paths.count)
+      if IO.mode == "private" {
+        precondition(result.privateInstaller != nil && result.username == "fixture")
+        precondition(!(try! String(contentsOf:result.privateInstaller!, encoding:.utf8)).contains("fixture-only"))
+      }
     } catch { precondition(["malformedsha", "cancel"].contains(IO.mode), "unexpected error: \\(error)") }
     if IO.mode == "malformedsha" { precondition(!IO.events.contains("discover")) }
     else {
@@ -287,7 +319,7 @@ ${digest}
     }
     let downloads = IO.events.filter { $0.hasPrefix("github:") }
     switch IO.mode {
-    case "badsha", "offline": precondition(downloads.count == 2)
+    case "badsha", "offline", "private": precondition(downloads.count == 2)
     case "partial": precondition(downloads == ["github:" + IO.runtime])
     default: precondition(downloads.isEmpty)
     }
@@ -301,7 +333,7 @@ ${digest}
     const compiled = spawnSync('swiftc', ['-swift-version', '5', '-parse-as-library', join(root, 'Main.swift'), '-o', binary],
       { encoding: 'utf8', timeout: 90_000 });
     assert.equal(compiled.status, 0, compiled.stderr);
-    for (const mode of ['peer', 'badsha', 'offline', 'partial', 'cache', 'corruptcache', 'legacy', 'malformedsha', 'cancel', 'delta']) {
+    for (const mode of ['peer', 'badsha', 'offline', 'partial', 'cache', 'corruptcache', 'legacy', 'malformedsha', 'cancel', 'delta', 'private']) {
       const result = spawnSync(binary, [join(root, mode), mode], { encoding: 'utf8', timeout: 10_000 });
       assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
     }
