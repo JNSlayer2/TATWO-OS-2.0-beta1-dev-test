@@ -3,14 +3,75 @@ import Foundation
 import CryptoKit
 
 /// 先在 App 內下載校驗，再交給 launchd 執行原安裝器；簽章、替換與回復仍由 install.sh 負責。
-private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate {
+private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let report: @Sendable (Int64, Int64) -> Void
-    init(report: @escaping @Sendable (Int64, Int64) -> Void) { self.report = report }
+    private let destination: URL
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var outcome: Result<URL, Error>?
+    // Only the serial session delegate queue accesses fileResult.
+    private var fileResult: Result<URL, Error>?
+
+    init(destination: URL, report: @escaping @Sendable (Int64, Int64) -> Void) {
+        self.destination = destination; self.report = report
+    }
+
+    func download(from url: URL) async throws -> URL {
+        let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+        let task = session.downloadTask(with: url)
+        let polling = Task {
+            while !Task.isCancelled {
+                report(task.countOfBytesReceived, task.countOfBytesExpectedToReceive)
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { break }
+            }
+        }
+        defer { polling.cancel(); session.finishTasksAndInvalidate() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let completed: Result<URL, Error>? = lock.withLock {
+                    if let outcome { return outcome }
+                    self.continuation = continuation
+                    return nil
+                }
+                if let completed { continuation.resume(with: completed) } else { task.resume() }
+            }
+        } onCancel: {
+            session.invalidateAndCancel()
+            self.finish(.failure(CancellationError()))
+        }
+    }
+
+    private func finish(_ result: Result<URL, Error>) {
+        let pending = lock.withLock {
+            guard outcome == nil else { return nil as CheckedContinuation<URL, Error>? }
+            outcome = result
+            defer { continuation = nil }
+            return continuation
+        }
+        pending?.resume(with: result)
+    }
+
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         report(totalBytesWritten, totalBytesExpectedToWrite)
     }
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        fileResult = Result {
+            try lock.withLock {
+                guard outcome == nil else { throw CancellationError() }
+                guard (downloadTask.response as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: "下載失敗，請稍後重試"])
+                }
+                // location expires when this callback returns: move synchronously, fenced against cancellation.
+                try FileManager.default.moveItem(at: location, to: destination)
+                report(downloadTask.countOfBytesReceived, downloadTask.countOfBytesExpectedToReceive)
+                return destination
+            }
+        }
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        finish(error.map { .failure($0) } ?? fileResult ?? .failure(URLError(.unknown)))
+    }
 }
 
 @MainActor
@@ -33,6 +94,8 @@ final class InAppUpdater: ObservableObject {
     @Published private(set) var downloadProgress: Double?
     @Published private(set) var downloadedBytes: Int64 = 0
     @Published private(set) var totalBytes: Int64 = 0
+    @Published private(set) var downloadBytesPerSecond: Double = 0
+    private var speedSamples: [(time: TimeInterval, bytes: Int64)] = []
     private var download: Task<Void, Never>?
     private var downloadID = UUID()
     private let fileManager: FileManager
@@ -65,6 +128,7 @@ final class InAppUpdater: ObservableObject {
         guard !helperIsActive() else { phase = .failed("更新已在進行"); return }
         phase = .starting
         downloadProgress = nil; downloadedBytes = 0; totalBytes = 0
+        downloadBytesPerSecond = 0; speedSamples = []
         let id = UUID(); downloadID = id
         download = Task {
             defer { download = nil }
@@ -131,24 +195,33 @@ final class InAppUpdater: ObservableObject {
             }
             try fileManager.removeItem(at: zip) // 僅刪除已證實校驗失敗的下載快取。
         }
-        let progress = UpdateDownloadProgress { [weak self] written, total in
+        speedSamples = [(ProcessInfo.processInfo.systemUptime, 0)]
+        let progress = UpdateDownloadProgress(destination: zip) { [weak self] written, total in
             Task { @MainActor in
                 guard let self, self.downloadID == id, self.phase == .starting else { return }
-                self.downloadedBytes = written
-                if total > 0 { self.totalBytes = total }
-                self.downloadProgress = self.totalBytes > 0 ? min(1, Double(written) / Double(self.totalBytes)) : nil
+                self.recordDownloadProgress(written, total: total)
             }
         }
-        let (temp, zipResponse) = try await session.download(from: URL(string: archive.browser_download_url)!, delegate: progress)
-        try check(zipResponse)
+        _ = try await progress.download(from: URL(string: archive.browser_download_url)!)
         try Task.checkCancellation()
-        try fileManager.moveItem(at: temp, to: zip)
         guard try await Self.digest(zip) == expected.lowercased() else {
             try fileManager.removeItem(at: zip)
             throw failure("校驗失敗：SHA-256 不符，請重新下載")
         }
         downloadProgress = 1
         return zip
+    }
+
+    private func recordDownloadProgress(_ written: Int64, total: Int64,
+                                        now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        downloadedBytes = max(downloadedBytes, written)
+        totalBytes = max(totalBytes, total)
+        downloadProgress = totalBytes > 0 ? min(1, Double(downloadedBytes) / Double(totalBytes)) : nil
+        speedSamples.append((now, downloadedBytes))
+        speedSamples.removeAll { $0.time < now - 5 }
+        if let first = speedSamples.first, now > first.time {
+            downloadBytesPerSecond = Double(downloadedBytes - first.bytes) / (now - first.time)
+        } else { downloadBytesPerSecond = 0 }
     }
 
     private nonisolated static func digest(_ url: URL) async throws -> String {

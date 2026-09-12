@@ -53,8 +53,9 @@ struct UpdateAvailableCard: View {
                 }
                 if updater.phase == .starting {
                     ProgressView(value: updater.downloadProgress)
-                    Text("\(Double(updater.downloadedBytes) / 1_000_000, specifier: "%.1f") MB / \(Double(updater.totalBytes) / 1_000_000, specifier: "%.1f") MB")
+                    Text(downloadStatus)
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(updater.phase == .handedOff
                      ? "已下載，即將關閉 App 安裝…"
@@ -84,6 +85,13 @@ struct UpdateAvailableCard: View {
         }
         .padding(16)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var downloadStatus: String {
+        let downloaded = String(format: "已下載 %.1f MB", Double(updater.downloadedBytes) / 1_000_000)
+        guard updater.totalBytes > 0 else { return downloaded }
+        return downloaded + String(format: " / %.1f MB（約 %.0f KB/s）",
+                                   Double(updater.totalBytes) / 1_000_000, updater.downloadBytesPerSecond / 1_000)
     }
 
     private var currentVersion: String {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -157,7 +158,7 @@ test('source guards: progress, cancel, verified cache, active helper, zero exits
   assert.match(card, /updater\.totalBytes/);
   assert.match(card, /Button\("取消"\) \{ updater\.cancelUpdate\(\) \}/);
   assert.match(card, /return "下載並更新"/);
-  assert.match(updater, /session\.download\(/);
+  assert.match(updater, /progress\.download\(/);
   assert.match(updater, /SHA256\(\)/);
   assert.match(updater, /fileExists\(atPath: zip\.path\)/);
   assert.match(updater, /Self\.digest\(zip\) == expected\.lowercased\(\)/);
@@ -190,3 +191,152 @@ test('relaunch checks use the packaged executable name, not the SwiftPM product 
   assert.match(packaging, /<key>CFBundleExecutable<\/key><string>tatwo2<\/string>/);
   assert.match(updater, /pgrep -x tatwo2/);
 });
+
+test('W19 source guards: session delegate, synchronous move, polling, monotonic progress and speed copy', () => {
+  assert.match(updater, /URLSession\(configuration: \.ephemeral, delegate: self, delegateQueue: nil\)/);
+  assert.match(updater, /session\.downloadTask\(with: url\)/);
+  assert.match(updater, /withCheckedThrowingContinuation/);
+  assert.match(updater, /session\.invalidateAndCancel\(\)/);
+  const finish = updater.slice(updater.indexOf('didFinishDownloadingTo location:'),
+    updater.indexOf('didCompleteWithError error:'));
+  assert.match(finish, /try FileManager\.default\.moveItem\(at: location, to: destination\)/);
+  assert.doesNotMatch(finish, /Task\s*\{|async|DispatchQueue/);
+  assert.match(updater, /report\(task\.countOfBytesReceived, task\.countOfBytesExpectedToReceive\)/);
+  assert.match(updater, /Task\.sleep\(for: \.milliseconds\(500\)\)/);
+  assert.match(updater, /polling\.cancel\(\)/);
+  assert.match(updater, /downloadedBytes = max\(downloadedBytes, written\)/);
+  assert.match(updater, /totalBytes = max\(totalBytes, total\)/);
+  assert.match(updater, /speedSamples\.removeAll \{ \$0\.time < now - 5 \}/);
+  assert.match(updater, /Double\(downloadedBytes - first\.bytes\) \/ \(now - first\.time\)/);
+  assert.match(card, /已下載 %\.1f MB/);
+  assert.match(card, /guard updater\.totalBytes > 0 else \{ return downloaded \}/);
+  assert.match(card, /MB（約 %\.0f KB\/s）/);
+  assert.match(card, /updater\.downloadBytesPerSecond \/ 1_000/);
+});
+
+test('W19 real HTTP download: progress changes, polling fallback, unknown length, cancellation and errors',
+  { skip: process.platform !== 'darwin', timeout: 120_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tatwo-w19-http-'));
+    // Compile the production delegate and reducer, not an alternate download implementation.
+    const delegate = updater.slice(updater.indexOf('private final class UpdateDownloadProgress'),
+      updater.indexOf('@MainActor\nfinal class InAppUpdater'))
+      .replace('report(totalBytesWritten, totalBytesExpectedToWrite)',
+        'if CommandLine.arguments[1] != "poll" { report(totalBytesWritten, totalBytesExpectedToWrite) }');
+    const reducer = updater.slice(updater.indexOf('    private func recordDownloadProgress'),
+      updater.indexOf('    private nonisolated static func digest'))
+      .replace('private func', 'func');
+    const status = card.slice(card.indexOf('    private var downloadStatus'),
+      card.indexOf('    private var currentVersion')).replace('private var', 'var');
+    const harness = `
+import Foundation
+${delegate}
+@MainActor final class Probe {
+    var downloadedBytes: Int64 = 0, totalBytes: Int64 = 0
+    var downloadProgress: Double?
+    var downloadBytesPerSecond: Double = 0
+    var speedSamples: [(time: TimeInterval, bytes: Int64)] = []
+    var intermediate: Set<Int64> = []
+${reducer}
+}
+@MainActor struct Status {
+    let updater: Probe
+${status}
+}
+@main struct Main {
+    @MainActor static func main() async throws {
+        let mode = CommandLine.arguments[1]
+        let probe = Probe()
+        probe.recordDownloadProgress(100, total: 1000, now: 0)
+        probe.recordDownloadProgress(300, total: 500, now: 2)
+        precondition(probe.downloadBytesPerSecond == 100)
+        probe.recordDownloadProgress(200, total: -1, now: 3)
+        precondition(probe.downloadedBytes == 300 && probe.totalBytes == 1000)
+        probe.recordDownloadProgress(700, total: 1000, now: 7)
+        precondition(probe.downloadBytesPerSecond == 80) // Only samples in the last five seconds.
+        probe.downloadedBytes = 12_300_000; probe.totalBytes = 466_400_000
+        probe.downloadBytesPerSecond = 115_000
+        precondition(Status(updater: probe).downloadStatus == "已下載 12.3 MB / 466.4 MB（約 115 KB/s）")
+        probe.totalBytes = 0
+        precondition(Status(updater: probe).downloadStatus == "已下載 12.3 MB")
+        probe.downloadedBytes = 0; probe.totalBytes = 0; probe.speedSamples = []
+        let destination = URL(fileURLWithPath: CommandLine.arguments[3])
+        let progress = UpdateDownloadProgress(destination: destination) { written, total in
+            Task { @MainActor in
+                probe.recordDownloadProgress(written, total: total)
+                if written > 0 && written < 2_097_152 { probe.intermediate.insert(probe.downloadedBytes) }
+            }
+        }
+        let work = Task {
+            if mode == "precancel" {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+            return try await progress.download(from: URL(string: CommandLine.arguments[2])!)
+        }
+        if mode == "cancel" {
+            try await Task.sleep(for: .milliseconds(750))
+            work.cancel()
+        }
+        do {
+            let result = try await work.value
+            for _ in 0..<10 { await Task.yield() }
+            precondition(["normal", "poll", "unknown"].contains(mode))
+            let bytes = try Data(contentsOf: result)
+            precondition(bytes.count == 2_097_152)
+            precondition(probe.downloadedBytes == 2_097_152)
+            precondition(probe.intermediate.count >= 2)
+            precondition(probe.downloadBytesPerSecond > 0)
+            if mode == "unknown" { precondition(probe.totalBytes == 0 && probe.downloadProgress == nil) }
+            else { precondition(probe.downloadProgress == 1) }
+            print("\\(mode): bytes=\\(probe.downloadedBytes), intermediate=\\(probe.intermediate.count)")
+        } catch {
+            precondition(["cancel", "precancel", "http", "move"].contains(mode), "\\(error)")
+            if mode == "cancel" || mode == "precancel" {
+                precondition(error is CancellationError || (error as? URLError)?.code == .cancelled)
+                try await Task.sleep(for: .milliseconds(600)) // Let late delegate callbacks drain.
+            }
+            if mode != "move" { precondition(!FileManager.default.fileExists(atPath: destination.path)) }
+            print("\\(mode): expected failure \\(error)")
+        }
+    }
+}
+`;
+    const swift = join(dir, 'DownloadProbe.swift');
+    writeFileSync(swift, harness);
+    const binary = join(dir, 'probe');
+    const compile = spawnSync('swiftc', ['-swift-version', '6', '-parse-as-library', swift, '-o', binary],
+      { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(compile.status, 0, compile.stderr);
+    const server = createServer((request, response) => {
+      const unknown = request.url === '/unknown';
+      response.writeHead(request.url === '/http' ? 503 : 200,
+        unknown ? {} : { 'Content-Length': 2_097_152 });
+      let chunks = 0;
+      const timer = setInterval(() => {
+        response.write(Buffer.alloc(65_536, 120));
+        if (++chunks === 32) { clearInterval(timer); response.end(); }
+      }, 100);
+      response.on('close', () => clearInterval(timer));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const base = `http://127.0.0.1:${server.address().port}`;
+      for (const mode of ['normal', 'poll', 'unknown', 'cancel', 'precancel', 'http', 'move']) {
+        const destination = join(dir, `${mode}.zip`);
+        if (mode === 'move') writeFileSync(destination, 'keep existing destination');
+        const result = await new Promise((resolve, reject) => {
+          const child = spawn(binary, [mode, `${base}/${mode}`, destination], { timeout: 15_000 });
+          let stdout = '', stderr = '';
+          child.stdout.on('data', data => { stdout += data; });
+          child.stderr.on('data', data => { stderr += data; });
+          child.on('error', reject);
+          child.on('close', code => resolve({ code, stdout, stderr }));
+        });
+        assert.equal(result.code, 0, `${mode}: ${result.stdout}\n${result.stderr}`);
+        console.log(result.stdout.trim());
+        if (mode === 'move') assert.equal(readFileSync(destination, 'utf8'), 'keep existing destination');
+      }
+    } finally {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
