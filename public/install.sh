@@ -70,7 +70,8 @@ printf '校驗成功，正在解壓縮…\n'
 while IFS= read -r ENTRY; do
   case "$ENTRY" in /*|../*|*/../*|*/..) fail "壓縮檔含不安全路徑" ;; esac
 done < <(unzip -Z1 "$TEMP/TATWO-OS.zip")
-unzip -q "$TEMP/TATWO-OS.zip" -d "$TEMP/unpacked"
+# ditto 解壓會把 AppleDouble（._ 檔）還原成 xattr 而不是留成檔案；unzip 會留成檔案，破壞簽章封印。
+ditto -x -k "$TEMP/TATWO-OS.zip" "$TEMP/unpacked"
 SOURCE="$TEMP/unpacked/TATWO OS.app"
 [[ -d "$SOURCE" && ! -L "$SOURCE" && -f "$SOURCE/Contents/Info.plist" ]] || fail "附件內沒有有效的 TATWO OS.app"
 # SHA-256 checks transport integrity; a valid persistent signature checks app identity.

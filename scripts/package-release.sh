@@ -14,7 +14,12 @@ OUT="${1:-dist/release-$VERSION}"
 mkdir -p "$OUT"
 bash scripts/build-app.sh "$OUT"
 mv "$OUT/tatwo2.app" "$OUT/TATWO OS.app"
-ditto -c -k --keepParent "$OUT/TATWO OS.app" "$OUT/TATWO-OS.zip"
+# 先清 xattr、再用 --norsrc 打包：否則 ditto 會替帶 xattr 的檔案塞 ._ AppleDouble 進 zip，
+# 使用者端 unzip 會把 ._ 當成真檔案還原到 bundle 裡，codesign 判「sealed resource missing」。
+xattr -cr "$OUT/TATWO OS.app"
+codesign --verify --deep --strict "$OUT/TATWO OS.app"
+ditto -c -k --norsrc --keepParent "$OUT/TATWO OS.app" "$OUT/TATWO-OS.zip"
+[[ "$(unzip -Z1 "$OUT/TATWO-OS.zip" | grep -c '/\._')" == 0 ]] || { echo 'zip 內含 ._ AppleDouble 檔，拒絕發佈' >&2; exit 1; }
 (cd "$OUT" && shasum -a 256 TATWO-OS.zip > TATWO-OS.zip.sha256)
 echo '打包完成。人工確認後才執行以下命令（本腳本不發佈）：'
 printf 'gh release create %q %q %q --repo tatwo214/TATWO-OS-2.0-beta1-dev-test --title %q\n' \

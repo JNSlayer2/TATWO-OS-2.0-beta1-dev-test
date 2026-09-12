@@ -26,3 +26,19 @@ test('codesign really rejects the bare form and accepts the = form (Apple-signed
   const inline = spawnSync('codesign', ['--verify', '--strict', '-R', `=${requirement}`, '/usr/bin/true'], { encoding: 'utf8' });
   assert.equal(inline.status, 0, inline.stderr);
 });
+
+test('archives never carry AppleDouble sidecars and the installer extracts with ditto', () => {
+  const pkg = readFileSync(new URL('../scripts/package-release.sh', import.meta.url), 'utf8');
+  assert.match(pkg, /xattr -cr "\$OUT\/TATWO OS\.app"/);
+  assert.match(pkg, /ditto -c -k --norsrc --keepParent/);
+  assert.match(install, /ditto -x -k "\$TEMP\/TATWO-OS\.zip" "\$TEMP\/unpacked"/);
+  assert.doesNotMatch(install, /unzip -q /);
+  // 實證：帶 xattr 的檔案，不加 --norsrc 會在 zip 裡多出 ._ 檔；加了就沒有。
+  const dir = spawnSync('mktemp', ['-d'], { encoding: 'utf8' }).stdout.trim();
+  spawnSync('bash', ['-c', `mkdir -p "${dir}/A.app" && echo x > "${dir}/A.app/f" && xattr -w com.example.k v "${dir}/A.app/f"`]);
+  spawnSync('ditto', ['-c', '-k', '--keepParent', `${dir}/A.app`, `${dir}/with.zip`]);
+  spawnSync('ditto', ['-c', '-k', '--norsrc', '--keepParent', `${dir}/A.app`, `${dir}/without.zip`]);
+  const list = z => spawnSync('unzip', ['-Z1', z], { encoding: 'utf8' }).stdout;
+  assert.match(list(`${dir}/with.zip`), /\._f/);
+  assert.doesNotMatch(list(`${dir}/without.zip`), /\._f/);
+});
