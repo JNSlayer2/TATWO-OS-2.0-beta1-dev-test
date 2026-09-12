@@ -199,3 +199,14 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
     assert.ok(existsSync(dest), 'installed app never replaced by the fixture');
   }
 });
+
+test('large archive downloads resume and retry on slow links (curl 92 seen on the room mini)', () => {
+  const fresh = readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
+  const bigDownloads = fresh.split('\n').filter(line => line.includes('-o "$ZIP" "$ZIP_URL"') || line.includes('-o "$output" "$url"'));
+  assert.equal(bigDownloads.length, 2);
+  for (const line of bigDownloads) {
+    assert.match(line, /--http1\.1/);
+    assert.match(line, /-C - /);
+    assert.match(line, /--retry 5 --retry-all-errors/);
+  }
+});
