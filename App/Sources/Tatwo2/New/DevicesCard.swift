@@ -9,6 +9,7 @@ struct DevicesCard: View {
     @State private var portField = ""
     @State private var codeField = ""
     @State private var nameField = Host.current().localizedName ?? "這台"
+    @State private var updateOffers: [String: [String: PeerUpdateEntry]] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -108,6 +109,9 @@ struct DevicesCard: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(device.name)
                                     .font(.subheadline.weight(.medium))
+                                Text(PeerUpdateSource.summary(updateOffers[device.id] ?? [:]))
+                                    .font(.footnote).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 Text("\(device.user)@\(device.host):\(device.sshPort) · 指紋 \(device.publicKeyFingerprint.prefix(16))…")
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
@@ -132,6 +136,12 @@ struct DevicesCard: View {
         }
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .task(id: model.devices) {
+            updateOffers = [:]
+            for offer in await PeerUpdateSource.discover(model.devices) {
+                updateOffers[offer.device.id] = offer.entries
+            }
+        }
     }
 
     private static func remaining(_ date: Date) -> String {

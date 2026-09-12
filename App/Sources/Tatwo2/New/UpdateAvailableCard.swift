@@ -53,6 +53,9 @@ struct UpdateAvailableCard: View {
                 }
                 if updater.phase == .starting {
                     ProgressView(value: updater.downloadProgress)
+                    Text(updater.downloadSource)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(downloadStatus)
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

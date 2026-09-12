@@ -1,6 +1,6 @@
-Source commit: 2e04dcbc1b460fbd1a2a7a14c0ddf95aa4475f00
+Source commit: c5199770bc90f37a50c542c62366f65cb52bef5a
 Source worktree: clean
-Files: 1418
+Files: 1420
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -178,6 +178,7 @@ App/Sources/Tatwo2/Facade/OSDocuments.swift
 App/Sources/Tatwo2/Facade/OSUpstream.swift
 App/Sources/Tatwo2/Facade/OSUpstreamBinding.swift
 App/Sources/Tatwo2/Facade/OSUpstreamRefresh.swift
+App/Sources/Tatwo2/Facade/PeerUpdateSource.swift
 App/Sources/Tatwo2/Facade/PluginStubs.swift
 App/Sources/Tatwo2/Facade/PluginsSource.swift
 App/Sources/Tatwo2/Facade/PullRequestCoordinator.swift
@@ -1338,6 +1339,7 @@ tests/ipad-use-mcp.test.mjs
 tests/ipad-use-packaging.test.mjs
 tests/ipad-use-ui-source.test.mjs
 tests/os-upstream-refresh.test.mjs
+tests/peer-update-source.test.mjs
 tests/plan-canvas.test.mjs
 tests/plan-transcript-card.test.mjs
 tests/pr-plan.test.mjs

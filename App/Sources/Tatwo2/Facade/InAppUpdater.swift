@@ -118,6 +118,7 @@ final class InAppUpdater: ObservableObject {
     @Published private(set) var downloadedBytes: Int64 = 0
     @Published private(set) var totalBytes: Int64 = 0
     @Published private(set) var downloadBytesPerSecond: Double = 0
+    @Published private(set) var downloadSource = "從 GitHub 下載…"
     private var speedSamples: [(time: TimeInterval, bytes: Int64)] = []
     private var download: Task<Void, Never>?
     private var downloadID = UUID()
@@ -145,7 +146,7 @@ final class InAppUpdater: ObservableObject {
         let checker = GitHubReleaseUpdateChecker.shared
         let repository = repository ?? checker.repository
         guard phase == .idle || { if case .failed = phase { return true }; return false }() else { return }
-        guard tag.range(of: #"^v?[0-9]+[.][0-9]+([.][0-9]+)?([-+][A-Za-z0-9.-]+)?$"#, options: .regularExpression) != nil,
+        guard PeerUpdateSource.validTag(tag), tag.range(of: #"^v?[0-9]+[.][0-9]+([.][0-9]+)?([-+][A-Za-z0-9.-]+)?$"#, options: .regularExpression) != nil,
               repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil
         else { phase = .failed("版本或倉庫格式無效"); return }
         guard !helperIsActive() else { phase = .failed("更新已在進行"); return }
@@ -218,20 +219,44 @@ final class InAppUpdater: ObservableObject {
         let plannedBytes = archives.reduce(Int64(0)) { $0 + max(0, $1.size) }
         totalBytes = plannedBytes
         speedSamples = [(ProcessInfo.processInfo.systemUptime, 0)]
-        func fetch(_ archive: Asset, offset: Int64) async throws -> URL {
+        var expectedHashes: [String: String] = [:]
+        for archive in archives {
             let checksum = try asset(archive.name + ".sha256")
-            let zip = folder.appendingPathComponent(archive.name)
-            let (sha, shaResponse) = try await session.data(from: URL(string: checksum.browser_download_url)!)
+            let (sha, shaResponse) = try await session.data(for: URLRequest(url: URL(string: checksum.browser_download_url)!,
+                cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
             try check(shaResponse)
             let expected = String(decoding: sha, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
             guard expected.range(of: "^[0-9A-Fa-f]{64}$", options: .regularExpression) != nil else { throw failure("校驗失敗：SHA-256 格式錯誤") }
             try sha.write(to: folder.appendingPathComponent(checksum.name), options: .atomic)
+            expectedHashes[archive.name] = expected.lowercased()
+        }
+        downloadSource = "詢問已配對設備…"
+        let offers = await PeerUpdateSource.discover(DeviceRegistry().list())
+        try Task.checkCancellation()
+        func fetch(_ archive: Asset, offset: Int64) async throws -> URL {
+            let expected = expectedHashes[archive.name]!
+            let zip = folder.appendingPathComponent(archive.name)
             if fileManager.fileExists(atPath: zip.path) {
                 if try await Self.digest(zip) == expected.lowercased() {
+                    downloadSource = "使用已校驗快取"
                     recordDownloadProgress(offset + archive.size, total: plannedBytes); return zip
                 }
                 try fileManager.moveItem(at: zip, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
             }
+            for offer in offers {
+                try Task.checkCancellation()
+                downloadSource = "從『\(offer.device.name)』取得…"
+                if let candidate = try? await PeerUpdateSource.pull(offer, tag: tag, name: archive.name, folder: folder),
+                   let actual = try? await Self.digest(candidate), actual == expected {
+                    try Task.checkCancellation()
+                    try fileManager.moveItem(at: candidate, to: zip)
+                    downloadSource = String(format: "從『%@』取得 %.1f MB", offer.device.name, Double(archive.size) / 1_000_000)
+                    return zip
+                }
+                // Failed candidates stay isolated in peer-UUID; never advertised or passed to install.sh.
+            }
+            try Task.checkCancellation()
+            downloadSource = "從 GitHub 下載…"
             let progress = UpdateDownloadProgress(destination: zip) { [weak self] written, total in
                 Task { @MainActor in
                     guard let self, self.downloadID == id, self.phase == .starting else { return }
@@ -249,6 +274,11 @@ final class InAppUpdater: ObservableObject {
         var result = UpdateArchives(), completed: Int64 = 0
         for archive in archives {
             let zip = try await fetch(archive, offset: completed)
+            try? PeerUpdateSource.publish(directory, tag: tag) {
+                if archive.name.hasPrefix("TATWO-OS-runtime-") { $0.runtime = zip.path } else { $0.app = zip.path }
+                $0.sha256[archive.name] = expectedHashes[archive.name]
+                $0.sizes[archive.name] = (try? fileManager.attributesOfItem(atPath: zip.path)[.size] as? NSNumber)?.int64Value
+            }
             completed += (try fileManager.attributesOfItem(atPath: zip.path)[.size] as? NSNumber)?.int64Value ?? archive.size
             recordDownloadProgress(completed, total: plannedBytes)
             if archive.name == "TATWO-OS.zip" { result.zip = zip }
@@ -331,6 +361,7 @@ final class InAppUpdater: ObservableObject {
 
     /// 啟動時呼叫一次：把上一輪 helper 的結果搬進 UI，並清掉檔案。
     func consumeResultOnLaunch() {
+        Task { await PeerUpdateSource.publishInstalled(directory) }
         defer { try? fileManager.removeItem(at: resultURL) }
         if let data = try? Data(contentsOf: resultURL),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {

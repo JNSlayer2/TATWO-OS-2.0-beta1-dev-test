@@ -12,6 +12,7 @@ struct DeviceRecord: Codable, Equatable, Identifiable, Sendable {
     var addedAt: Date
     var lastSeenAt: Date
     var workdirMap: [String: String]
+    var lanHost: String? = nil
 }
 
 /// `live/devices.json` 是 2.0 遠端設備的唯一薄登記表；SSH authorized_keys 才是信任真值。
@@ -80,7 +81,8 @@ final class DeviceRegistry: @unchecked Sendable {
         sshPort: Int = 22,
         publicKeyFingerprint: String,
         now: Date = Date(),
-        workdirMap: [String: String] = [:]
+        workdirMap: [String: String] = [:],
+        lanHost: String? = nil
     ) throws -> DeviceRecord {
         try add(DeviceRecord(
             id: id,
@@ -91,7 +93,8 @@ final class DeviceRegistry: @unchecked Sendable {
             publicKeyFingerprint: publicKeyFingerprint,
             addedAt: now,
             lastSeenAt: now,
-            workdirMap: workdirMap))
+            workdirMap: workdirMap,
+            lanHost: lanHost))
     }
 
     func remove(id: String) throws {
