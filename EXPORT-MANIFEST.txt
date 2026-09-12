@@ -1,6 +1,6 @@
-Source commit: ca3902d7556ed83e19cb8d688b47e7e753c4a093
-Source worktree: dirty
-Files: 1397
+Source commit: a0164bc9221c5faa050d3f5101178f00dd125e01
+Source worktree: clean
+Files: 1399
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -150,6 +150,7 @@ App/Sources/Tatwo2/Facade/FeedbackService.swift
 App/Sources/Tatwo2/Facade/GitHubAccounts.swift
 App/Sources/Tatwo2/Facade/GitHubReleaseUpdateChecker.swift
 App/Sources/Tatwo2/Facade/GlobalNoteStore.swift
+App/Sources/Tatwo2/Facade/InAppUpdater.swift
 App/Sources/Tatwo2/Facade/IslandCoreAcceptance.swift
 App/Sources/Tatwo2/Facade/IslandExceptionsAcceptance.swift
 App/Sources/Tatwo2/Facade/IslandExceptionsCount.swift
@@ -1317,6 +1318,7 @@ tests/g2c-realistic-corpus-source-contract.test.mjs
 tests/gen3-death-inventory-source-contract.test.mjs
 tests/gen3-governance-adapter-source-contract.test.mjs
 tests/grok-sidecar-attachments.test.mjs
+tests/in-app-update.test.mjs
 tests/ipad-use-cleanroom-source.test.mjs
 tests/ipad-use-controller.test.mjs
 tests/ipad-use-mcp.test.mjs

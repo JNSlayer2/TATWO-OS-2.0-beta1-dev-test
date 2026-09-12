@@ -6,6 +6,7 @@ struct UpdateAvailableCard: View {
     @ObservedObject var model: ChatPageModel
     let onOpenCLI: () -> Void
     @ObservedObject private var checker = GitHubReleaseUpdateChecker.shared
+    @ObservedObject private var updater = InAppUpdater.shared
     @State private var executionError: String?
     @State private var isExecuting = false
 
@@ -19,23 +20,44 @@ struct UpdateAvailableCard: View {
                 }
                 .disabled(checker.isChecking)
             }
+            if let lastResult = updater.lastResult {
+                Text(lastResult).font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let release = checker.availableRelease, !checker.dismissed {
                 Text("有新版 · \(release.tag_name)").font(.headline)
                 if let title = release.name, !title.isEmpty { Text(title) }
-                Text(GitHubReleaseUpdateChecker.installCommand)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                // 2026-09-12 使用者：要像 Codex 一樣按一下就更新，不碰終端機。
                 HStack {
-                    Button("複製") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(GitHubReleaseUpdateChecker.installCommand, forType: .string)
-                    }
-                    Button("在 CLI 分頁執行") { executeInCLI() }
-                        .disabled(isExecuting)
+                    Button(updateButtonTitle) { updater.update(to: release.tag_name) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(updater.phase == .starting || updater.phase == .handedOff)
                     Spacer()
                     Button("稍後") { checker.dismissForLaunch() }
                 }
+                Text(updater.phase == .handedOff
+                     ? "App 會先關閉，更新完成後自動重新開啟；若一分鐘內沒回來，重新開啟即可看到結果。"
+                     : "按下後 App 會關閉、自動下載並驗證新版、裝好再重新開啟。舊版會保留備份。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if case .failed(let reason) = updater.phase {
+                    Text(reason).font(.footnote).foregroundStyle(.red)
+                }
+                DisclosureGroup("進階：用終端機更新") {
+                    Text(GitHubReleaseUpdateChecker.installCommand)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("複製") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(GitHubReleaseUpdateChecker.installCommand, forType: .string)
+                        }
+                        Button("在 CLI 分頁執行") { executeInCLI() }
+                            .disabled(isExecuting)
+                    }
+                }
+                .font(.footnote)
             } else if !checker.status.isEmpty && !checker.dismissed {
                 Text(checker.status).font(.footnote).foregroundStyle(.secondary)
             }
@@ -43,6 +65,14 @@ struct UpdateAvailableCard: View {
         }
         .padding(16)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var updateButtonTitle: String {
+        switch updater.phase {
+        case .idle, .failed: return "立即更新"
+        case .starting: return "準備中…"
+        case .handedOff: return "更新中，App 即將關閉"
+        }
     }
 
     private func executeInCLI() {

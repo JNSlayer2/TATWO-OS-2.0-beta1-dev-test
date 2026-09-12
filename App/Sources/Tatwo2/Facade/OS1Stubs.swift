@@ -149,7 +149,7 @@ final class TatwoSparkleUpdateCoordinator {
     private let checker = GitHubReleaseUpdateChecker.shared
     private var started = false
     var runtimeStatus: TatwoSignedUpdateRuntimeStatus { started ? .active(.githubRelease) : .notStarted }
-    func start() { checker.start(); started = true }
+    func start() { InAppUpdater.shared.consumeResultOnLaunch(); checker.start(); started = true }
     func stop() { checker.stop(); started = false }
     func checkForUpdatesFromUser() { checker.checkForUpdatesFromUser() }
 }
