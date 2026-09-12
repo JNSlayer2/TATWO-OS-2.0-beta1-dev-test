@@ -1,0 +1,3 @@
+Resources/runtime
+Frameworks/Chromium Embedded Framework.framework
+Resources/claude-sidecar/node_modules

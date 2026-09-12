@@ -29,7 +29,8 @@ test('updater reuses install.sh from the same public repository for signing and 
 });
 
 // 把 Swift 裡的 helper 模板還原成真的 bash 腳本，用假的 install.sh 跑一遍。
-function renderHelper({ pid, resultPath, logPath, destination, label, prefetchedZip, wait = 10 }) {
+function renderHelper({ pid, resultPath, logPath, destination, label, prefetchedZip,
+  prefetchedAppZip = '', prefetchedRuntimeZip = '', wait = 10 }) {
   const begin = updater.indexOf('// UPDATE-HELPER-BEGIN');
   const end = updater.indexOf('// UPDATE-HELPER-END');
   const block = updater.slice(begin, end);
@@ -42,7 +43,7 @@ function renderHelper({ pid, resultPath, logPath, destination, label, prefetched
     .replace('\\(helperWaitSeconds)', String(wait))
     .replace(/\\\(quoted\((\w+)\)\)/g, (_, key) => {
       const values = { tag: 'v9.9.9', installURL: 'https://invalid.example/install.sh',
-        resultPath, logPath, destination, label, prefetchedZip };
+        resultPath, logPath, destination, label, prefetchedZip, prefetchedAppZip, prefetchedRuntimeZip };
       return "'" + values[key].replaceAll("'", "'\\''") + "'";
     });
 }
@@ -73,6 +74,7 @@ function run(fakeInstallExit, options = {}) {
   const install = join(dir, 'install.sh');
   writeFileSync(install, `#!/bin/bash
     printf 'version=%s\\nzip=%s\\n' "$TATWO_OS_VERSION" "$TATWO_OS_PREFETCHED_ZIP" >> "$TEST_DIR/install.calls"
+    printf 'app=%s\\nruntime=%s\\n' "$TATWO_OS_PREFETCHED_APP_ZIP" "$TATWO_OS_PREFETCHED_RUNTIME_ZIP" > "$TEST_DIR/layers.calls"
     [ "\${RELAUNCH_DURING_INSTALL:-0}" = 0 ] || touch "$TEST_DIR/relaunched"
     exit ${fakeInstallExit}
   `);
@@ -88,7 +90,8 @@ function run(fakeInstallExit, options = {}) {
   const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
   writeFileSync(script, renderHelper({
     pid, resultPath: join(dir, 'result.json'), logPath: join(dir, 'update.log'),
-    destination, prefetchedZip, label: 'ai.tatwo.tatwo2.updater.test', wait: options.stillRunning ? 0 : 10,
+    destination, prefetchedZip, prefetchedAppZip: options.appZip ?? '', prefetchedRuntimeZip: options.runtimeZip ?? '',
+    label: 'ai.tatwo.tatwo2.updater.test', wait: options.stillRunning ? 0 : 10,
   }).replace('export PATH=/usr/bin:/bin:/usr/sbin:/sbin', `export PATH=${quote(bin)}:/usr/bin:/bin:/usr/sbin:/sbin`));
   const started = Date.now();
   const result = spawnSync('bash', [script], { env: { ...process.env,
@@ -109,6 +112,55 @@ test('helper waits for exit, passes pinned version and prefetched path, and reco
   assert.deepEqual(receipt, { ok: true, tag: 'v9.9.9', message: 'installed' });
   assert.ok(!existsSync(join(dir, 'open.calls')), 'installer opens the new app itself');
 });
+
+test('W20 helper passes both quoted layer paths and leaves runtime empty when reused', () => {
+  for (const runtimeZip of ['', "/tmp/runtime cache's/TATWO-OS-runtime-123456789abc.zip"]) {
+    const appZip = "/tmp/app cache's/TATWO-OS-app.zip";
+    const { dir } = run(0, { appZip, runtimeZip });
+    assert.equal(readFileSync(join(dir, 'layers.calls'), 'utf8'), `app=${appZip}\nruntime=${runtimeZip}\n`);
+  }
+  assert.match(updater, /prefetchedAppZip: zip\.appZip\?\.path \?\? ""/);
+  assert.match(updater, /prefetchedRuntimeZip: zip\.runtimeZip\?\.path \?\? ""/);
+});
+
+test('W20 prefetch plans only needed layers and aggregates byte offsets', () => {
+  assert.match(updater, /try asset\(split \? "TATWO-OS-app.zip" : "TATWO-OS.zip"\)/);
+  assert.match(updater, /if !UpdateRuntimeLayer\.canReuse[\s\S]*archives\.append\(runtime\)/);
+  assert.match(updater, /runtimes\.count == 1/);
+  assert.match(updater, /archives\.reduce\(Int64\(0\)\)/);
+  assert.match(updater, /for archive in archives/);
+  assert.match(updater, /let checksum = try asset\(archive\.name \+ ".sha256"\)/);
+  assert.match(updater, /recordDownloadProgress\(offset \+ written, total: max\(plannedBytes/);
+});
+
+test('W20 production runtime reuse decision: hash, missing paths, old apps and unsafe metadata',
+  { skip: process.platform !== 'darwin' }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'w20-decision-'));
+    const source = updater.slice(updater.indexOf('private struct UpdateRuntimeLayer:'),
+      updater.indexOf('private struct UpdateArchives'));
+    const swift = join(dir, 'Decision.swift'), binary = join(dir, 'decision');
+    writeFileSync(swift, `import Foundation\n${source}
+let reuse = UpdateRuntimeLayer.canReuse(contents: URL(fileURLWithPath: CommandLine.arguments[1]),
+                                       archiveName: CommandLine.arguments[2])
+print(reuse ? "reuse" : "download")
+`);
+    const compile = spawnSync('swiftc', [swift, '-o', binary], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(compile.status, 0, compile.stderr);
+    const contents = join(dir, 'Contents'), resources = join(contents, 'Resources');
+    mkdirSync(join(resources, 'runtime'), { recursive: true });
+    const sha = 'a'.repeat(64), name = `TATWO-OS-runtime-${sha.slice(0, 12)}.zip`;
+    const decide = archive => spawnSync(binary, [contents, archive], { encoding: 'utf8' }).stdout.trim();
+    assert.equal(decide(name), 'download');
+    const manifest = data => writeFileSync(join(resources, 'runtime-layer.json'), JSON.stringify(data));
+    manifest({ sha, paths: ['Resources/runtime'] });
+    assert.equal(decide(name), 'reuse');
+    assert.equal(decide('TATWO-OS-runtime-bbbbbbbbbbbb.zip'), 'download');
+    for (const paths of [[], ['Resources/missing'], ['Resources/../runtime'], ['/tmp'], ['Resources//runtime']]) {
+      manifest({ sha, paths }); assert.equal(decide(name), 'download');
+    }
+    manifest({ sha: 'invalid', paths: ['Resources/runtime'] });
+    assert.equal(decide(name), 'download');
+  });
 
 test('failure reopens only a stopped App and exits zero even if launchctl removal fails', () => {
   const { dir, receipt } = run(3, { removeFail: true });

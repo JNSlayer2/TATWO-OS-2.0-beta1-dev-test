@@ -102,10 +102,12 @@ fi
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "sign: $SIGN_IDENTITY"
   tatwo_cef_sign_nested_artifacts "$APP" "$SIGN_IDENTITY" developer
+  bash "$ROOT/scripts/runtime-layer.sh" prepare "$APP"
   codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
 else
   echo "sign: ad-hoc（找不到開發憑證）"
   tatwo_cef_sign_nested_artifacts "$APP" - adhoc
+  bash "$ROOT/scripts/runtime-layer.sh" prepare "$APP"
   codesign --force --sign - "$APP"
 fi
 codesign --verify --deep --strict "$APP"

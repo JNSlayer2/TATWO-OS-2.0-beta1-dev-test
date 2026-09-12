@@ -74,6 +74,29 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
     }
 }
 
+private struct UpdateRuntimeLayer: Decodable {
+    let sha: String
+    let paths: [String]
+
+    static func canReuse(contents: URL, archiveName: String) -> Bool {
+        guard let data = try? Data(contentsOf: contents.appendingPathComponent("Resources/runtime-layer.json")),
+              let layer = try? JSONDecoder().decode(Self.self, from: data),
+              layer.sha.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+              archiveName == "TATWO-OS-runtime-\(layer.sha.prefix(12)).zip", !layer.paths.isEmpty else { return false }
+        return layer.paths.allSatisfy { path in
+            (path.hasPrefix("Resources/") || path.hasPrefix("Frameworks/"))
+                && !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0 == ".." || $0 == "." || $0.isEmpty })
+                && FileManager.default.fileExists(atPath: contents.appendingPathComponent(path).path)
+        }
+    }
+}
+
+private struct UpdateArchives {
+    var zip: URL?
+    var appZip: URL?
+    var runtimeZip: URL?
+}
+
 @MainActor
 final class InAppUpdater: ObservableObject {
     enum Phase: Equatable {
@@ -157,7 +180,7 @@ final class InAppUpdater: ObservableObject {
         catch { return true } // 無法確認時不重派。
     }
 
-    private func prefetch(tag: String, repository: String, session: URLSession, id: UUID) async throws -> URL {
+    private func prefetch(tag: String, repository: String, session: URLSession, id: UUID) async throws -> UpdateArchives {
         struct Asset: Decodable { let name: String; let browser_download_url: String; let size: Int64 }
         struct Release: Decodable { let tag_name: String; let draft: Bool; let assets: [Asset] }
         func failure(_ message: String) -> NSError { NSError(domain: "Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -179,37 +202,61 @@ final class InAppUpdater: ObservableObject {
                   URL(string: asset.browser_download_url) != nil else { throw failure("版本附件缺少或下載網址不符") }
             return asset
         }
-        let archive = try asset("TATWO-OS.zip"), checksum = try asset("TATWO-OS.zip.sha256")
+        let split = release.assets.contains { $0.name == "TATWO-OS-app.zip" }
+        var archives = [try asset(split ? "TATWO-OS-app.zip" : "TATWO-OS.zip")]
+        if split {
+            let runtimes = release.assets.filter {
+                $0.name.range(of: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$", options: .regularExpression) != nil
+            }
+            guard runtimes.count == 1 else { throw failure("執行環境附件缺少或不唯一") }
+            let runtime = try asset(runtimes[0].name)
+            if !UpdateRuntimeLayer.canReuse(contents: URL(fileURLWithPath: Self.destinationApp).appendingPathComponent("Contents"),
+                                            archiveName: runtime.name) { archives.append(runtime) }
+        }
         let folder = directory.appendingPathComponent("download/\(tag)", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let zip = folder.appendingPathComponent(archive.name)
-        let (sha, shaResponse) = try await session.data(from: URL(string: checksum.browser_download_url)!)
-        try check(shaResponse)
-        let expected = String(decoding: sha, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
-        guard expected.range(of: "^[0-9A-Fa-f]{64}$", options: .regularExpression) != nil else { throw failure("校驗失敗：SHA-256 格式錯誤") }
-        try sha.write(to: folder.appendingPathComponent(checksum.name), options: .atomic)
-        totalBytes = archive.size
-        if fileManager.fileExists(atPath: zip.path) {
-            if try await Self.digest(zip) == expected.lowercased() {
-                downloadedBytes = totalBytes; downloadProgress = 1; return zip
-            }
-            try fileManager.removeItem(at: zip) // 僅刪除已證實校驗失敗的下載快取。
-        }
+        let plannedBytes = archives.reduce(Int64(0)) { $0 + max(0, $1.size) }
+        totalBytes = plannedBytes
         speedSamples = [(ProcessInfo.processInfo.systemUptime, 0)]
-        let progress = UpdateDownloadProgress(destination: zip) { [weak self] written, total in
-            Task { @MainActor in
-                guard let self, self.downloadID == id, self.phase == .starting else { return }
-                self.recordDownloadProgress(written, total: total)
+        func fetch(_ archive: Asset, offset: Int64) async throws -> URL {
+            let checksum = try asset(archive.name + ".sha256")
+            let zip = folder.appendingPathComponent(archive.name)
+            let (sha, shaResponse) = try await session.data(from: URL(string: checksum.browser_download_url)!)
+            try check(shaResponse)
+            let expected = String(decoding: sha, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+            guard expected.range(of: "^[0-9A-Fa-f]{64}$", options: .regularExpression) != nil else { throw failure("校驗失敗：SHA-256 格式錯誤") }
+            try sha.write(to: folder.appendingPathComponent(checksum.name), options: .atomic)
+            if fileManager.fileExists(atPath: zip.path) {
+                if try await Self.digest(zip) == expected.lowercased() {
+                    recordDownloadProgress(offset + archive.size, total: plannedBytes); return zip
+                }
+                try fileManager.moveItem(at: zip, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
             }
+            let progress = UpdateDownloadProgress(destination: zip) { [weak self] written, total in
+                Task { @MainActor in
+                    guard let self, self.downloadID == id, self.phase == .starting else { return }
+                    self.recordDownloadProgress(offset + written, total: max(plannedBytes, offset + max(0, total)))
+                }
+            }
+            _ = try await progress.download(from: URL(string: archive.browser_download_url)!)
+            try Task.checkCancellation()
+            guard try await Self.digest(zip) == expected.lowercased() else {
+                try fileManager.moveItem(at: zip, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
+                throw failure("校驗失敗：SHA-256 不符，請重新下載")
+            }
+            return zip
         }
-        _ = try await progress.download(from: URL(string: archive.browser_download_url)!)
-        try Task.checkCancellation()
-        guard try await Self.digest(zip) == expected.lowercased() else {
-            try fileManager.removeItem(at: zip)
-            throw failure("校驗失敗：SHA-256 不符，請重新下載")
+        var result = UpdateArchives(), completed: Int64 = 0
+        for archive in archives {
+            let zip = try await fetch(archive, offset: completed)
+            completed += (try fileManager.attributesOfItem(atPath: zip.path)[.size] as? NSNumber)?.int64Value ?? archive.size
+            recordDownloadProgress(completed, total: plannedBytes)
+            if archive.name == "TATWO-OS.zip" { result.zip = zip }
+            else if archive.name == "TATWO-OS-app.zip" { result.appZip = zip }
+            else { result.runtimeZip = zip }
         }
         downloadProgress = 1
-        return zip
+        return result
     }
 
     private func recordDownloadProgress(_ written: Int64, total: Int64,
@@ -237,7 +284,7 @@ final class InAppUpdater: ObservableObject {
         return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
     }
 
-    private func handOff(tag: String, repository: String, zip: URL) {
+    private func handOff(tag: String, repository: String, zip: UpdateArchives) {
         guard !helperIsActive() else { phase = .failed("更新已在進行"); return }
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
@@ -251,7 +298,8 @@ final class InAppUpdater: ObservableObject {
                 tag: tag, pid: ProcessInfo.processInfo.processIdentifier,
                 installURL: Self.installScriptURL(repository: repository),
                 resultPath: resultURL.path, logPath: logURL.path,
-                destination: Self.destinationApp, label: label, prefetchedZip: zip.path
+                destination: Self.destinationApp, label: label, prefetchedZip: zip.zip?.path ?? "",
+                prefetchedAppZip: zip.appZip?.path ?? "", prefetchedRuntimeZip: zip.runtimeZip?.path ?? ""
             ).write(to: script, atomically: true, encoding: .utf8)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
             let pending = ["label": label, "tag": tag, "startedAt": stamp, "log": logURL.path]
@@ -322,7 +370,8 @@ final class InAppUpdater: ObservableObject {
     /// `TATWO2_UPDATE_INSTALL_SCRIPT`（本機檔案路徑）只給測試用，跳過下載。
     static func helperScript(tag: String, pid: Int32, installURL: String,
                              resultPath: String, logPath: String,
-                             destination: String, label: String, prefetchedZip: String) -> String {
+                             destination: String, label: String, prefetchedZip: String,
+                             prefetchedAppZip: String = "", prefetchedRuntimeZip: String = "") -> String {
         """
         #!/bin/bash
         set -u
@@ -334,6 +383,8 @@ final class InAppUpdater: ObservableObject {
         DEST=\(quoted(destination))
         LABEL=\(quoted(label))
         PREFETCHED_ZIP=\(quoted(prefetchedZip))
+        export TATWO_OS_PREFETCHED_APP_ZIP=\(quoted(prefetchedAppZip))
+        export TATWO_OS_PREFETCHED_RUNTIME_ZIP=\(quoted(prefetchedRuntimeZip))
         WAIT=\(helperWaitSeconds)
         export PATH=/usr/bin:/bin:/usr/sbin:/sbin
         write_result() {

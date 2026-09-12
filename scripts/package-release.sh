@@ -21,6 +21,8 @@ codesign --verify --deep --strict "$OUT/TATWO OS.app"
 ditto -c -k --norsrc --keepParent "$OUT/TATWO OS.app" "$OUT/TATWO-OS.zip"
 [[ "$(unzip -Z1 "$OUT/TATWO-OS.zip" | grep -c '/\._')" == 0 ]] || { echo 'zip 內含 ._ AppleDouble 檔，拒絕發佈' >&2; exit 1; }
 (cd "$OUT" && shasum -a 256 TATWO-OS.zip > TATWO-OS.zip.sha256)
+bash scripts/runtime-layer.sh split "$OUT/TATWO OS.app" "$OUT"
 echo '打包完成。人工確認後才執行以下命令（本腳本不發佈）：'
-printf 'gh release create %q %q %q --repo tatwo214/TATWO-OS-2.0-beta1-dev-test --title %q\n' \
-  "$VERSION" "$OUT/TATWO-OS.zip" "$OUT/TATWO-OS.zip.sha256" "$VERSION"
+printf 'gh release create %q' "$VERSION"
+printf ' %q' "$OUT"/*.zip "$OUT"/*.zip.sha256
+printf ' --repo tatwo214/TATWO-OS-2.0-beta1-dev-test --title %q\n' "$VERSION"

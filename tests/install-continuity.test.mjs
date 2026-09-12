@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, copyFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 const install = readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
 const publicInstall = readFileSync(new URL('../public/install.sh', import.meta.url), 'utf8');
@@ -93,5 +94,108 @@ test('real installer download/checksum block accepts cache, rejects tampering an
     assert.equal(calls.filter(url => url.endsWith('.sha256')).length, mode === 'missing' ? 0 : 1);
     assert.equal(calls.filter(url => url.endsWith('.zip')).length, mode === 'terminal' ? 1 : 0);
     if (mode === 'tampered') assert.match(result.stderr, /SHA-256 不符/);
+  }
+});
+
+test('W20 real assembly: local reuse, runtime fetch/cache, old release and sealed fallback', () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), 'w20-install-'));
+  const app = join(dir, 'TATWO OS.app'), contents = join(app, 'Contents');
+  const paths = readFileSync(join(root, 'scripts/runtime-layer.txt'), 'utf8').trim().split('\n');
+  const run = (cmd, args) => {
+    const result = spawnSync(cmd, args, { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  for (const path of paths) {
+    mkdirSync(join(contents, path, ...(path.startsWith('Frameworks/') ? ['Resources'] : [])), { recursive: true });
+    writeFileSync(join(contents, path, path.startsWith('Frameworks/') ? 'Resources/fixture.txt' : 'fixture'), `runtime ${path}`);
+  }
+  const framework = join(contents, 'Frameworks/Chromium Embedded Framework.framework');
+  mkdirSync(join(framework, 'Resources'), { recursive: true });
+  copyFileSync('/usr/bin/true', join(framework, 'RuntimeExecutable'));
+  writeFileSync(join(framework, 'Resources/Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>example.fixture.runtime</string>
+    <key>CFBundleExecutable</key><string>RuntimeExecutable</string>
+    <key>CFBundlePackageType</key><string>FMWK</string></dict></plist>`);
+  run('codesign', ['--force', '--sign', '-', framework]);
+  mkdirSync(join(contents, 'MacOS'));
+  copyFileSync('/usr/bin/true', join(contents, 'MacOS/tatwo2'));
+  writeFileSync(join(contents, 'Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>ai.tatwo.tatwo2</string>
+    <key>CFBundleExecutable</key><string>tatwo2</string>
+    <key>CFBundlePackageType</key><string>APPL</string></dict></plist>`);
+  run('bash', [join(root, 'scripts/runtime-layer.sh'), 'prepare', app]);
+  run('codesign', ['--force', '--sign', '-', '--requirements', '=designated => identifier "ai.tatwo.tatwo2"', app]);
+  const assets = join(dir, 'assets');
+  run('bash', [join(root, 'scripts/runtime-layer.sh'), 'split', app, assets]);
+  run('ditto', ['-c', '-k', '--norsrc', '--keepParent', app, join(assets, 'TATWO-OS.zip')]);
+  writeFileSync(join(assets, 'TATWO-OS.zip.sha256'),
+    createHash('sha256').update(readFileSync(join(assets, 'TATWO-OS.zip'))).digest('hex') + '  TATWO-OS.zip\n');
+  const runtimeName = readdirSync(assets).find(n => /^TATWO-OS-runtime-.*\.zip$/.test(n));
+  const repo = 'fixture/repo', base = `https://github.com/${repo}/releases/download/v9.9.9`;
+  const functions = install.slice(install.indexOf('download_full() {'), install.indexOf('# RUNTIME-ASSEMBLY-END'));
+  const selection = install.slice(install.indexOf('SOURCE="$TEMP/split/TATWO OS.app"'),
+    install.indexOf('# Do not silently move development copies'));
+  for (const mode of ['reuse', 'changed', 'cached', 'missing', 'corrupt', 'old-release', 'bad-prefetch', 'no-runtime-asset']) {
+    const temp = join(dir, mode), dest = join(temp, 'installed.app');
+    mkdirSync(temp);
+    run('ditto', [app, dest]);
+    if (['changed', 'cached'].includes(mode)) {
+      writeFileSync(join(dest, 'Contents', paths[0], 'fixture'), 'older valid runtime');
+      run('bash', [join(root, 'scripts/runtime-layer.sh'), 'prepare', dest]);
+      run('codesign', ['--force', '--sign', '-', '--requirements', '=designated => identifier "ai.tatwo.tatwo2"', dest]);
+    }
+    if (mode === 'missing') {
+      // Move, never delete, the fixture runtime to simulate a missing local cache.
+      run('mv', [join(dest, 'Contents', paths[0]), join(temp, 'retained-runtime')]);
+    }
+    if (mode === 'corrupt') writeFileSync(join(dest, 'Contents', paths[0], 'fixture'), 'corrupted local cache');
+    writeFileSync(join(temp, 'release.json'), JSON.stringify({
+      assets: readdirSync(assets).filter(n => n.endsWith('.zip') || n.endsWith('.sha256'))
+        .map(name => ({ name, browser_download_url: `${base}/${name}` })),
+    }));
+    const result = spawnSync('bash', ['-c', `
+      set -euo pipefail
+      fail() { echo "$1" >&2; exit 1; }
+      curl() {
+        local output="" url=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in -o) shift; output="$1";; https:*) url="$1";; esac
+          shift
+        done
+        echo "\${url##*/}" >> "$TEMP/download.calls"
+        cp "$ASSETS/\${url##*/}" "$output"
+      }
+      codesign() {
+        # Fixture-only identity presentation; verification/DR/-R use REAL codesign.
+        if [[ "$1" == -dv ]]; then echo 'Authority=Fixture'; else /usr/bin/codesign "$@"; fi
+      }
+      ${functions}
+      ${selection}
+      printf '%s' "$SOURCE" > "$TEMP/selected"
+    `], { encoding: 'utf8', env: {
+      ...process.env, TEMP: temp, DEST: dest, ASSETS: assets, REPO: repo,
+      ZIP_URL: `${base}/TATWO-OS.zip`, SHA_URL: `${base}/TATWO-OS.zip.sha256`,
+      APP_URL: mode === 'old-release' ? '' : `${base}/TATWO-OS-app.zip`,
+      RUNTIME_NAMES: mode === 'no-runtime-asset' ? ' ' : ` ${runtimeName} `,
+      TATWO_OS_PREFETCHED_ZIP: '',
+      TATWO_OS_PREFETCHED_APP_ZIP: mode === 'bad-prefetch' ? join(temp, 'missing.zip')
+        : mode === 'cached' ? join(assets, 'TATWO-OS-app.zip') : '',
+      TATWO_OS_PREFETCHED_RUNTIME_ZIP: mode === 'cached' ? join(assets, runtimeName) : '',
+    } });
+    assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
+    const calls = readFileSync(join(temp, 'download.calls'), 'utf8').trim().split('\n');
+    const fallback = ['missing', 'corrupt', 'bad-prefetch', 'no-runtime-asset'].includes(mode);
+    assert.equal(calls.filter(n => n === runtimeName).length, ['changed', 'missing'].includes(mode) ? 1 : 0, mode);
+    assert.equal(calls.filter(n => n === `${runtimeName}.sha256`).length, ['changed', 'cached', 'missing'].includes(mode) ? 1 : 0, mode);
+    assert.equal(calls.filter(n => n === 'TATWO-OS.zip').length, fallback || mode === 'old-release' ? 1 : 0, `${mode}: ${result.stderr}`);
+    assert.equal(calls.filter(n => n === 'TATWO-OS-app.zip').length,
+      ['cached', 'old-release', 'bad-prefetch'].includes(mode) ? 0 : 1, mode);
+    if (fallback) assert.match(result.stderr, /執行環境層與簽章不符，改用完整下載/);
+    const selected = readFileSync(join(temp, 'selected'), 'utf8');
+    assert.ok(selected.includes(fallback || mode === 'old-release' ? '/unpacked/' : '/split/'), mode);
+    run('codesign', ['--verify', '--deep', '--strict', selected]);
+    assert.ok(existsSync(dest), 'installed app never replaced by the fixture');
   }
 });

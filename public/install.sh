@@ -43,9 +43,11 @@ STATUS="$(curl --proto '=https' --tlsv1.2 -sSL --connect-timeout 15 --max-time 6
   -H 'Accept: application/vnd.github+json' -o "$TEMP/release.json" -w '%{http_code}' "$ENDPOINT")"
 [[ "$STATUS" != 404 ]] || fail "尚無可用版本（或指定版本不存在）"
 [[ "$STATUS" == 200 ]] || fail "GitHub 回應 HTTP ${STATUS}，請稍後重試"
-ZIP_URL="" SHA_URL="" INSTALL_READY=0 INDEX=0
+ZIP_URL="" SHA_URL="" APP_URL="" RUNTIME_NAMES=" " INSTALL_READY=0 INDEX=0
 while NAME="$(plutil -extract "assets.$INDEX.name" raw -o - "$TEMP/release.json" 2>/dev/null)"; do
   case "$NAME" in
+    TATWO-OS-runtime-????????????.zip) RUNTIME_NAMES+="$NAME " ;;
+    TATWO-OS-app.zip) APP_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
     TATWO-OS.install-ready) INSTALL_READY=1 ;;
     TATWO-OS.zip) ZIP_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
     TATWO-OS.zip.sha256) SHA_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
@@ -57,6 +59,7 @@ done
 for URL in "$ZIP_URL" "$SHA_URL"; do
   [[ "$URL" == "https://github.com/$REPO/releases/download/"* ]] || fail "附件下載網址不符合公開倉庫"
 done
+download_full() {
 printf '正在下載 App 與 SHA-256 校驗檔…\n'
 ZIP="$TEMP/TATWO-OS.zip"
 if [[ -n "${TATWO_OS_PREFETCHED_ZIP:-}" ]]; then
@@ -80,6 +83,7 @@ done < <(unzip -Z1 "$ZIP")
 ditto -x -k "$ZIP" "$TEMP/unpacked"
 SOURCE="$TEMP/unpacked/TATWO OS.app"
 [[ -d "$SOURCE" && ! -L "$SOURCE" && -f "$SOURCE/Contents/Info.plist" ]] || fail "附件內沒有有效的 TATWO OS.app"
+}
 # SHA-256 checks transport integrity; a valid persistent signature checks app identity.
 verify_signed_app() {
   local app="$1" details
@@ -101,7 +105,69 @@ verify_continuity() {
   [[ -n "$requirement" ]] || fail "無法讀取新版簽章身分"
   codesign --verify --deep --strict -R "=$requirement" "$1" || fail "新版簽章要求不相容"
 }
-verify_signed_app "$SOURCE"
+# RUNTIME-ASSEMBLY-BEGIN
+layer_download() {
+  local name="$1" cached="$2" output="$3" url="" checksum="" n=0 entry expected actual
+  while entry="$(plutil -extract "assets.$n.name" raw -o - "$TEMP/release.json" 2>/dev/null)"; do
+    case "$entry" in
+      "$name") url="$(plutil -extract "assets.$n.browser_download_url" raw -o - "$TEMP/release.json")" ;;
+      "$name.sha256") checksum="$(plutil -extract "assets.$n.browser_download_url" raw -o - "$TEMP/release.json")" ;;
+    esac
+    n=$((n + 1))
+  done
+  for entry in "$url" "$checksum"; do
+    [[ "$entry" == "https://github.com/$REPO/releases/download/"* ]] || return 1
+  done
+  curl --proto '=https' --proto-redir '=https' -fsSL --retry 2 -o "$output.sha256" "$checksum" || return 1
+  read -r expected _ < "$output.sha256" || true
+  [[ "${expected:-}" =~ ^[[:xdigit:]]{64}$ ]] || return 1
+  if [[ -n "$cached" ]]; then
+    [[ -f "$cached" ]] && ditto "$cached" "$output" || return 1
+  else
+    curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$output" "$url" || return 1
+  fi
+  actual="$(shasum -a 256 "$output")" || return 1
+  [[ "${actual%% *}" == "$expected" ]] || return 1
+  unzip -Z1 "$output" > "$output.entries" || return 1
+  while IFS= read -r entry; do
+    case "$entry" in /*|../*|*/../*|*/..) return 1 ;; esac
+  done < "$output.entries"
+}
+assemble_runtime() (
+  trap - EXIT ERR
+  local meta="$SOURCE/Contents/Resources/runtime-layer.json" sha old_sha path parent n=0 reuse=1
+  local paths=()
+  layer_download TATWO-OS-app.zip "${TATWO_OS_PREFETCHED_APP_ZIP:-}" "$TEMP/app.zip" || exit 1
+  ditto -x -k "$TEMP/app.zip" "$TEMP/split" || exit 1
+  [[ -d "$SOURCE" && ! -L "$SOURCE" && ! -L "$SOURCE/Contents" ]] || exit 1
+  sha="$(plutil -extract sha raw -o - "$meta")" || exit 1
+  [[ "$sha" =~ ^[0-9a-f]{64}$ && "$RUNTIME_NAMES" == *" TATWO-OS-runtime-${sha:0:12}.zip "* ]] || exit 1
+  old_sha="$(plutil -extract sha raw -o - "$DEST/Contents/Resources/runtime-layer.json" 2>/dev/null)" || old_sha=""
+  [[ "$sha" == "$old_sha" ]] || reuse=0
+  while path="$(plutil -extract "paths.$n" raw -o - "$meta" 2>/dev/null)"; do
+    case "$path" in Resources/*|Frameworks/*) ;; *) exit 1 ;; esac
+    case "/$path/" in *'/../'*|*'/./'*|*'//'*) exit 1 ;; esac
+    parent="$SOURCE/Contents/$path"
+    while [[ "$parent" != "$SOURCE" ]]; do
+      [[ ! -L "$parent" ]] || exit 1
+      parent="$(dirname "$parent")"
+    done
+    paths+=("$path"); n=$((n + 1))
+    [[ -e "$DEST/Contents/$path" || -L "$DEST/Contents/$path" ]] || reuse=0
+  done
+  [[ "$n" -gt 0 ]] || exit 1
+  if [[ "$reuse" == 0 ]]; then
+    layer_download "TATWO-OS-runtime-${sha:0:12}.zip" "${TATWO_OS_PREFETCHED_RUNTIME_ZIP:-}" "$TEMP/runtime.zip" || exit 1
+    ditto -x -k "$TEMP/runtime.zip" "$TEMP/runtime" || exit 1
+  fi
+  for path in "${paths[@]}"; do
+    if [[ "$reuse" == 1 ]]; then parent="$DEST/Contents"; else parent="$TEMP/runtime"; fi
+    ditto "$parent/$path" "$SOURCE/Contents/$path" || exit 1
+  done
+  verify_signed_app "$SOURCE"
+  if [[ -e "$DEST" ]]; then verify_continuity "$DEST" "$SOURCE"; fi
+)
+# RUNTIME-ASSEMBLY-END
 [[ -w /Applications ]] || fail "沒有 /Applications 寫入權限，請使用具權限的帳號"
 # Serialize installers before inspecting the installed baseline.
 if mkdir /Applications/.tatwo-update.lock 2>/dev/null; then
@@ -109,6 +175,14 @@ if mkdir /Applications/.tatwo-update.lock 2>/dev/null; then
 else
   fail "另一個更新正在執行，或先前更新中斷；請確認後再處理更新鎖"
 fi
+SOURCE="$TEMP/split/TATWO OS.app"
+if [[ -n "$APP_URL" ]] && assemble_runtime; then
+  printf '執行環境層組裝與簽章驗證成功。\n'
+else
+  [[ -z "$APP_URL" ]] || printf '執行環境層與簽章不符，改用完整下載\n' >&2
+  download_full
+fi
+verify_signed_app "$SOURCE"
 # Do not silently move development copies or reset their TCC grants.
 for OTHER in /Applications/tatwo2.app "$HOME/Applications/tatwo2.app" "$HOME/Applications/TATWO OS.app"; do
   if [[ -e "$OTHER" || -L "$OTHER" ]]; then
