@@ -99,7 +99,7 @@ test('deterministic manifest, disjoint archives and a sealed reassembly (real di
 
 test('build prepares the sealed manifest after nested signing and before outer signing; release keeps full ZIP', () => {
   const build = readFileSync(join(root, 'scripts/build-app.sh'), 'utf8');
-  assert.equal((build.match(/tatwo_cef_sign_nested_artifacts[^\n]*\n  bash "\$ROOT\/scripts\/runtime-layer.sh" prepare "\$APP"\n  codesign/g) ?? []).length, 2);
+  assert.equal((build.match(/python3 -E "\$ROOT\/scripts\/runtime-sign.py"[^\n]*\n  bash "\$ROOT\/scripts\/runtime-layer.sh" prepare "\$APP"\n  codesign/g) ?? []).length, 2);
   const pkg = readFileSync(join(root, 'scripts/package-release.sh'), 'utf8');
   assert.match(pkg, /ditto -c -k --norsrc --keepParent "\$OUT\/TATWO OS.app" "\$OUT\/TATWO-OS.zip"/);
   assert.match(pkg, /runtime-layer.sh split/);

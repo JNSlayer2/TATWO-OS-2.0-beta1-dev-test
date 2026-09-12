@@ -20,7 +20,7 @@ REFRESH_CEF_INDEX=false
 
 source "$ROOT/scripts/tatwo-cef-bundle.sh"
 tatwo_cef_initialize_runtime_configuration \
-  "$OUT/.cef-cache" \
+  "${TATWO2_CEF_CACHE:-$OUT/.cef-cache}" \
   "$ROOT/Apps/TatwoUltraworkMac/CEF/cef-runtime-arm64.json" \
   true
 prepare_cef_runtime
@@ -101,12 +101,12 @@ if [[ -z "$SIGN_IDENTITY" ]]; then
 fi
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "sign: $SIGN_IDENTITY"
-  tatwo_cef_sign_nested_artifacts "$APP" "$SIGN_IDENTITY" developer
+  python3 -E "$ROOT/scripts/runtime-sign.py" "$APP" "$SIGN_IDENTITY"
   bash "$ROOT/scripts/runtime-layer.sh" prepare "$APP"
   codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
 else
   echo "sign: ad-hoc（找不到開發憑證）"
-  tatwo_cef_sign_nested_artifacts "$APP" - adhoc
+  python3 -E "$ROOT/scripts/runtime-sign.py" "$APP" -
   bash "$ROOT/scripts/runtime-layer.sh" prepare "$APP"
   codesign --force --sign - "$APP"
 fi

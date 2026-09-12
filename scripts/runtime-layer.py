@@ -7,6 +7,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import zipfile
+import shutil
 
 
 def digest(path):
@@ -54,7 +56,24 @@ def ditto(*args):
 
 
 def archive(source, destination, parent=False):
-    ditto("-c", "-k", "--norsrc", *(["--keepParent"] if parent else []), source, destination)
+    if parent:
+        ditto("-c", "-k", "--norsrc", "--keepParent", source, destination)
+    else:
+        # Content-addressed ZIP: no wall-clock timestamps, xattrs, or traversal order.
+        with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for p in sorted(source.rglob('*'), key=lambda p: p.relative_to(source).as_posix().encode()):
+                mode = p.lstat().st_mode
+                directory = stat.S_ISDIR(mode)
+                entry = zipfile.ZipInfo(p.relative_to(source).as_posix() + ('/' if directory else ''),
+                                        date_time=(1980, 1, 1, 0, 0, 0))
+                entry.create_system = 3
+                entry.external_attr = (mode << 16) | (0x10 if directory else 0)
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                if directory or p.is_symlink():
+                    z.writestr(entry, b'' if directory else os.readlink(p).encode())
+                else:
+                    with p.open('rb') as src, z.open(entry, 'w', force_zip64=True) as dst:
+                        shutil.copyfileobj(src, dst, 1048576)
     destination.with_suffix(".zip.sha256").write_text(f"{digest(destination)}  {destination.name}\n")
 
 

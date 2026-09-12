@@ -1,6 +1,6 @@
-Source commit: e105945c4508a7147049826d46ccdef68ca9a2f0
+Source commit: 7da7bb667f7baa0a1e0b2d01a5805f16168a85fd
 Source worktree: clean
-Files: 1427
+Files: 1429
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -1152,6 +1152,7 @@ scripts/run-r1-debug.sh
 scripts/runtime-layer.py
 scripts/runtime-layer.sh
 scripts/runtime-layer.txt
+scripts/runtime-sign.py
 scripts/stage-ipad-use-device.sh
 scripts/tatwo-agent-authority-doctor.sh
 scripts/tatwo-agent-preset-controller.mjs
@@ -1349,6 +1350,7 @@ tests/per-file-delta.test.mjs
 tests/plan-canvas.test.mjs
 tests/plan-transcript-card.test.mjs
 tests/pr-plan.test.mjs
+tests/runtime-determinism.test.mjs
 tests/runtime-layer.test.mjs
 tests/skill-suggestions-refresh.test.mjs
 tests/tatwo-agent-preset-controller.test.mjs
