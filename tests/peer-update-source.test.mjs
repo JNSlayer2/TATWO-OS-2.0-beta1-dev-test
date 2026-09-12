@@ -198,7 +198,10 @@ enum IO {
   static var mode = "", events: [String] = [], published: [String: PeerUpdateEntry] = [:]
   static var assetNames: [String] = []
   static let runtime = "TATWO-OS-runtime-123456789abc.zip"
-  static func bytes(_ name: String) -> Data { Data(("verified fixture " + name).utf8) }
+  static func bytes(_ name: String) -> Data {
+    if name == "TATWO-OS.manifest.json" { return Data(#"{"schema":1,"files":[{"size":1000}]}"#.utf8) }
+    return Data(("verified fixture " + name).utf8)
+  }
 }
 final class ProtocolStub: URLProtocol {
   override class func canInit(with request: URLRequest) -> Bool { true }
@@ -213,16 +216,24 @@ final class ProtocolStub: URLProtocol {
       if privateAsset { precondition(request.value(forHTTPHeaderField: "Accept") == "application/octet-stream") }
     } else { precondition(request.value(forHTTPHeaderField: "Authorization") == nil) }
     if url.path.contains("/contents/") {
-      precondition(url.query == "ref=v9.9.9"); data = Data("#!/bin/bash\\nexit 0\\n".utf8)
+      precondition(url.query == "ref=v9.9.9"); data = Data("#!/bin/bash\\n# OFFLINE-RELEASE-BEGIN\\nexit 0\\n".utf8)
     } else if url.host == "api.github.com" && !privateAsset {
       IO.events.append("release")
       let names = IO.mode == "delta" ? ["TATWO-OS-app.zip", "TATWO-OS.manifest.json", "TATWO-OS-delta-v2.0.5-v9.9.9.zip"] : IO.mode == "legacy" ? ["TATWO-OS.zip"] : ["TATWO-OS-app.zip", IO.runtime]
-      IO.assetNames = names + names.map { $0 + ".sha256" } + ["TATWO-OS.install-ready"]
+      let all = names + ["TATWO-OS.zip", "TATWO-OS.manifest.json"].filter { !names.contains($0) }
+      IO.assetNames = all + all.map { $0 + ".sha256" } + ["TATWO-OS.install-ready"]
       let repo = IO.mode == "private" ? UpdateChannel.privateRepository : "demo/repo"
       let assets = IO.assetNames.enumerated().map { i, name in
         Asset(id:i+1, name:name, browser_download_url: "https://github.com/" + repo + "/releases/download/v9.9.9/" + name, size:name == "TATWO-OS-app.zip" ? 1000 : Int64(IO.bytes(name).count))
       }
       data = try! JSONEncoder().encode(Release(tag_name: "v9.9.9", draft: false, assets: assets))
+    } else if name == "TATWO-OS.manifest.json" { data = IO.bytes(name)
+    } else if name == "TATWO-OS.install-ready" {
+      let names = IO.assetNames.filter { !$0.hasSuffix(".sha256") && $0 != "TATWO-OS.install-ready" }
+      data = Data(names.map { name in
+        let hash = SHA256.hash(data: IO.bytes(name)).map { String(format:"%02x",$0) }.joined()
+        return IO.mode == "legacy" ? name : hash + "  " + name
+      }.joined(separator:"\\n").utf8)
     } else {
       precondition(name.hasSuffix(".sha256")); IO.events.append(name)
       precondition(request.cachePolicy == .reloadIgnoringLocalCacheData)
@@ -277,6 +288,8 @@ ${policy}
   enum Phase { case starting }
   var phase = Phase.starting, downloadID = UUID(), downloadSource = ""
   var totalBytes: Int64 = 0, downloadProgress: Double?
+  var candidateBytes: Int64 = 0
+  func checkSpace() throws { precondition(candidateBytes == 1000); IO.events.append("space") }
   var downloadedBytes: Int64 = 0, downloadBytesPerSecond: Double = 0
   var speedSamples: [(TimeInterval, Int64)] = []
   let fileManager = FileManager.default, directory: URL
@@ -290,7 +303,8 @@ ${digest}
 @main struct Main {
   @MainActor static func main() async throws {
     let root = URL(fileURLWithPath: CommandLine.arguments[1]); IO.mode = CommandLine.arguments[2]
-    let folder = root.appendingPathComponent("download/v9.9.9")
+    let repo = IO.mode == "private" ? UpdateChannel.privateRepository : "demo/repo"
+    let folder = root.appendingPathComponent("download/\\(repo)/v9.9.9")
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     if IO.mode == "cache" || IO.mode == "corruptcache" {
       for name in ["TATWO-OS-app.zip", IO.runtime] {
@@ -308,14 +322,14 @@ ${digest}
       for path in paths { let bytes = try Data(contentsOf: path); precondition(bytes == IO.bytes(path.lastPathComponent)) }
       precondition(IO.published["v9.9.9"]?.sha256.count == paths.count)
       if IO.mode == "private" {
-        precondition(result.privateInstaller != nil && result.username == "fixture")
+        precondition(result.privateInstaller != nil && result.username == nil)
         precondition(!(try! String(contentsOf:result.privateInstaller!, encoding:.utf8)).contains("fixture-only"))
       }
     } catch { precondition(["malformedsha", "cancel"].contains(IO.mode), "unexpected error: \\(error)") }
     if IO.mode == "malformedsha" { precondition(!IO.events.contains("discover")) }
     else {
       let index = IO.events.firstIndex(of: "discover")!
-      precondition(IO.events[..<index].filter { $0.hasSuffix(".sha256") }.count == (IO.mode == "legacy" ? 1 : 2))
+      precondition(IO.events[..<index].filter { $0.hasSuffix(".sha256") }.count == (IO.mode == "legacy" ? 3 : 4))
     }
     let downloads = IO.events.filter { $0.hasPrefix("github:") }
     switch IO.mode {

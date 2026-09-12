@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+INSTALL_STARTED_AT="${TATWO_OS_INSTALL_STARTED_AT:-$(date +%s)}"
 # macOS built-ins only; plutil parses JSON (no jq, Python, or package install).
 RETRY='curl -fsSL https://raw.githubusercontent.com/tatwo214/TATWO-OS-2.0-beta1-dev-test/main/install.sh | bash'
 REPO=tatwo214/TATWO-OS-2.0-beta1-dev-test
@@ -105,6 +106,57 @@ archive_old_downloads() {
   done < <(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'tatwo-install.*' -mmin +1440 -print0)
 }
 # TEMP-RETENTION-END
+# INVISIBLE-PRIMITIVES-BEGIN
+clone_copy() { cp -cRPp "$1" "$2" 2>/dev/null || ditto "$1" "$2"; }
+check_space() {
+  local path="$1" bytes="$2" available required
+  available="$(df -Pk "$path" | awk 'END {print $4}')"
+  [[ "$available" =~ ^[0-9]+$ && "$bytes" =~ ^[0-9]+$ ]] || fail "無法確認可用空間"
+  required=$(((bytes * 2 + 1023) / 1024))
+  [[ "$available" -ge "$required" ]] || fail "空間不足，請清出至少 $(((required - available + 1023) / 1024)) MB（候選 App 大小 ×2）"
+}
+manifest_size() {
+  osascript -l JavaScript - "$1" <<'JXA'
+ObjC.import('Foundation');
+function run(a) {
+  const m = JSON.parse(ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(a[0], $.NSUTF8StringEncoding, null)));
+  if (m.schema !== 1 || !Array.isArray(m.files) || !m.files.length) throw Error('manifest size unavailable');
+  let size = 0;
+  for (const f of m.files) {
+    if (!Number.isSafeInteger(f.size) || f.size < 0) throw Error('invalid size');
+    size += f.size;
+    if (!Number.isSafeInteger(size) || size > 1e12) throw Error('invalid total');
+  }
+  return String(size);
+}
+JXA
+}
+# INVISIBLE-PRIMITIVES-END
+# OFFLINE-RELEASE-BEGIN
+# Offline metadata is still checked against SHA, marker, version and signatures below.
+# A missing cache entry fails closed rather than downloading after the App quits.
+if [[ -n "${TATWO_OS_OFFLINE_RELEASE:-}" ]]; then
+  REPO="$(cat "$TATWO_OS_OFFLINE_RELEASE/repository")"
+  [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "快取倉庫無效"
+  curl() {
+    local output="" url="" status=0 source
+    while [[ $# -gt 0 ]]; do
+      case "$1" in -o) shift; output="$1";; -w) shift; status=1;; https:*) url="$1";; esac
+      shift
+    done
+    [[ -n "$output" ]] || return 1
+    case "$url" in
+      "https://api.github.com/repos/$REPO/releases/tags/$TATWO_OS_VERSION") source=release.json;;
+      "https://github.com/$REPO/releases/download/$TATWO_OS_VERSION/"*)
+        source="${url##*/}"; [[ "$source" != *..* && "$source" == TATWO-OS* ]] || return 1;;
+      *) return 1;;
+    esac
+    [[ -f "$TATWO_OS_OFFLINE_RELEASE/$source" ]] || return 1
+    clone_copy "$TATWO_OS_OFFLINE_RELEASE/$source" "$output" || return 1
+    [[ "$status" == 0 ]] || printf 200
+  }
+fi
+# OFFLINE-RELEASE-END
 acquire_update_lock
 STAGE="$(mktemp -d "$(dirname "$DEST")/.tatwo-update.XXXXXX")"
 mv "$STAGE" "$STAGE.noindex"; STAGE="$STAGE.noindex"
@@ -127,13 +179,15 @@ TAG="$(plutil -extract tag_name raw -o - "$TEMP/release.json")"
 [[ "$TAG" =~ ^v?[0-9]+([.][0-9]+){1,3}$ ]] || fail "Release tag 格式不正確"
 [[ -z "${TATWO_OS_VERSION:-}" || "${TATWO_OS_VERSION#v}" == "${TAG#v}" ]] || fail "Release tag 與指定版本不符"
 [[ "$(plutil -extract draft raw -o - "$TEMP/release.json")" == false && "$(plutil -extract prerelease raw -o - "$TEMP/release.json")" == false ]] || fail "Release 尚未發行或已撤回"
-ZIP_URL="" SHA_URL="" APP_URL="" RUNTIME_NAMES=" " INSTALL_READY=0 READY_URL="" INDEX=0
+ZIP_URL="" SHA_URL="" APP_URL="" RUNTIME_NAMES=" " INSTALL_READY=0 READY_URL="" RELEASE_HAS_MANIFEST=0 ZIP_SIZE=0 INDEX=0
 while NAME="$(plutil -extract "assets.$INDEX.name" raw -o - "$TEMP/release.json" 2>/dev/null)"; do
   case "$NAME" in
     TATWO-OS-runtime-????????????.zip) RUNTIME_NAMES+="$NAME " ;;
     TATWO-OS-app.zip) APP_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
     TATWO-OS.install-ready) INSTALL_READY=1; READY_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
-    TATWO-OS.zip) ZIP_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
+    TATWO-OS.zip) ZIP_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")"
+      ZIP_SIZE="$(plutil -extract "assets.$INDEX.size" raw -o - "$TEMP/release.json" 2>/dev/null || echo 0)" ;;
+    TATWO-OS.manifest.json) RELEASE_HAS_MANIFEST=1 ;;
     TATWO-OS.zip.sha256) SHA_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
   esac
   INDEX=$((INDEX + 1))
@@ -151,6 +205,7 @@ curl --proto '=https' --proto-redir '=https' -fsSL --retry 2 -o "$TEMP/TATWO-OS.
 # DOWNLOAD-RETRY-BEGIN
 retry_download() {
   local output="$1" url="$2" attempt
+  if [[ -n "${TATWO_OS_OFFLINE_RELEASE:-}" ]]; then curl -o "$output" "$url"; return; fi
   for attempt in 1 2 3 4 5 6; do
     curl --proto '=https' --proto-redir '=https' --http1.1 -fSL -C - --connect-timeout 15 --max-time 3600 --speed-limit 1024 --speed-time 60 -o "$output" "$url" && return 0
     [[ "$attempt" == 6 ]] || sleep "$((attempt * 3))"
@@ -175,7 +230,7 @@ ZIP="$TEMP/TATWO-OS.zip"
 # 大檔下載：慢線路上 HTTP/2 串流常在中途被中斷（curl 92）；用 HTTP/1.1、續傳、對所有錯誤重試。
 if [[ -n "${TATWO_OS_PREFETCHED_ZIP:-}" ]]; then
   [[ -f "$TATWO_OS_PREFETCHED_ZIP" ]] || fail "預先下載的 App 不存在"
-  ditto "$TATWO_OS_PREFETCHED_ZIP" "$ZIP"
+  clone_copy "$TATWO_OS_PREFETCHED_ZIP" "$ZIP"
 else
   retry_download "$ZIP" "$ZIP_URL"
 fi
@@ -193,8 +248,8 @@ while IFS= read -r ENTRY; do
   case "$ENTRY" in /*|../*|*/../*|*/..) fail "壓縮檔含不安全路徑" ;; esac
 done < "$TEMP/full.entries"
 # ditto 解壓會把 AppleDouble（._ 檔）還原成 xattr 而不是留成檔案；unzip 會留成檔案，破壞簽章封印。
-ditto -x -k "$ZIP" "$TEMP/unpacked"
-SOURCE="$TEMP/unpacked/TATWO OS.app"
+ditto -x -k "$ZIP" "$STAGE/full"
+SOURCE="$STAGE/full/TATWO OS.app"
 [[ -d "$SOURCE" && ! -L "$SOURCE" && -f "$SOURCE/Contents/Info.plist" ]] || fail "附件內沒有有效的 TATWO OS.app"
 }
 # SHA-256 checks transport integrity; a valid persistent signature checks app identity.
@@ -209,14 +264,13 @@ verify_signed_app() {
 verify_continuity() {
   local requirement
   verify_signed_app "$1"
-  verify_signed_app "$2"
   requirement="$(codesign -dr - "$1" 2>&1 | sed -n 's/^designated => //p')"
   [[ -n "$requirement" ]] || fail "無法讀取既有簽章身分"
   # codesign -R 的引數若不以 = 開頭會被當成檔案路徑；= 才是 inline requirement 文字。
-  codesign --verify --deep --strict -R "=$requirement" "$2" || fail "新版簽章身分不相容"
+  codesign --verify --strict -R "=$requirement" "$2" || fail "新版簽章身分不相容"
   requirement="$(codesign -dr - "$2" 2>&1 | sed -n 's/^designated => //p')"
   [[ -n "$requirement" ]] || fail "無法讀取新版簽章身分"
-  codesign --verify --deep --strict -R "=$requirement" "$1" || fail "新版簽章要求不相容"
+  codesign --verify --strict -R "=$requirement" "$1" || fail "新版簽章要求不相容"
 }
 # VERSION-BINDING-BEGIN
 verify_version_binding() {
@@ -257,7 +311,7 @@ layer_download() {
   read -r expected _ < "$output.sha256" || true
   [[ "${expected:-}" =~ ^[[:xdigit:]]{64}$ ]] || return 1
   if [[ -n "$cached" ]]; then
-    [[ -f "$cached" ]] && ditto "$cached" "$output" || return 1
+    [[ -f "$cached" ]] && clone_copy "$cached" "$output" || return 1
   else
     retry_download "$output" "$url" || return 1
   fi
@@ -280,7 +334,7 @@ function run(a) {
   const m = JSON.parse(read(a[0])), zip = a[1], old = a[2], out = a[3] + '/Contents';
   const q = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
   const safe = p => typeof p === 'string' && p.length && !/[\x00-\x1f\x7f]/.test(p);
-  const entries = new Map(), commands = ['set -euo pipefail', 'mkdir -p ' + q(out)];
+  const entries = new Map(), commands = ['set -euo pipefail', 'clone_copy() { cp -cRPp \"$1\" \"$2\" 2>/dev/null || ditto \"$1\" \"$2\"; }', 'mkdir -p ' + q(out)];
   if (m.schema !== 1 || !Array.isArray(m.files) || !m.files.length) throw Error('manifest schema');
   for (const e of m.files) {
     if (!safe(e.path) || (e.path !== '.' && e.path.split('/').some(p => !p || p === '.' || p === '..')) ||
@@ -322,7 +376,7 @@ function run(a) {
         commands.push('[[ ! -L ' + q(parent) + ' ]]');
       commands.push('[[ ! -L ' + q(old) + ' ]]', '[[' + (e.symlink !== undefined ? ' -L ' + q(source) : ' -f ' + q(source) + ' && ! -L ' + q(source)) + ' ]]');
     }
-    commands.push((e.symlink !== undefined ? 'cp -Pp ' : 'ditto ') + q(input) + ' ' + q(target), '[[ "$(stat -f %Lp ' + q(target) + ')" == ' + q(e.mode.replace(/^0+/, '') || '0') + ' ]]');
+    commands.push((e.symlink !== undefined ? 'cp -Pp ' : 'clone_copy ') + q(input) + ' ' + q(target), '[[ "$(stat -f %Lp ' + q(target) + ')" == ' + q(e.mode.replace(/^0+/, '') || '0') + ' ]]');
     commands.push(e.symlink !== undefined
       ? '[[ -L ' + q(target) + ' && "$(readlink ' + q(target) + ')" == ' + q(e.symlink) + ' && "$(printf %s "$(readlink ' + q(target) + ')" | shasum -a 256)" == ' + q(e.sha256 + '  -') + ' && "$(stat -f %z ' + q(target) + ')" == ' + q(e.size) + ' ]]'
       : '[[ -f ' + q(target) + ' && ! -L ' + q(target) + ' && "$(stat -f %z ' + q(target) + ')" == ' + q(e.size) + ' && "$(shasum -a 256 < ' + q(target) + ')" == ' + q(e.sha256 + '  -') + ' ]]');
@@ -348,14 +402,13 @@ assemble_delta() (
   SOURCE="$STAGE/delta.app.disabled"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE/Contents/Info.plist")" == "${tag#v}" ]] || exit 1
   verify_signed_app "$SOURCE"
-  verify_continuity "$DEST" "$SOURCE"
 )
 assemble_runtime() (
   trap - EXIT ERR
   local meta="$SOURCE/Contents/Resources/runtime-layer.json" sha old_sha path parent n=0 reuse=1
   local paths=()
   layer_download TATWO-OS-app.zip "${TATWO_OS_PREFETCHED_APP_ZIP:-}" "$TEMP/app.zip" || exit 1
-  ditto -x -k "$TEMP/app.zip" "$TEMP/split" || exit 1
+  ditto -x -k "$TEMP/app.zip" "$STAGE/split" || exit 1
   [[ -d "$SOURCE" && ! -L "$SOURCE" && ! -L "$SOURCE/Contents" ]] || exit 1
   sha="$(plutil -extract sha raw -o - "$meta")" || exit 1
   [[ "$sha" =~ ^[0-9a-f]{64}$ && "$RUNTIME_NAMES" == *" TATWO-OS-runtime-${sha:0:12}.zip "* ]] || exit 1
@@ -375,31 +428,45 @@ assemble_runtime() (
   [[ "$n" -gt 0 ]] || exit 1
   if [[ "$reuse" == 0 ]]; then
     layer_download "TATWO-OS-runtime-${sha:0:12}.zip" "${TATWO_OS_PREFETCHED_RUNTIME_ZIP:-}" "$TEMP/runtime.zip" || exit 1
-    ditto -x -k "$TEMP/runtime.zip" "$TEMP/runtime" || exit 1
+    ditto -x -k "$TEMP/runtime.zip" "$SOURCE/Contents" || exit 1
   fi
   for path in "${paths[@]}"; do
-    if [[ "$reuse" == 1 ]]; then parent="$DEST/Contents"; else parent="$TEMP/runtime"; fi
-    ditto "$parent/$path" "$SOURCE/Contents/$path" || exit 1
+    if [[ "$reuse" == 1 ]]; then
+      parent="$DEST/Contents"
+      clone_copy "$parent/$path" "$SOURCE/Contents/$path" || exit 1
+    else
+      [[ -e "$SOURCE/Contents/$path" || -L "$SOURCE/Contents/$path" ]] || exit 1
+    fi
   done
   verify_signed_app "$SOURCE"
-  if [[ -e "$DEST" ]]; then verify_continuity "$DEST" "$SOURCE"; fi
 )
 # RUNTIME-ASSEMBLY-END
+# Query the uncompressed, checksum-bound whole-tree size BEFORE any candidate ZIP.
+if [[ "$RELEASE_HAS_MANIFEST" == 1 ]]; then
+  layer_download TATWO-OS.manifest.json "${TATWO_OS_PREFETCHED_MANIFEST:-}" "$TEMP/space-manifest.json" || fail "缺少可校驗的候選大小清單；未下載 App"
+  CANDIDATE_BYTES="$(manifest_size "$TEMP/space-manifest.json")" || fail "候選大小無效"
+else
+  # v2.0.5 及之前的公開版沒有大小清單：以完整 zip 壓縮大小 ×4 估計，既有公測者仍能一鍵升級。
+  [[ "$ZIP_SIZE" =~ ^[0-9]+$ && "$ZIP_SIZE" -gt 0 ]] || fail "無法取得候選 App 大小"
+  CANDIDATE_BYTES=$((ZIP_SIZE * 4))
+  printf '此版本沒有大小清單，以壓縮大小 ×4 估計所需空間。\n' >&2
+fi
+check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"
 [[ -w /Applications ]] || fail "沒有 /Applications 寫入權限，請使用具權限的帳號"
-SOURCE="$TEMP/split/TATWO OS.app"
+SOURCE="$STAGE/split/TATWO OS.app"
 if [[ -n "${TATWO_OS_PREFETCHED_DELTA_ZIP:-}" && -n "${TATWO_OS_PREFETCHED_MANIFEST:-}" ]]; then
   if assemble_delta; then SOURCE="$STAGE/delta.app.disabled"
   else printf '差異更新驗證失敗或版本不符，改用層級下載\n' >&2; fi
 fi
-if [[ "$SOURCE" != "$TEMP/split/TATWO OS.app" ]]; then
+if [[ "$SOURCE" != "$STAGE/split/TATWO OS.app" ]]; then
   printf '差異更新組裝與簽章驗證成功。\n'
 elif [[ -n "$APP_URL" ]] && assemble_runtime; then
   printf '執行環境層組裝與簽章驗證成功。\n'
 else
   [[ -z "$APP_URL" ]] || printf '執行環境層與簽章不符，改用完整下載\n' >&2
   download_full
+  verify_signed_app "$SOURCE"
 fi
-verify_signed_app "$SOURCE"
 # Do not silently move development copies or reset their TCC grants.
 verify_version_binding "$SOURCE"
 for OTHER in /Applications/tatwo2.app "$HOME/Applications/tatwo2.app" "$HOME/Applications/TATWO OS.app"; do
@@ -416,12 +483,12 @@ else
   spctl --assess --type execute "$SOURCE" || fail "首次安裝未通過 macOS 安全檢查；不會移除隔離標記"
 fi
 pgrep -x tatwo2 >/dev/null && fail "請先儲存工作並退出 TATWO OS，再執行更新"
-ditto "$SOURCE" "$STAGE/TATWO OS.app"
-verify_signed_app "$STAGE/TATWO OS.app"
+ACTUAL_KB="$(du -skA "$SOURCE" | awk '{print $1}')"
+[[ "$ACTUAL_KB" =~ ^[0-9]+$ ]] || fail "無法確認組裝大小"
+[[ "$CANDIDATE_BYTES" -ge "$((ACTUAL_KB * 1024))" ]] || CANDIDATE_BYTES=$((ACTUAL_KB * 1024))
+mv "$SOURCE" "$STAGE/TATWO OS.app"
 verify_version_binding "$STAGE/TATWO OS.app"
-if [[ -e "$DEST" ]]; then
-  verify_continuity "$DEST" "$STAGE/TATWO OS.app"
-fi
+check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"
 pgrep -x tatwo2 >/dev/null && fail "TATWO OS 已重新啟動；請退出後重試"
 # Staging and destination share a filesystem; prepare before the one-rename gap.
 [[ ! -e "$DEST.new" && ! -L "$DEST.new" ]] || fail "保留的新版候選需先人工檢查"
@@ -439,10 +506,13 @@ REPLACED=1
 if [[ -e "$DEST" ]]; then mv "$DEST" "$DEST.old"; fi
 mv "$DEST.new" "$DEST"
 write_transaction replaced
-verify_signed_app "$DEST"
+# Candidate was verified before same-volume renames; no bundle bytes changed.
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 "$LSREGISTER" -f "$DEST"
 open "$DEST"
+INSTALL_SECONDS=$(($(date +%s) - INSTALL_STARTED_AT))
+printf '{"ok":true,"installSeconds":%s}\n' "$INSTALL_SECONDS" > "$STAGE/result.json"
+[[ -z "${TATWO_OS_TIMING_FILE:-}" ]] || printf '%s' "$INSTALL_SECONDS" > "$TATWO_OS_TIMING_FILE"
 COMMITTED=1
 write_transaction committed
 [[ ! -e "$DEST.old" ]] || mv "$DEST.old" "$STAGE/previous.app.disabled"

@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import CryptoKit
 import Darwin
+import Network
 
 /// 先在 App 內下載校驗，再交給 launchd 執行原安裝器；簽章、替換與回復仍由 install.sh 負責。
 private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
@@ -182,6 +183,7 @@ private enum UpdateDelta {
 final class InAppUpdater: ObservableObject {
     enum Phase: Equatable {
         case idle
+        case ready
         case starting
         case handedOff
         case failed(String)
@@ -203,6 +205,61 @@ final class InAppUpdater: ObservableObject {
     private var speedSamples: [(time: TimeInterval, bytes: Int64)] = []
     private var download: Task<Void, Never>?
     private var downloadID = UUID()
+    private let network = NWPathMonitor()
+    private var unmetered = false
+    private var manualDownload = false
+    private var pendingCandidate: (tag: String, repository: String)?
+    private var prepared: (tag: String, repository: String, archives: UpdateArchives)?
+    @Published private(set) var preparationReason = ""
+    private var candidateBytes: Int64 = 0
+
+    private func checkSpace() throws {
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        for volume in [directory, URL(fileURLWithPath: Self.destinationApp).deletingLastPathComponent()] {
+            let free = (try fileManager.attributesOfFileSystem(forPath: volume.path)[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+            let required = max(2_000_000_000, candidateBytes * 2)
+            guard free >= required else { throw NSError(domain: "Updater", code: 2, userInfo:
+                [NSLocalizedDescriptionKey: String(format: "空間不足，請清出至少 %.1f GB", Double(required - free) / 1_000_000_000)]) }
+        }
+    }
+
+    func preparationTitle(_ tag: String) -> String {
+        if phase == .ready, prepared?.tag == tag { return "\(tag) 已準備好" }
+        if phase == .handedOff { return "正在重新啟動…" }
+        if case .failed(let reason) = phase { return reason }
+        if !preparationReason.isEmpty { return preparationReason }
+        if phase == .idle { return "已找到 \(tag)" }
+        return String(format: "正在準備 %@（%.1f / %.1f MB）", tag, Double(downloadedBytes) / 1_000_000, Double(totalBytes) / 1_000_000)
+    }
+
+    func invalidateCandidate() {
+        pendingCandidate = nil; prepared = nil; preparationReason = ""
+        if phase == .starting { download?.cancel() }
+        else if phase != .handedOff { phase = .idle }
+    }
+
+    func prefetch(to tag: String, repository: String, force: Bool = false) {
+        if prepared?.tag == tag && prepared?.repository == repository { return }
+        guard phase != .handedOff else { return }
+        if phase == .starting {
+            if pendingCandidate?.tag != tag || pendingCandidate?.repository != repository {
+                pendingCandidate = (tag, repository); download?.cancel()
+            }
+            return
+        }
+        prepared = nil; phase = .idle; candidateBytes = 0; pendingCandidate = (tag, repository)
+        guard force || unmetered else { preparationReason = "已找到 \(tag)，等 Wi‑Fi 再自動下載"; return }
+        do { try checkSpace() } catch { preparationReason = error.localizedDescription; return }
+        manualDownload = force; preparationReason = ""
+        beginPrefetch(to: tag, repository: repository)
+    }
+
+    func update(to tag: String, repository: String? = nil) {
+        guard phase == .ready, let prepared, prepared.tag == tag,
+              prepared.repository == (repository ?? GitHubReleaseUpdateChecker.shared.repository) else { return }
+        do { try checkSpace() } catch { self.prepared = nil; phase = .failed(error.localizedDescription); return }
+        handOff(tag: tag, repository: prepared.repository, zip: prepared.archives)
+    }
     private let fileManager: FileManager
     private let directory: URL
 
@@ -212,6 +269,21 @@ final class InAppUpdater: ObservableObject {
         self.directory = directory
             ?? fileManager.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/TATWO OS/Updater", isDirectory: true)
+        network.pathUpdateHandler = { [weak self] path in
+            let allowed = path.status == .satisfied && path.isExpensive == false && !path.isConstrained
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.unmetered = allowed
+                if !allowed && !self.manualDownload && self.phase == .starting {
+                    self.preparationReason = "已找到 \(self.pendingCandidate?.tag ?? "新版")，等 Wi‑Fi 再自動下載"
+                    self.download?.cancel()
+                }
+                if allowed, let candidate = self.pendingCandidate {
+                    self.prefetch(to: candidate.tag, repository: candidate.repository)
+                }
+            }
+        }
+        network.start(queue: DispatchQueue(label: "tatwo.update.network"))
     }
 
     private var runID = UUID().uuidString
@@ -273,7 +345,7 @@ final class InAppUpdater: ObservableObject {
     }
 
     /// 由更新卡呼叫。tag 必須是檢查器剛回報的 Release tag；不接受任意輸入。
-    func update(to tag: String, repository: String? = nil) {
+    private func beginPrefetch(to tag: String, repository: String? = nil) {
         let checker = GitHubReleaseUpdateChecker.shared
         let repository = repository ?? checker.repository
         guard phase == .idle || { if case .failed = phase { return true }; return false }() else { return }
@@ -287,11 +359,18 @@ final class InAppUpdater: ObservableObject {
         downloadBytesPerSecond = 0; speedSamples = []
         let id = UUID(); downloadID = id
         download = Task {
-            defer { download = nil }
+            defer {
+                download = nil
+                if Task.isCancelled, unmetered, let next = pendingCandidate {
+                    prefetch(to: next.tag, repository: next.repository)
+                }
+            }
             do {
                 let zip = try await prefetch(tag: tag, repository: repository, session: checker.session, id: id)
                 try Task.checkCancellation()
-                handOff(tag: tag, repository: repository, zip: zip)
+                try checkSpace()
+                prepared = (tag, repository, zip); pendingCandidate = nil
+                phase = .ready
             } catch {
                 phase = Task.isCancelled ? .idle : .failed(error.localizedDescription)
                 downloadProgress = nil
@@ -299,11 +378,11 @@ final class InAppUpdater: ObservableObject {
         }
     }
 
-    func cancelUpdate() { download?.cancel() }
+    func cancelUpdate() { pendingCandidate = nil; preparationReason = "已暫停準備"; download?.cancel() }
 
     func resumableBytes(for tag: String) -> Int64? {
         guard PeerUpdateSource.validTag(tag),
-              let files = fileManager.enumerator(at: directory.appendingPathComponent("download/\(tag)"),
+              let files = fileManager.enumerator(at: directory.appendingPathComponent("download/\(GitHubReleaseUpdateChecker.shared.repository)/\(tag)"),
                                                 includingPropertiesForKeys: [.fileSizeKey]) else { return nil }
         var bytes: [String: Int64] = [:]
         for case let file as URL in files {
@@ -443,8 +522,34 @@ final class InAppUpdater: ObservableObject {
             if !UpdateRuntimeLayer.canReuse(contents: URL(fileURLWithPath: Self.destinationApp).appendingPathComponent("Contents"),
                                             archiveName: runtime.name) { archives.append(runtime) }
         }
-        let folder = directory.appendingPathComponent("download/\(tag)", isDirectory: true)
+        let folder = directory.appendingPathComponent("download/\(repository)/\(tag)", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try Data(repository.utf8).write(to: folder.appendingPathComponent("repository"), options: .atomic)
+        try data.write(to: folder.appendingPathComponent("release.json"), options: .atomic)
+        for name in ["TATWO-OS.install-ready", "TATWO-OS.manifest.json", "TATWO-OS.manifest.json.sha256", "TATWO-OS.zip.sha256"] {
+            let (bytes, response) = try await session.data(for: try assetRequest(asset(name)))
+            try check(response); try bytes.write(to: folder.appendingPathComponent(name), options: .atomic)
+        }
+        let manifestURL = folder.appendingPathComponent("TATWO-OS.manifest.json")
+        let expected = try String(contentsOf: folder.appendingPathComponent("TATWO-OS.manifest.json.sha256"), encoding: .utf8).split(whereSeparator: { $0.isWhitespace }).first.map(String.init)
+        guard try await Self.digest(manifestURL) == expected?.lowercased(),
+              let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any],
+              let files = manifest["files"] as? [[String: Any]], !files.isEmpty else { throw failure("無法確認候選 App 大小") }
+        candidateBytes = 0
+        for file in files {
+            guard let size = file["size"] as? NSNumber, size.int64Value >= 0,
+                  size.int64Value < 1_000_000_000_000, candidateBytes < 1_000_000_000_000 else { throw failure("候選大小無效") }
+            candidateBytes += size.int64Value
+        }
+        try checkSpace()
+        let marker = try String(contentsOf: folder.appendingPathComponent("TATWO-OS.install-ready"), encoding: .utf8)
+        let bindings = marker.split(separator: "\n").map { $0.split(whereSeparator: { $0.isWhitespace }).map(String.init) }
+        func markerMatches(_ name: String, _ hash: String) -> Bool {
+            guard bindings.contains(where: { $0.first?.count == 64 }) else { return true } // W26 legacy marker.
+            let entries = bindings.filter { $0.count == 2 && $0[1] == name }
+            return entries.count == 1 && entries[0][0].lowercased() == hash.lowercased()
+        }
+        guard markerMatches("TATWO-OS.manifest.json", expected ?? "") else { throw failure("install-ready SHA 不符") }
         let plannedBytes = archives.reduce(Int64(0)) { $0 + max(0, $1.size) }
         totalBytes = plannedBytes
         speedSamples = [(ProcessInfo.processInfo.systemUptime, 0)]
@@ -459,6 +564,7 @@ final class InAppUpdater: ObservableObject {
             let expected = String(decoding: sha, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
             guard expected.range(of: "^[0-9A-Fa-f]{64}$", options: .regularExpression) != nil else { throw failure("校驗失敗：SHA-256 格式錯誤") }
             try sha.write(to: folder.appendingPathComponent(checksum.name), options: .atomic)
+            guard markerMatches(archive.name, expected) else { throw failure("install-ready SHA 不符") }
             expectedHashes[archive.name] = expected.lowercased()
         }
         downloadSource = "詢問已配對設備…"
@@ -529,17 +635,18 @@ final class InAppUpdater: ObservableObject {
             else if archive.name == deltaName { result.deltaZip = zip }
             else { result.runtimeZip = zip }
         }
-        if repository == UpdateChannel.privateRepository {
-            // Fetch the installer at the selected tag; never serialize Authorization into the helper.
-            var scriptRequest = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/contents/scripts/install-private.sh?ref=\(tag)")!)
-            scriptRequest.setValue("application/vnd.github.raw+json", forHTTPHeaderField: "Accept")
-            channel.authorize(&scriptRequest)
-            let (script, response) = try await session.data(for: scriptRequest)
-            try check(response)
-            let local = folder.appendingPathComponent("install-private.sh")
-            try script.write(to: local, options: .atomic)
-            result.privateInstaller = local; result.username = channel.username
+        // Cache the shared, tag-pinned installer too; restart never fetches a control script.
+        var scriptRequest = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/contents/install.sh?ref=\(tag)")!)
+        scriptRequest.setValue("application/vnd.github.raw+json", forHTTPHeaderField: "Accept")
+        channel.authorize(&scriptRequest)
+        let (script, response) = try await session.data(for: scriptRequest)
+        try check(response)
+        let local = folder.appendingPathComponent("install.sh")
+        guard String(decoding: script, as: UTF8.self).contains("# OFFLINE-RELEASE-BEGIN") else {
+            throw failure("此版本安裝器尚未支援背景準備，請使用進階更新")
         }
+        try script.write(to: local, options: .atomic)
+        result.privateInstaller = local
         downloadProgress = 1
         return result
     }
@@ -639,6 +746,9 @@ final class InAppUpdater: ObservableObject {
                   object["runID"] as? String == id else { continue }
             let tag = object["tag"] as? String ?? "", message = object["message"] as? String ?? ""
             lastResult = (object["ok"] as? Bool == true) ? "已更新到 \(tag)" : "更新 \(tag) 未完成（\(Self.describe(message))）"
+            if let seconds = object["installSeconds"] as? Int, object["ok"] as? Bool == true {
+                lastResult = (lastResult ?? "") + " · 上次更新用了 \(seconds) 秒"
+            }
             try? fileManager.createDirectory(at: ack.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? Data(id.utf8).write(to: ack, options: .atomic)
             return
@@ -688,10 +798,11 @@ final class InAppUpdater: ObservableObject {
         export TATWO_OS_PREFETCHED_MANIFEST=\(quoted(prefetchedManifest))
         PRIVATE_INSTALLER=\(quoted(privateInstaller))
         export TATWO_OS_GITHUB_USERNAME=\(quoted(githubUsername))
-        WAIT=\(helperWaitSeconds)
+        START_SECONDS=$SECONDS
+        WAIT=$((\(helperWaitSeconds) * 5))
         export PATH=/usr/bin:/bin:/usr/sbin:/sbin
         write_result() {
-          printf '{"ok":%s,"tag":"%s","message":"%s","runID":"%s"}\\n' "$1" "$TAG" "$2" "$RUN_ID" > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
+          printf '{"ok":%s,"tag":"%s","message":"%s","runID":"%s","installSeconds":%s}\\n' "$1" "$TAG" "$2" "$RUN_ID" "$(if [ -f "${TATWO_OS_TIMING_FILE:-}" ]; then cat "$TATWO_OS_TIMING_FILE"; else echo "$((SECONDS - START_SECONDS))"; fi)" > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
         }
         abnormal_exit() {
           trap - EXIT INT TERM
@@ -713,17 +824,21 @@ final class InAppUpdater: ObservableObject {
         reopen_if_stopped() { pgrep -x tatwo2 >/dev/null || { [ ! -d "$DEST" ] || open "$DEST"; }; }
         printf '[%s] 等待 TATWO OS（pid %s）退出…\\n' "$(date '+%F %T')" "$PID" >> "$LOG"
         i=0
-        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt "$WAIT" ]; do sleep 1; i=$((i + 1)); done
+        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt "$WAIT" ]; do sleep 0.2; i=$((i + 1)); done
         if kill -0 "$PID" 2>/dev/null; then
           write_result false app_still_running
           finish
         fi
+        START_SECONDS=$SECONDS
+        export TATWO_OS_INSTALL_STARTED_AT="$(date +%s)"
+        export TATWO_OS_TIMING_FILE="$RESULT.seconds"
         if pgrep -x tatwo2 >/dev/null; then
           write_result false app_relaunched
           finish
         fi
         if [ -n "$PRIVATE_INSTALLER" ]; then
           SCRIPT="$PRIVATE_INSTALLER"
+          export TATWO_OS_OFFLINE_RELEASE="$(dirname "$SCRIPT")"
         elif [ -n "${TATWO2_UPDATE_INSTALL_SCRIPT:-}" ]; then
           SCRIPT="$TATWO2_UPDATE_INSTALL_SCRIPT"
         else

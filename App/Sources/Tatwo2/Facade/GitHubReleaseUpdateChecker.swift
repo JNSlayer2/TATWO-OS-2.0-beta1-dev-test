@@ -94,6 +94,8 @@ struct UpdateChannel {
 @MainActor
 final class GitHubReleaseUpdateChecker: ObservableObject {
     struct Release: Decodable, Equatable {
+        struct Asset: Decodable, Equatable { let name: String }
+        var assets: [Asset]? = nil
         let tag_name: String
         let name: String?
         let draft: Bool
@@ -152,7 +154,12 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
     func check() async {
         guard !isChecking else { return }
         isChecking = true
-        defer { lastCheckedAt = Date(); isChecking = false }
+        defer {
+            lastCheckedAt = Date(); isChecking = false
+            if availableRelease?.assets?.contains(where: { $0.name == "TATWO-OS.install-ready" }) != true {
+                InAppUpdater.shared.invalidateCandidate()
+            }
+        }
         let channel = UpdateChannel.current()
         if isPrivateChannel != channel.isPrivate { availableRelease = nil }
         isPrivateChannel = channel.isPrivate
@@ -186,6 +193,9 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
                 && ReleaseVersionCompare.isNewer(release.tag_name, than: installedVersion) {
                 availableRelease = release
                 status = "有新版"
+                if release.assets?.contains(where: { $0.name == "TATWO-OS.install-ready" }) == true {
+                    InAppUpdater.shared.prefetch(to: release.tag_name, repository: repository)
+                }
             } else {
                 availableRelease = nil
                 status = "目前沒有較新的正式版本"

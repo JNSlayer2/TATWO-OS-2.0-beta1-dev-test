@@ -38,33 +38,24 @@ struct UpdateAvailableCard: View {
             }
             if let release = checker.availableRelease, !checker.dismissed {
                 if let title = release.name, !title.isEmpty { Text(title) }
-                // 2026-09-12 使用者：要像 Codex 一樣按一下就更新，不碰終端機。
-                HStack {
-                    Button(updateButtonTitle) { updater.update(to: release.tag_name) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(updater.phase == .starting || updater.phase == .handedOff)
-                    Spacer()
-                    if updater.phase == .starting {
-                        Button("取消") { updater.cancelUpdate() }
-                    } else {
-                        Button("稍後") { checker.dismissForLaunch() }
-                            .disabled(updater.phase == .handedOff)
-                    }
-                }
-                if updater.phase == .starting {
-                    ProgressView(value: updater.downloadProgress)
-                    Text(updater.downloadSource)
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(downloadStatus)
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text(updater.phase == .handedOff
-                     ? "已下載，即將關閉 App 安裝…"
-                     : "先在背景下載，下載完成後 App 才會關閉並安裝。裝好會自動重新開啟，舊版會保留備份。")
-                    .font(.footnote).foregroundStyle(.secondary)
+                Text(updater.preparationTitle(release.tag_name))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    if updater.phase == .ready {
+                        Button(updateButtonTitle) { updater.update(to: release.tag_name) }
+                            .buttonStyle(.borderedProminent)
+                    } else if updater.phase == .starting {
+                        Button("取消") { updater.cancelUpdate() }
+                    } else if updater.phase != .handedOff {
+                        Button("現在就下載") {
+                            updater.prefetch(to: release.tag_name, repository: checker.repository, force: true)
+                        }
+                    }
+                    Spacer()
+                    Button("稍後") { checker.dismissForLaunch() }
+                        .disabled(updater.phase == .handedOff)
+                }
                 if case .failed(let reason) = updater.phase {
                     Text(reason).font(.footnote).foregroundStyle(.red)
                 }
@@ -90,13 +81,6 @@ struct UpdateAvailableCard: View {
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private var downloadStatus: String {
-        let downloaded = String(format: "已下載 %.1f MB", Double(updater.downloadedBytes) / 1_000_000)
-        guard updater.totalBytes > 0 else { return downloaded }
-        return downloaded + String(format: " / %.1f MB（約 %.0f KB/s）",
-                                   Double(updater.totalBytes) / 1_000_000, updater.downloadBytesPerSecond / 1_000)
-    }
-
     private var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
     }
@@ -111,17 +95,7 @@ struct UpdateAvailableCard: View {
         return formatter
     }()
 
-    private var updateButtonTitle: String {
-        switch updater.phase {
-        case .idle, .failed:
-            if let tag = checker.availableRelease?.tag_name, let bytes = updater.resumableBytes(for: tag) {
-                return String(format: "繼續下載（已 %.1f MB）", Double(bytes) / 1_000_000)
-            }
-            return "下載並更新"
-        case .starting: return "下載與校驗中…"
-        case .handedOff: return "更新中，App 即將關閉"
-        }
-    }
+    private var updateButtonTitle: String { "重新啟動以更新（約 10 秒）" }
 
     private func executeInCLI() {
         executionError = nil
@@ -151,15 +125,16 @@ struct SidebarUpdateShortcut: View {
     let openUpdateSettings: () -> Void
     var body: some View {
         if let release = checker.availableRelease, !checker.dismissed {
-            Button(action: openUpdateSettings) {
-                Text(updater.phase == .starting
-                     ? updater.downloadProgress.map { "下載 \(Int($0 * 100))%" } ?? "準備下載…"
-                     : "\(checker.isPrivateChannel ? "私人通道 · " : "有新版 ")\(release.tag_name)")
+            Button {
+                if updater.phase == .ready { updater.update(to: release.tag_name) }
+                else { openUpdateSettings() }
+            } label: {
+                Text((checker.isPrivateChannel ? "私人通道 · " : "") + updater.preparationTitle(release.tag_name) + (updater.phase == .ready ? " · 重新啟動" : ""))
                     .font(.caption.weight(.semibold)).lineLimit(1)
                     .frame(minHeight: 26).contentShape(Rectangle())
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
-            .help("開啟設定的 App 更新卡")
+            .help(updater.phase == .ready ? "重新啟動以更新（約 10 秒）" : "開啟設定的 App 更新卡")
             .accessibilityIdentifier("chat-sidebar-update")
         }
     }

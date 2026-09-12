@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const install = readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
 const transport = install.split('# DOWNLOAD-RETRY-BEGIN\n')[1].split('# DOWNLOAD-RETRY-END')[0];
+const primitives = install.split('# INVISIBLE-PRIMITIVES-BEGIN\n')[1].split('# INVISIBLE-PRIMITIVES-END')[0];
 const publicInstall = readFileSync(new URL('../public/install.sh', import.meta.url), 'utf8');
 
 test('install.sh and public/install.sh stay byte-identical', () => {
@@ -16,7 +17,7 @@ test('install.sh and public/install.sh stay byte-identical', () => {
 });
 
 test('W22 production selection falls through delta, layer, then full without replacing installed App', () => {
-  const selection = install.slice(install.indexOf('SOURCE="$TEMP/split/TATWO OS.app"'), install.indexOf('# Do not silently'));
+  const selection = install.slice(install.indexOf('SOURCE="$STAGE/split/TATWO OS.app"'), install.indexOf('# Do not silently'));
   for (const [delta, layer, expected] of [[0, 0, 'delta'], [1, 0, 'delta layer'], [1, 1, 'delta layer full']]) {
     const temp = mkdtempSync(join(tmpdir(), 'w22-order-'));
     const result = spawnSync('bash', ['-c', `set -eu; TEMP=${JSON.stringify(temp)}; APP_URL=yes; STAGE="$TEMP/stage"
@@ -51,7 +52,7 @@ test('archives never carry AppleDouble sidecars and the installer extracts with 
   const pkg = readFileSync(new URL('../scripts/package-release.sh', import.meta.url), 'utf8');
   assert.doesNotMatch(pkg, /xattr -cr/);
   assert.match(pkg, /ditto -c -k --norsrc --keepParent/);
-  assert.match(install, /ditto -x -k "\$ZIP" "\$TEMP\/unpacked"/);
+  assert.match(install, /ditto -x -k "\$ZIP" "\$STAGE\/full"/);
   assert.doesNotMatch(install, /unzip -q /);
   // 實證：帶 xattr 的檔案，不加 --norsrc 會在 zip 裡多出 ._ 檔；加了就沒有。
   const dir = spawnSync('mktemp', ['-d'], { encoding: 'utf8' }).stdout.trim();
@@ -66,7 +67,7 @@ test('archives never carry AppleDouble sidecars and the installer extracts with 
 test('prefetch skips only ZIP; remote checksum and SHA comparison remain mandatory', () => {
   assert.match(install, /if \[\[ -n "\$\{TATWO_OS_PREFETCHED_ZIP:-\}" \]\]; then/);
   assert.match(install, /\[\[ -f "\$TATWO_OS_PREFETCHED_ZIP" \]\] \|\| fail/);
-  assert.match(install, /ditto "\$TATWO_OS_PREFETCHED_ZIP" "\$ZIP"\nelse\n  retry_download "\$ZIP" "\$ZIP_URL"\nfi/);
+  assert.match(install, /clone_copy "\$TATWO_OS_PREFETCHED_ZIP" "\$ZIP"\nelse\n  retry_download "\$ZIP" "\$ZIP_URL"\nfi/);
   assert.match(install, /fi\ncurl[^\n]*"\$TEMP\/TATWO-OS\.zip\.sha256" "\$SHA_URL"/);
   assert.match(install, /ACTUAL="\$\(shasum -a 256 "\$ZIP"\)"/);
   assert.match(install, /\[\[ "\$ACTUAL" == "\$EXPECTED" \]\] \|\| fail/);
@@ -97,6 +98,7 @@ test('real installer download/checksum block accepts cache, rejects tampering an
           *) cp "$FIXTURE_ZIP" "$output";;
         esac
       }
+      ${primitives}
       ${transport}
       printf '%s  TATWO-OS.zip\\n' "$FIXTURE_SHA" > "$TEMP/install-ready"
       ${block}
@@ -152,8 +154,8 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
     createHash('sha256').update(readFileSync(join(assets, 'TATWO-OS.zip'))).digest('hex') + '  TATWO-OS.zip\n');
   const runtimeName = readdirSync(assets).find(n => /^TATWO-OS-runtime-.*\.zip$/.test(n));
   const repo = 'fixture/repo', base = `https://github.com/${repo}/releases/download/v9.9.9`;
-  const functions = transport + install.slice(install.indexOf('download_full() {'), install.indexOf('# RUNTIME-ASSEMBLY-END'));
-  const selection = install.slice(install.indexOf('SOURCE="$TEMP/split/TATWO OS.app"'),
+  const functions = primitives + transport + install.slice(install.indexOf('download_full() {'), install.indexOf('# RUNTIME-ASSEMBLY-END'));
+  const selection = install.slice(install.indexOf('SOURCE="$STAGE/split/TATWO OS.app"'),
     install.indexOf('# Do not silently move development copies')).replace('/Applications/.tatwo-update.XXXXXX', '$TEMP/stage.XXXXXX');
   for (const mode of ['reuse', 'changed', 'cached', 'missing', 'corrupt', 'old-release', 'bad-prefetch', 'no-runtime-asset']) {
     const temp = join(dir, mode), dest = join(temp, 'installed.app');
@@ -194,7 +196,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
       ${selection}
       printf '%s' "$SOURCE" > "$TEMP/selected"
     `], { encoding: 'utf8', env: {
-      ...process.env, TEMP: temp, DEST: dest, ASSETS: assets, REPO: repo,
+      ...process.env, TEMP: temp, STAGE: temp, DEST: dest, ASSETS: assets, REPO: repo,
       ZIP_URL: `${base}/TATWO-OS.zip`, SHA_URL: `${base}/TATWO-OS.zip.sha256`,
       APP_URL: mode === 'old-release' ? '' : `${base}/TATWO-OS-app.zip`,
       RUNTIME_NAMES: mode === 'no-runtime-asset' ? ' ' : ` ${runtimeName} `,
@@ -205,7 +207,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
     } });
     assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
     const calls = readFileSync(join(temp, 'download.calls'), 'utf8').trim().split('\n');
-    const fallback = ['missing', 'corrupt', 'bad-prefetch', 'no-runtime-asset'].includes(mode);
+    const fallback = ['corrupt', 'bad-prefetch', 'no-runtime-asset'].includes(mode);
     assert.equal(calls.filter(n => n === runtimeName).length, ['changed', 'missing'].includes(mode) ? 1 : 0, mode);
     assert.equal(calls.filter(n => n === `${runtimeName}.sha256`).length, ['changed', 'cached', 'missing'].includes(mode) ? 1 : 0, mode);
     assert.equal(calls.filter(n => n === 'TATWO-OS.zip').length, fallback || mode === 'old-release' ? 1 : 0, `${mode}: ${result.stderr}`);
@@ -213,7 +215,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
       ['cached', 'old-release', 'bad-prefetch'].includes(mode) ? 0 : 1, mode);
     if (fallback) assert.match(result.stderr, /執行環境層與簽章不符，改用完整下載/);
     const selected = readFileSync(join(temp, 'selected'), 'utf8');
-    assert.ok(selected.includes(fallback || mode === 'old-release' ? '/unpacked/' : '/split/'), mode);
+    assert.ok(selected.includes(fallback || mode === 'old-release' ? '/full/' : '/split/'), mode);
     run('codesign', ['--verify', '--deep', '--strict', selected]);
     assert.ok(existsSync(dest), 'installed app never replaced by the fixture');
   }
@@ -305,7 +307,7 @@ test('W26 SIGKILL inside production rename window is recovered by the next insta
   const candidate=join(stage,'TATWO OS.app'); mkdirSync(candidate); writeFileSync(join(candidate,'intact'),'new');
   writeFileSync(join(dir,'install-ready'),'a'.repeat(64)+'  TATWO-OS.zip\n');
   const functions=install.split('# TRANSACTION-BEGIN\n')[1].split('# TRANSACTION-END')[0];
-  const replace=install.slice(install.indexOf('# Staging and destination'), install.indexOf('verify_signed_app "$DEST"'));
+  const replace=install.slice(install.indexOf('# Staging and destination'), install.indexOf('# Candidate was verified'));
   const env={...process.env,DEST:dest,STAGE:stage,TEMP:dir,TAG:'v2.0.6',REPO:'fixture/repo'};
   let r=spawnSync('bash',['-c',`set -eu
     ${functions}
@@ -336,4 +338,138 @@ test('W26 24-hour cleanup trashes only stale owned temp directories and writes r
   for(const name of ['tatwo-install.active','tatwo-install.fresh','keep-other']) assert.ok(existsSync(join(dir,name)));
   const manifest=readdirSync(dir).find(n=>n.endsWith('.md'));
   assert.match(readFileSync(join(dir,manifest),'utf8'),/Restore from macOS Trash/);
+});
+
+test('W24 disk preflight uses candidate uncompressed size x2 and fake df fails closed', () => {
+  for (const [available, expected] of [['137216', 1], ['4096000', 0], ['unknown', 1], ['1999999', 1], ['2000000', 0]]) {
+    const result = spawnSync('bash', ['-c', `set -eu
+      fail() { echo "$1" >&2; exit 1; }
+      df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 6000000 1 ${available} 1%% /fixture\\n'; }
+      ${primitives}
+      check_space /fixture 1024000000
+    `], { encoding: 'utf8' });
+    assert.equal(result.status, expected, result.stderr);
+    if (expected) assert.match(result.stderr, /空間不足|無法確認/);
+  }
+  assert.ok(install.indexOf('check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"') < install.indexOf('SOURCE="$STAGE/split/TATWO OS.app"'));
+  assert.ok(install.lastIndexOf('check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"') < install.indexOf('mv "$STAGE/TATWO OS.app" "$DEST.new"'));
+});
+
+test('W24 clone-first fallback preserves real fake bundle contents and measures assembly', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w24-clone-'));
+  const source = join(dir, 'source.app'); mkdirSync(source);
+  writeFileSync(join(source, 'payload'), Buffer.alloc(25 * 1024 * 1024, 7));
+  for (const fallback of [false, true]) {
+    const start = performance.now();
+    const result = spawnSync('bash', ['-c', `set -eu
+      ${primitives}
+      ${fallback ? 'cp() { return 1; }' : ''}
+      clone_copy "$SOURCE" "$TARGET"
+      cmp "$SOURCE/payload" "$TARGET/payload"
+    `], { encoding: 'utf8', env: { ...process.env, SOURCE: source, TARGET: join(dir, fallback ? 'fallback.app' : 'clone.app') } });
+    assert.equal(result.status, 0, result.stderr);
+    console.log(`W24 25MiB fake bundle ${fallback ? 'ditto fallback' : 'clone preferred'}: ${((performance.now()-start)/1000).toFixed(3)}s`);
+  }
+  assert.match(primitives, /cp -cRPp "\$1" "\$2".*\|\| ditto/);
+  assert.match(install, /clone_copy "\$parent\/\$path" "\$SOURCE\/Contents\/\$path"/);
+  assert.match(install, /\? 'cp -Pp ' : 'clone_copy '/);
+  assert.doesNotMatch(install, /ditto "\$SOURCE" "\$STAGE\/TATWO OS.app"/);
+});
+
+test('W24 no repeated candidate deep verify or repeated continuity after staging rename; timing ends at open', () => {
+  const final = install.slice(install.indexOf('# Do not silently'), install.indexOf('# Staging and destination'));
+  assert.equal((final.match(/verify_continuity/g) || []).length, 1);
+  assert.doesNotMatch(final, /verify_signed_app/);
+  const continuity = install.slice(install.indexOf('verify_continuity()'), install.indexOf('# VERSION-BINDING-BEGIN'));
+  assert.equal((continuity.match(/verify_signed_app/g) || []).length, 1, 'only old trust anchor needs deep verification here');
+  assert.doesNotMatch(continuity, /--deep/);
+  assert.match(install, /open "\$DEST"\nINSTALL_SECONDS=/);
+  assert.match(install, /"installSeconds":%s/);
+});
+
+test('W24 offline transport refuses uncached URLs, never falls through to real curl', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w24-offline-'));
+  writeFileSync(join(dir, 'repository'), 'fixture/repo');
+  writeFileSync(join(dir, 'release.json'), '{"tag_name":"v2.0.6"}');
+  const code = install.split('# OFFLINE-RELEASE-BEGIN\n')[1].split('# OFFLINE-RELEASE-END')[0];
+  for (const [url, ok] of [['https://api.github.com/repos/fixture/repo/releases/tags/v2.0.6', true], ['https://github.com/fixture/repo/releases/download/v2.0.6/missing.zip', false], ['https://example.invalid/release.json', false]]) {
+    const r = spawnSync('bash', ['-c', `set -eu
+      fail() { exit 1; }
+      ${primitives}
+      ${code}
+      curl -o "$OUTPUT" -w '%{http_code}' "$URL"
+    `], { encoding: 'utf8', env: {...process.env, TATWO_OS_OFFLINE_RELEASE: dir, TATWO_OS_VERSION: 'v2.0.6', OUTPUT: join(dir,'out'), URL: url} });
+    assert.equal(r.status, ok ? 0 : 1, r.stderr);
+    if (ok) { assert.equal(r.stdout, '200'); assert.equal(readFileSync(join(dir,'out'),'utf8'), '{"tag_name":"v2.0.6"}'); }
+  }
+});
+
+test('W24 actual offline installer: 134MB gates before ZIP and before rename, old bundle intact; timed successful assembly', () => {
+  const root = mkdtempSync(join(tmpdir(), 'w24-install-e2e-'));
+  const assets = join(root, 'assets'), app = join(root, 'candidate/TATWO OS.app');
+  mkdirSync(assets); mkdirSync(join(app, 'Contents/MacOS'), {recursive:true});
+  copyFileSync('/usr/bin/true', join(app, 'Contents/MacOS/tatwo2'));
+  const plist = version => `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>ai.tatwo.tatwo2</string><key>CFBundleExecutable</key><string>tatwo2</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>`;
+  writeFileSync(join(app, 'Contents/Info.plist'), plist('2.0.6'));
+  mkdirSync(join(app, 'Contents/Resources'));
+  writeFileSync(join(app, 'Contents/Resources/payload'), Buffer.alloc(80 * 1024 * 1024));
+  const run = (cmd,args) => { const r=spawnSync(cmd,args,{encoding:'utf8'}); assert.equal(r.status,0,r.stderr); return r; };
+  run('codesign',['--force','--sign','-','--requirements','=designated => identifier "ai.tatwo.tatwo2"',app]);
+  run('ditto',['-c','-k','--norsrc','--keepParent',app,join(assets,'TATWO-OS.zip')]);
+  writeFileSync(join(assets,'TATWO-OS.manifest.json'),JSON.stringify({schema:1,files:[{size:81*1024*1024}]}));
+  const names=['TATWO-OS.zip','TATWO-OS.manifest.json'];
+  const marker=names.map(name=>{
+    const line=createHash('sha256').update(readFileSync(join(assets,name))).digest('hex')+'  '+name+'\n';
+    writeFileSync(join(assets,name+'.sha256'),line); return line;
+  }).join('');
+  writeFileSync(join(assets,'TATWO-OS.install-ready'),marker);
+  writeFileSync(join(assets,'repository'),'fixture/repo');
+  writeFileSync(join(assets,'release.json'),JSON.stringify({tag_name:'v2.0.6',draft:false,prerelease:false,assets:
+    [...names,...names.map(n=>n+'.sha256'),'TATWO-OS.install-ready'].map(name=>({name,browser_download_url:`https://github.com/fixture/repo/releases/download/v2.0.6/${name}`}))}));
+  for(const mode of ['before-download','before-rename','success']) {
+    const dir=join(root,mode), applications=join(dir,'Applications'), dest=join(applications,'TATWO OS.app');
+    mkdirSync(applications,{recursive:true}); mkdirSync(join(dir,'tmp')); mkdirSync(join(dir,'home'));
+    run('cp',['-cRPp',app,dest]); writeFileSync(join(dest,'Contents/Info.plist'),plist('2.0.5'));
+    run('codesign',['--force','--sign','-','--requirements','=designated => identifier "ai.tatwo.tatwo2"',dest]);
+    const oldInfo=readFileSync(join(dest,'Contents/Info.plist'));
+    const code=install.replaceAll('/Applications',applications).replace(/LSREGISTER=\/System[^\n]+/,'LSREGISTER=/usr/bin/true');
+    const script=join(dir,'installer-fixture.sh');
+    writeFileSync(script,`open() { echo opened >> "$FIXTURE/open.calls"; }
+      pgrep() { return 1; }
+      codesign() { if [[ "$1" == -dv ]]; then echo Authority=Fixture; else /usr/bin/codesign "$@"; fi; }
+      df() {
+        echo call >> "$FIXTURE/df.calls"
+        count=$(wc -l < "$FIXTURE/df.calls")
+        available=999999999
+        if [[ "$MODE" == before-download || ( "$MODE" == before-rename && "$count" -ge 2 ) ]]; then available=137216; fi
+        printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 999999999 1 %s 1%% /fixture\\n' "$available"
+      }
+      ${code}`);
+    const start=performance.now();
+    const r=spawnSync('bash',[script],{encoding:'utf8',timeout:30000,env:{...process.env,MODE:mode,FIXTURE:dir,
+      HOME:join(dir,'home'),TMPDIR:join(dir,'tmp'),TATWO_OS_VERSION:'v2.0.6',TATWO_OS_OFFLINE_RELEASE:assets}});
+    const seconds=((performance.now()-start)/1000).toFixed(3);
+    assert.equal(r.status,mode==='success'?0:1,`${mode}: ${r.stderr}\n${r.stdout}`);
+    if(mode==='success') {
+      console.log(`W24 actual install.sh offline 80MiB signed fixture, mocked identity presentation/open/df: ${seconds}s`);
+      assert.ok(existsSync(join(dir,'open.calls')));
+      const archives=join(dir,'home/Library/Application Support/TATWO OS/UpdateArchives');
+      const receipt=JSON.parse(readFileSync(join(archives,readdirSync(archives)[0],'result.json'),'utf8'));
+      assert.ok(Number.isInteger(receipt.installSeconds));
+    } else {
+      assert.match(r.stderr,/空間不足.*清出至少/);
+      assert.deepEqual(readFileSync(join(dest,'Contents/Info.plist')),oldInfo);
+      assert.ok(!existsSync(dest+'.old')); assert.ok(!existsSync(join(dir,'open.calls')));
+      if(mode==='before-download') {
+        const temp=readdirSync(join(dir,'tmp')).find(n=>n.startsWith('tatwo-install.'));
+        assert.ok(!existsSync(join(dir,'tmp',temp,'TATWO-OS.zip')));
+      }
+    }
+  }
+});
+
+test('W24 releases without a size manifest (v2.0.5 and earlier) still install using compressed size ×4', () => {
+  assert.match(install, /TATWO-OS\.manifest\.json\) RELEASE_HAS_MANIFEST=1/);
+  assert.match(install, /CANDIDATE_BYTES=\$\(\(ZIP_SIZE \* 4\)\)/);
+  assert.ok(install.indexOf('if [[ "$RELEASE_HAS_MANIFEST" == 1 ]]') < install.indexOf('check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"'));
 });

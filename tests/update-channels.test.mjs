@@ -15,6 +15,11 @@ test('production Swift four-component precedence, malformed/overflow boundaries 
   const dir = mkdtempSync(join(tmpdir(), 'w25-swift-'));
   const code = checker;
   writeFileSync(join(dir, 'main.swift'), code + `
+@MainActor final class InAppUpdater {
+  static let shared = InAppUpdater()
+  func prefetch(to: String, repository: String) {}
+  func invalidateCandidate() {}
+}
 struct GitHubAccountRecord { let username: String }
 struct GitHubAccountsStore {
   func loadAccounts() throws -> [GitHubAccountRecord] { [] }

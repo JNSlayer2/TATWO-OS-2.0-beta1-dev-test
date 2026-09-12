@@ -1,0 +1,121 @@
+import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+const read = p => readFileSync(new URL('../' + p, import.meta.url), 'utf8');
+const updater = read('App/Sources/Tatwo2/Facade/InAppUpdater.swift');
+const checker = read('App/Sources/Tatwo2/Facade/GitHubReleaseUpdateChecker.swift');
+const card = read('App/Sources/Tatwo2/New/UpdateAvailableCard.swift');
+
+test('W24 detection starts prefetch only for an install-ready newer release, all three triggers share check', () => {
+  assert.match(checker, /isNewer\(release.tag_name, than: installedVersion\)/);
+  assert.match(checker, /release.assets\?\.contains[\s\S]*TATWO-OS.install-ready[\s\S]*InAppUpdater.shared.prefetch/);
+  assert.match(checker, /30 \* 1_000_000_000/);
+  assert.match(checker, /6 \* 60 \* 60 \* 1_000_000_000/);
+  assert.match(checker, /checkForUpdatesFromUser\(\) \{ Task \{ await check\(\) \} \}/);
+  const prepare = updater.slice(updater.indexOf('private func beginPrefetch'), updater.indexOf('func cancelUpdate'));
+  assert.match(prepare, /try checkSpace\(\)[\s\S]*phase = \.ready/);
+  assert.doesNotMatch(prepare, /handOff|NSApp.terminate/);
+});
+
+test('W24 network starts fail-closed, rejects expensive/constrained paths, allows explicit download', () => {
+  assert.match(updater, /private var unmetered = false/);
+  assert.match(updater, /NWPathMonitor\(\)/);
+  assert.match(updater, /path.status == \.satisfied && path.isExpensive == false && !path.isConstrained/);
+  assert.match(updater, /guard force \|\| unmetered/);
+  assert.match(updater, /!allowed && !self.manualDownload && self.phase == \.starting/);
+  assert.match(updater, /等 Wi‑Fi 再自動下載/);
+  assert.match(card, /Button\("現在就下載"\)[\s\S]*force: true/);
+});
+
+test('W24 cache and Applications space gates run before bytes, after verification and before handoff', () => {
+  assert.match(updater, /for volume in \[directory, URL\(fileURLWithPath: Self.destinationApp\).deletingLastPathComponent\(\)\]/);
+  assert.match(updater, /max\(2_000_000_000, candidateBytes \* 2\)/);
+  assert.match(updater, /\.systemFreeSize/);
+  assert.match(updater, /candidateBytes \+= size.int64Value/);
+  assert.match(updater, /try checkSpace\(\)[\s\S]*let plannedBytes/);
+  assert.match(updater, /try checkSpace\(\) \} catch[\s\S]*handOff\(tag: tag, repository: prepared.repository/);
+});
+
+test('W24 two-state UI has preparation/cancel and restart, no download-and-update or automatic termination', () => {
+  assert.match(updater, /正在準備 %@（%\.1f \/ %\.1f MB）/);
+  assert.match(updater, /已準備好/);
+  assert.match(card, /Button\("取消"\)/);
+  assert.match(card, /重新啟動以更新（約 10 秒）/);
+  assert.match(card, / · 重新啟動/);
+  assert.doesNotMatch(card, /下載並更新|下載與校驗中/);
+  assert.match(updater, /guard phase == \.ready, let prepared, prepared.tag == tag/);
+});
+
+test('W24 offline restart caches tag-pinned script and hash-bound metadata, namespaced by repository', () => {
+  assert.match(updater, /contents\/install.sh\?ref=\\\(tag\)/);
+  assert.match(updater, /# OFFLINE-RELEASE-BEGIN/);
+  assert.match(updater, /markerMatches\(archive.name, expected\)/);
+  assert.match(updater, /download\/\\\(repository\)\/\\\(tag\)/);
+  assert.match(updater, /TATWO_OS_OFFLINE_RELEASE/);
+});
+
+test('W24 production Swift state methods: metered override, space gate, candidate cancellation, ready-only handoff', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w24-state-'));
+  const methods = updater.slice(updater.indexOf('    private func checkSpace()'), updater.indexOf('    private let fileManager:'));
+  const cancel = updater.slice(updater.indexOf('    func cancelUpdate()'), updater.indexOf('    func resumableBytes'));
+  const swift = `import Foundation
+struct UpdateArchives {}
+@MainActor enum GitHubReleaseUpdateChecker { static let shared = Checker() }
+struct Checker { let repository = "fixture/repo" }
+final class Space {
+ var free: Int64 = 10_000_000_000
+ func createDirectory(at: URL, withIntermediateDirectories: Bool) throws {}
+ func attributesOfFileSystem(forPath: String) throws -> [FileAttributeKey:Any] { [.systemFreeSize:NSNumber(value:free)] }
+}
+@MainActor final class Probe {
+ enum Phase: Equatable { case idle, starting, ready, handedOff, failed(String) }
+ static let destinationApp = "/fixture/Applications/TATWO OS.app"
+ var phase = Phase.idle, unmetered = false, manualDownload = false
+ var candidateBytes: Int64 = 0, downloadedBytes: Int64 = 12_300_000, totalBytes: Int64 = 15_700_000
+ var pendingCandidate: (tag:String, repository:String)?
+ var prepared: (tag:String, repository:String, archives:UpdateArchives)?
+ var preparationReason = ""
+ var download: Task<Void,Never>?
+ let fileManager = Space(), directory = URL(fileURLWithPath:"/fixture/cache")
+ var started = 0, handoffs = 0
+ func beginPrefetch(to: String, repository: String) { started += 1; phase = .starting }
+ func handOff(tag: String, repository: String, zip: UpdateArchives) { handoffs += 1; phase = .handedOff }
+${methods}
+${cancel}
+}
+@main struct Main {
+ @MainActor static func main() throws {
+  let p = Probe(), repo = "fixture/repo"
+  p.prefetch(to:"v2.0.6", repository:repo)
+  precondition(p.started == 0 && p.preparationReason.contains("Wi‑Fi"))
+  p.fileManager.free = 134 * 1024 * 1024
+  p.prefetch(to:"v2.0.6", repository:repo, force:true)
+  precondition(p.started == 0 && p.preparationReason.contains("空間不足"))
+  p.fileManager.free = 10_000_000_000
+  p.prefetch(to:"v2.0.6", repository:repo, force:true)
+  precondition(p.started == 1 && p.phase == .starting && p.manualDownload)
+  precondition(p.preparationTitle("v2.0.6") == "正在準備 v2.0.6（12.3 / 15.7 MB）")
+  p.update(to:"v2.0.6"); precondition(p.handoffs == 0)
+  let task = Task<Void,Never> {}; p.download = task
+  p.prefetch(to:"v2.0.7", repository:repo)
+  precondition(task.isCancelled && p.pendingCandidate?.tag == "v2.0.7")
+  p.cancelUpdate(); precondition(p.pendingCandidate == nil)
+  p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives()); p.candidateBytes = 6_000_000_000
+  p.update(to:"v2.0.7"); precondition(p.handoffs == 0 && p.prepared == nil)
+  p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives()); p.candidateBytes = 1
+  p.update(to:"v2.0.6"); precondition(p.handoffs == 0)
+  p.update(to:"v2.0.7",repository:"other/repo"); precondition(p.handoffs == 0)
+  p.update(to:"v2.0.7"); precondition(p.handoffs == 1)
+  p.phase = .ready; p.invalidateCandidate(); precondition(p.phase == .idle && p.prepared == nil)
+  print("state gates PASS")
+ }
+}`;
+  const file = join(dir, 'Probe.swift'), binary = join(dir, 'probe'); writeFileSync(file, swift);
+  let result = spawnSync('swiftc', ['-parse-as-library', '-num-threads', '2', file, '-o', binary], {encoding:'utf8', timeout:60000});
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync(binary, [], {encoding:'utf8'}); assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /state gates PASS/);
+});

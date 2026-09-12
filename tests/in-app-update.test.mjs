@@ -119,7 +119,7 @@ test('helper waits for exit, passes pinned version and prefetched path, and reco
   const { dir, waited, prefetchedZip, receipt } = run(0, { waitForApp: true });
   assert.ok(waited >= 1500, `helper must wait for the app pid to exit (waited ${waited}ms)`);
   assert.equal(readFileSync(join(dir, 'install.calls'), 'utf8'), `version=v9.9.9\nzip=${prefetchedZip}\n`);
-  assert.deepEqual(receipt, { ok: true, tag: 'v9.9.9', message: 'installed', runID: 'test' });
+  assert.deepEqual(receipt, { ok: true, tag: 'v9.9.9', message: 'installed', runID: 'test', installSeconds: receipt.installSeconds });
   assert.ok(!existsSync(join(dir, 'open.calls')), 'installer opens the new app itself');
 });
 
@@ -191,8 +191,8 @@ test('W23 source guards: durable resume, offset, cancellable unbounded backoff a
   }
   assert.match(updater, /error\.domain == "UpdaterHTTP" && \(500\.\.\.599\)\.contains\(error\.code\)/);
   assert.match(updater, /連線中斷，%d 秒後自動續傳（已下載 %\.1f MB）/);
-  assert.match(card, /checker\.availableRelease\?\.tag_name, let bytes = updater\.resumableBytes\(for: tag\)/);
-  assert.match(card, /繼續下載（已 %\.1f MB）/);
+  assert.match(updater, /downloadedBytes = resumableBytes\(for: tag\)/);
+  assert.match(updater, /已暫停準備/);
   const peer = readFileSync(new URL('../App/Sources/Tatwo2/Facade/PeerUpdateSource.swift', import.meta.url), 'utf8');
   assert.match(peer, /"--partial", "--inplace"/);
   assert.match(peer, /SHA256\.hash[\s\S]*appendingPathComponent\("peer-\\\(key\)"/);
@@ -215,6 +215,8 @@ test('W23 real HTTP: server restart, disk resume across processes, SHA and retry
 import Foundation
 import CryptoKit
 ${delegate}
+@MainActor enum GitHubReleaseUpdateChecker { static let shared = GitHubReleaseUpdateCheckerValue() }
+struct GitHubReleaseUpdateCheckerValue { let repository = "fixture/repo" }
 enum PeerUpdateSource { static func validTag(_ tag: String) -> Bool { tag == "v9.9.9" || tag == "v9.9.8" } }
 @MainActor final class Probe {
     let fileManager = FileManager.default
@@ -230,7 +232,7 @@ ${resumeBytes}
 @main struct Main {
     @MainActor static func main() async throws {
         let mode = CommandLine.arguments[1], root = URL(fileURLWithPath: CommandLine.arguments[3])
-        let folder = root.appendingPathComponent("download/v9.9.9")
+        let folder = root.appendingPathComponent("download/fixture/repo/v9.9.9")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let destination = folder.appendingPathComponent("TATWO-OS.zip")
         let probe = Probe(root)
@@ -365,7 +367,7 @@ ${resumeBytes}
 
 test('failure reopens only a stopped App and exits zero even if launchctl removal fails', () => {
   const { dir, receipt } = run(3, { removeFail: true });
-  assert.deepEqual(receipt, { ok: false, tag: 'v9.9.9', message: 'install_failed_exit_3', runID: 'test' });
+  assert.deepEqual(receipt, { ok: false, tag: 'v9.9.9', message: 'install_failed_exit_3', runID: 'test', installSeconds: receipt.installSeconds });
   assert.match(readFileSync(join(dir, 'open.calls'), 'utf8'), /TATWO OS\.app/);
   const restarted = run(3, { relaunchDuring: true });
   assert.equal(restarted.receipt.message, 'install_failed_exit_3');
@@ -406,11 +408,11 @@ test('timeout, mktemp failure and curl failure finish without restart loops', ()
 });
 
 test('source guards: progress, cancel, verified cache, active helper, zero exits', () => {
-  assert.match(card, /ProgressView\(value: updater\.downloadProgress\)/);
-  assert.match(card, /updater\.downloadedBytes/);
-  assert.match(card, /updater\.totalBytes/);
+  assert.match(card, /updater\.preparationTitle/);
+  assert.match(updater, /Double\(downloadedBytes\)/);
+  assert.match(updater, /Double\(totalBytes\)/);
   assert.match(card, /Button\("取消"\) \{ updater\.cancelUpdate\(\) \}/);
-  assert.match(card, /return "下載並更新"/);
+  assert.match(card, /重新啟動以更新/);
   assert.match(updater, /progress\.download\(/);
   assert.match(updater, /SHA256\(\)/);
   assert.match(updater, /fileExists\(atPath: zip\.path\)/);
@@ -429,8 +431,8 @@ test('sidebar observes releases/progress and opens the existing GitHub settings 
   const source = path => readFileSync(new URL(`../App/Sources/Tatwo2/${path}`, import.meta.url), 'utf8');
   assert.match(card, /struct SidebarUpdateShortcut/);
   assert.match(card, /if let release = checker\.availableRelease, !checker\.dismissed/);
-  assert.ok(card.includes('checker.isPrivateChannel ? "私人通道 · " : "有新版 "'));
-  assert.match(card, /updater\.downloadProgress\.map/);
+  assert.match(card, /updater\.preparationTitle\(release\.tag_name\)/);
+  assert.match(card, /已準備好|重新啟動/);
   assert.match(source('Chat/ChatPage+Sidebar.swift'), /SidebarUpdateShortcut \{\s*updateSettingsSection = \.github/);
   assert.match(source('Chat/ChatPage+Panels.swift'), /TatwoSettingsPage\(model: model, initialSection: updateSettingsSection\)/);
   assert.match(source('Shell/ChatPageSettings.swift'), /if let initialSection \{ section = initialSection \}/);
@@ -461,10 +463,7 @@ test('W19 source guards: session delegate, synchronous move, polling, monotonic 
   assert.match(updater, /totalBytes = max\(totalBytes, total\)/);
   assert.match(updater, /speedSamples\.removeAll \{ \$0\.time < now - 5 \}/);
   assert.match(updater, /Double\(downloadedBytes - first\.bytes\) \/ \(now - first\.time\)/);
-  assert.match(card, /已下載 %\.1f MB/);
-  assert.match(card, /guard updater\.totalBytes > 0 else \{ return downloaded \}/);
-  assert.match(card, /MB（約 %\.0f KB\/s）/);
-  assert.match(card, /updater\.downloadBytesPerSecond \/ 1_000/);
+  assert.match(updater, /正在準備 %@（%\.1f \/ %\.1f MB）/);
 });
 
 test('W19 real HTTP download: progress changes, polling fallback, unknown length, cancellation and errors',
@@ -478,8 +477,6 @@ test('W19 real HTTP download: progress changes, polling fallback, unknown length
     const reducer = updater.slice(updater.indexOf('    private func recordDownloadProgress'),
       updater.indexOf('    private nonisolated static func digest'))
       .replace('private func', 'func');
-    const status = card.slice(card.indexOf('    private var downloadStatus'),
-      card.indexOf('    private var currentVersion')).replace('private var', 'var');
     const harness = `
 import Foundation
 ${delegate}
@@ -490,10 +487,6 @@ ${delegate}
     var speedSamples: [(time: TimeInterval, bytes: Int64)] = []
     var intermediate: Set<Int64> = []
 ${reducer}
-}
-@MainActor struct Status {
-    let updater: Probe
-${status}
 }
 @main struct Main {
     @MainActor static func main() async throws {
@@ -508,9 +501,7 @@ ${status}
         precondition(probe.downloadBytesPerSecond == 80) // Only samples in the last five seconds.
         probe.downloadedBytes = 12_300_000; probe.totalBytes = 466_400_000
         probe.downloadBytesPerSecond = 115_000
-        precondition(Status(updater: probe).downloadStatus == "已下載 12.3 MB / 466.4 MB（約 115 KB/s）")
         probe.totalBytes = 0
-        precondition(Status(updater: probe).downloadStatus == "已下載 12.3 MB")
         probe.downloadedBytes = 0; probe.totalBytes = 0; probe.speedSamples = []
         let destination = URL(fileURLWithPath: CommandLine.arguments[3])
         let progress = UpdateDownloadProgress(destination: destination) { written, total in
@@ -697,4 +688,13 @@ test('W26 helper abnormal TERM writes a terminal failure instead of restart inst
   const r=spawnSync('bash',['-c',body],{encoding:'utf8'});
   assert.equal(r.status,0,r.stderr);
   assert.equal(JSON.parse(readFileSync(result)).message,'helper_exited_abnormally');
+});
+
+test('W24 helper polls 0.2 seconds with unchanged total wait and emits installSeconds', () => {
+  assert.match(updater, /WAIT=\$\(\(\\\(helperWaitSeconds\) \* 5\)\)/);
+  assert.match(updater, /do sleep 0\.2; i=\$\(\(i \+ 1\)\)/);
+  const result = run(0);
+  const receipt = JSON.parse(readFileSync(join(result.dir, 'result.json'), 'utf8'));
+  assert.equal(receipt.ok, true);
+  assert.ok(Number.isInteger(receipt.installSeconds) && receipt.installSeconds >= 0);
 });
