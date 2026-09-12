@@ -144,6 +144,20 @@ private struct UpdateArchives {
     var zip: URL?
     var appZip: URL?
     var runtimeZip: URL?
+    var deltaZip: URL?
+    var manifest: URL?
+}
+
+private enum UpdateDelta {
+    static func name(installed: String?, tag: String) -> String? {
+        guard let installed else { return nil }
+        let from = installed.hasPrefix("v") ? installed : "v" + installed
+        guard from != tag, [from, tag].allSatisfy({
+            $0.range(of: #"^v[0-9]+[.][0-9]+[.][0-9]+$"#, options: .regularExpression) != nil
+        }) else { return nil }
+        return "TATWO-OS-delta-\(from)-\(tag).zip"
+    }
+    static func reasonable(_ size: Int64, appSize: Int64) -> Bool { size > 0 && size < appSize }
 }
 
 @MainActor
@@ -231,6 +245,7 @@ final class InAppUpdater: ObservableObject {
             }
             let name = (file.pathExtension == "resume" ? file.deletingPathExtension() : file).lastPathComponent
             guard ["TATWO-OS.zip", "TATWO-OS-app.zip"].contains(name)
+                || name.hasPrefix("TATWO-OS-delta-") && name.hasSuffix(".zip")
                 || name.range(of: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$", options: .regularExpression) != nil else { continue }
             if file.pathExtension == "resume", let data = try? Data(contentsOf: file), !data.isEmpty {
                 bytes[name] = max(bytes[name] ?? 0, Int64((try? String(contentsOf: file.appendingPathExtension("bytes"), encoding: .utf8)) ?? "") ?? 0)
@@ -298,7 +313,15 @@ final class InAppUpdater: ObservableObject {
         }
         let split = release.assets.contains { $0.name == "TATWO-OS-app.zip" }
         var archives = [try asset(split ? "TATWO-OS-app.zip" : "TATWO-OS.zip")]
-        if split {
+        let installed = Bundle(url: URL(fileURLWithPath: Self.destinationApp))?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let deltaName = UpdateDelta.name(installed: installed, tag: tag)
+        let delta = release.assets.first { $0.name == deltaName }
+        let useDelta = split && delta.map { UpdateDelta.reasonable($0.size, appSize: archives[0].size) } == true
+            && [deltaName!, deltaName! + ".sha256", "TATWO-OS.manifest.json", "TATWO-OS.manifest.json.sha256"].allSatisfy { name in
+                (try? asset(name)) != nil
+            }
+        if useDelta { archives = [try asset("TATWO-OS.manifest.json"), try asset(deltaName!)] }
+        if split && !useDelta {
             let runtimes = release.assets.filter {
                 $0.name.range(of: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$", options: .regularExpression) != nil
             }
@@ -312,6 +335,7 @@ final class InAppUpdater: ObservableObject {
         let plannedBytes = archives.reduce(Int64(0)) { $0 + max(0, $1.size) }
         totalBytes = plannedBytes
         speedSamples = [(ProcessInfo.processInfo.systemUptime, 0)]
+        let deltaProgress = useDelta ? String(format: "差異更新：%.1f MB", Double(delta!.size) / 1_000_000) + " · " : ""
         var expectedHashes: [String: String] = [:]
         for archive in archives {
             let checksum = try asset(archive.name + ".sha256")
@@ -333,19 +357,19 @@ final class InAppUpdater: ObservableObject {
             let zip = folder.appendingPathComponent(archive.name)
             if fileManager.fileExists(atPath: zip.path) {
                 if try await Self.digest(zip) == expected.lowercased() {
-                    downloadSource = "使用已校驗快取"
+                    downloadSource = deltaProgress + "使用已校驗快取"
                     recordDownloadProgress(offset + archive.size, total: plannedBytes); return zip
                 }
                 try fileManager.moveItem(at: zip, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
             }
             for offer in offers {
                 try Task.checkCancellation()
-                downloadSource = "從『\(offer.device.name)』取得…"
+                downloadSource = deltaProgress + "從『\(offer.device.name)』取得…"
                 if let candidate = try? await PeerUpdateSource.pull(offer, tag: tag, name: archive.name, folder: folder) {
                     if let actual = try? await Self.digest(candidate), actual == expected {
                         try Task.checkCancellation()
                         try fileManager.moveItem(at: candidate, to: zip)
-                        downloadSource = String(format: "從『%@』取得 %.1f MB", offer.device.name, Double(archive.size) / 1_000_000)
+                        downloadSource = deltaProgress + String(format: "從『%@』取得 %.1f MB", offer.device.name, Double(archive.size) / 1_000_000)
                         return zip
                     }
                     try Task.checkCancellation()
@@ -354,7 +378,7 @@ final class InAppUpdater: ObservableObject {
                 // Interrupted candidates stay in peer-key; corrupt files stay quarantined, never handed off.
             }
             try Task.checkCancellation()
-            downloadSource = "從 GitHub 下載…"
+            downloadSource = deltaProgress + "從 GitHub 下載…"
             _ = try await retryDownload {
                 let progress = UpdateDownloadProgress(destination: zip, rebase: { [weak self] written, _ in
                     Task { @MainActor in
@@ -380,7 +404,8 @@ final class InAppUpdater: ObservableObject {
         for archive in archives {
             let zip = try await fetch(archive, offset: completed)
             try? PeerUpdateSource.publish(directory, tag: tag) {
-                if archive.name.hasPrefix("TATWO-OS-runtime-") { $0.runtime = zip.path } else { $0.app = zip.path }
+                if useDelta { $0.files[archive.name] = zip.path }
+                else if archive.name.hasPrefix("TATWO-OS-runtime-") { $0.runtime = zip.path } else { $0.app = zip.path }
                 $0.sha256[archive.name] = expectedHashes[archive.name]
                 $0.sizes[archive.name] = (try? fileManager.attributesOfItem(atPath: zip.path)[.size] as? NSNumber)?.int64Value
             }
@@ -388,6 +413,8 @@ final class InAppUpdater: ObservableObject {
             recordDownloadProgress(completed, total: plannedBytes)
             if archive.name == "TATWO-OS.zip" { result.zip = zip }
             else if archive.name == "TATWO-OS-app.zip" { result.appZip = zip }
+            else if archive.name == "TATWO-OS.manifest.json" { result.manifest = zip }
+            else if archive.name == deltaName { result.deltaZip = zip }
             else { result.runtimeZip = zip }
         }
         downloadProgress = 1
@@ -434,7 +461,8 @@ final class InAppUpdater: ObservableObject {
                 installURL: Self.installScriptURL(repository: repository),
                 resultPath: resultURL.path, logPath: logURL.path,
                 destination: Self.destinationApp, label: label, prefetchedZip: zip.zip?.path ?? "",
-                prefetchedAppZip: zip.appZip?.path ?? "", prefetchedRuntimeZip: zip.runtimeZip?.path ?? ""
+                prefetchedAppZip: zip.appZip?.path ?? "", prefetchedRuntimeZip: zip.runtimeZip?.path ?? "",
+                prefetchedDeltaZip: zip.deltaZip?.path ?? "", prefetchedManifest: zip.manifest?.path ?? ""
             ).write(to: script, atomically: true, encoding: .utf8)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
             let pending = ["label": label, "tag": tag, "startedAt": stamp, "log": logURL.path]
@@ -507,7 +535,8 @@ final class InAppUpdater: ObservableObject {
     static func helperScript(tag: String, pid: Int32, installURL: String,
                              resultPath: String, logPath: String,
                              destination: String, label: String, prefetchedZip: String,
-                             prefetchedAppZip: String = "", prefetchedRuntimeZip: String = "") -> String {
+                             prefetchedAppZip: String = "", prefetchedRuntimeZip: String = "",
+                             prefetchedDeltaZip: String = "", prefetchedManifest: String = "") -> String {
         """
         #!/bin/bash
         set -u
@@ -521,6 +550,8 @@ final class InAppUpdater: ObservableObject {
         PREFETCHED_ZIP=\(quoted(prefetchedZip))
         export TATWO_OS_PREFETCHED_APP_ZIP=\(quoted(prefetchedAppZip))
         export TATWO_OS_PREFETCHED_RUNTIME_ZIP=\(quoted(prefetchedRuntimeZip))
+        export TATWO_OS_PREFETCHED_DELTA_ZIP=\(quoted(prefetchedDeltaZip))
+        export TATWO_OS_PREFETCHED_MANIFEST=\(quoted(prefetchedManifest))
         WAIT=\(helperWaitSeconds)
         export PATH=/usr/bin:/bin:/usr/sbin:/sbin
         write_result() {

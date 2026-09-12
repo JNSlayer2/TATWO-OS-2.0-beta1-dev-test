@@ -24,7 +24,7 @@ test('GitHub release and all fresh checksums precede peer lookup; misses alone d
   assert.ok(positions.every((n, i) => n >= 0 && (!i || n > positions[i - 1])), positions);
   assert.match(updater, /session\.data\(for: URLRequest[\s\S]*reloadIgnoringLocalCacheData/);
   assert.match(updater, /try\? await PeerUpdateSource\.pull[\s\S]*try\? await Self\.digest/);
-  assert.match(updater, /try Task\.checkCancellation\(\)\s+downloadSource = "從 GitHub 下載…"/);
+  assert.match(updater, /try Task\.checkCancellation\(\)\s+downloadSource = deltaProgress \+ "從 GitHub 下載…"/);
   assert.match(updater, /invalid-\\\(UUID\(\)\.uuidString\)/);
   assert.doesNotMatch(peer, /https?:|TATWO_OS_IMAGE|--delete/);
 });
@@ -171,7 +171,7 @@ test('production prefetch decision executes SHA gates and per-archive fallback w
   { skip: process.platform !== 'darwin', timeout: 120_000 }, () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'w21-prefetch-')));
     const prefetch = updater.slice(updater.indexOf('    private func prefetch('), updater.indexOf('    private func recordDownloadProgress'))
-      .replace('private func prefetch', 'func prefetch');
+      .replace('private func prefetch', 'func prefetch').replace(/let installed = [^\n]+/, 'let installed: String? = "2.0.5"');
     const digest = updater.slice(updater.indexOf('    private nonisolated static func digest'), updater.indexOf('    private func handOff'));
     const policy = updater.slice(updater.indexOf('    static func retryable'), updater.indexOf('    private func finish'));
     const retry = updater.slice(updater.indexOf('    private func retryDownload'), updater.indexOf('    private func helperIsActive'));
@@ -182,7 +182,7 @@ import CryptoKit
 ${entry}
 struct Asset: Codable { let name: String; let browser_download_url: String; let size: Int64 }
 struct Release: Codable { let tag_name: String; let draft: Bool; let assets: [Asset] }
-struct UpdateArchives { var zip: URL?; var appZip: URL?; var runtimeZip: URL? }
+${updater.slice(updater.indexOf('private struct UpdateArchives'), updater.indexOf('@MainActor\nfinal class InAppUpdater')).replaceAll('private ', '')}
 enum UpdateRuntimeLayer { static func canReuse(contents: URL, archiveName: String) -> Bool { false } }
 struct DeviceRegistry { func list() -> [String] { ["paired"] } }
 enum IO {
@@ -198,9 +198,9 @@ final class ProtocolStub: URLProtocol {
     let data: Data
     if url.host == "api.github.com" {
       IO.events.append("release")
-      let names = IO.mode == "legacy" ? ["TATWO-OS.zip"] : ["TATWO-OS-app.zip", IO.runtime]
+      let names = IO.mode == "delta" ? ["TATWO-OS-app.zip", "TATWO-OS.manifest.json", "TATWO-OS-delta-v2.0.5-v9.9.9.zip"] : IO.mode == "legacy" ? ["TATWO-OS.zip"] : ["TATWO-OS-app.zip", IO.runtime]
       let assets = (names + names.map { $0 + ".sha256" } + ["TATWO-OS.install-ready"]).map {
-        Asset(name: $0, browser_download_url: "https://github.com/demo/repo/releases/download/v9.9.9/" + $0, size: Int64(IO.bytes($0).count))
+        Asset(name: $0, browser_download_url: "https://github.com/demo/repo/releases/download/v9.9.9/" + $0, size: $0 == "TATWO-OS-app.zip" ? 1000 : Int64(IO.bytes($0).count))
       }
       data = try! JSONEncoder().encode(Release(tag_name: "v9.9.9", draft: false, assets: assets))
     } else {
@@ -274,8 +274,9 @@ ${digest}
     do {
       let result = try await probe.prefetch(tag: "v9.9.9", repository: "demo/repo", session: session, id: probe.downloadID)
       precondition(!["malformedsha", "cancel"].contains(IO.mode))
-      let paths = [result.zip, result.appZip, result.runtimeZip].compactMap { $0 }
+      let paths = [result.zip, result.appZip, result.runtimeZip, result.deltaZip, result.manifest].compactMap { $0 }
       precondition(paths.count == (IO.mode == "legacy" ? 1 : 2))
+      if IO.mode == "delta" { precondition(result.deltaZip != nil && result.manifest != nil && probe.downloadSource.hasPrefix("差異更新：")) }
       for path in paths { let bytes = try Data(contentsOf: path); precondition(bytes == IO.bytes(path.lastPathComponent)) }
       precondition(IO.published["v9.9.9"]?.sha256.count == paths.count)
     } catch { precondition(["malformedsha", "cancel"].contains(IO.mode), "unexpected error: \\(error)") }
@@ -300,7 +301,7 @@ ${digest}
     const compiled = spawnSync('swiftc', ['-swift-version', '5', '-parse-as-library', join(root, 'Main.swift'), '-o', binary],
       { encoding: 'utf8', timeout: 90_000 });
     assert.equal(compiled.status, 0, compiled.stderr);
-    for (const mode of ['peer', 'badsha', 'offline', 'partial', 'cache', 'corruptcache', 'legacy', 'malformedsha', 'cancel']) {
+    for (const mode of ['peer', 'badsha', 'offline', 'partial', 'cache', 'corruptcache', 'legacy', 'malformedsha', 'cancel', 'delta']) {
       const result = spawnSync(binary, [join(root, mode), mode], { encoding: 'utf8', timeout: 10_000 });
       assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
     }

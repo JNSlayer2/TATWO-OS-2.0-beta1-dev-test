@@ -1,6 +1,6 @@
-Source commit: 468a6f40c29df849a4659dcd623ebc10238fefdb
+Source commit: eb0394abc0a13cb59fbd984706132cf0f9a2499c
 Source worktree: clean
-Files: 1420
+Files: 1422
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -1143,6 +1143,7 @@ scripts/install-j2-temp.sh
 scripts/install-tatwo-ultrawork.sh
 scripts/make-beta-signing-cert.sh
 scripts/package-release.sh
+scripts/per-file-delta.py
 scripts/public-export.sh
 scripts/public-safety-allow.txt
 scripts/public-safety-scan.mjs
@@ -1340,6 +1341,7 @@ tests/ipad-use-packaging.test.mjs
 tests/ipad-use-ui-source.test.mjs
 tests/os-upstream-refresh.test.mjs
 tests/peer-update-source.test.mjs
+tests/per-file-delta.test.mjs
 tests/plan-canvas.test.mjs
 tests/plan-transcript-card.test.mjs
 tests/pr-plan.test.mjs

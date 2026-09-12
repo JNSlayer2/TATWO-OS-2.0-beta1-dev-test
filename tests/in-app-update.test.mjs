@@ -11,6 +11,14 @@ const updater = readFileSync(new URL('../App/Sources/Tatwo2/Facade/InAppUpdater.
 const card = readFileSync(new URL('../App/Sources/Tatwo2/New/UpdateAvailableCard.swift', import.meta.url), 'utf8');
 const stubs = readFileSync(new URL('../App/Sources/Tatwo2/Facade/OS1Stubs.swift', import.meta.url), 'utf8');
 
+test('W22 exact delta naming, size boundary and quoted handoff', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w22-handoff-'));
+  const deltaZip = join(dir, "delta's.zip"), manifest = join(dir, "manifest's.json");
+  const result = run(0, { deltaZip, manifest });
+  assert.equal(readFileSync(join(result.dir, 'delta.calls'), 'utf8'), `delta=${deltaZip}\nmanifest=${manifest}\n`);
+  assert.match(updater, /TATWO-OS.manifest.json.sha256/);
+});
+
 test('update card offers a one-click update and keeps the terminal path as an advanced fallback', () => {
   assert.match(card, /Button\(updateButtonTitle\) \{ updater\.update\(to: release\.tag_name\) \}/);
   assert.match(card, /\.buttonStyle\(\.borderedProminent\)/);
@@ -31,7 +39,7 @@ test('updater reuses install.sh from the same public repository for signing and 
 
 // 把 Swift 裡的 helper 模板還原成真的 bash 腳本，用假的 install.sh 跑一遍。
 function renderHelper({ pid, resultPath, logPath, destination, label, prefetchedZip,
-  prefetchedAppZip = '', prefetchedRuntimeZip = '', wait = 10 }) {
+  prefetchedAppZip = '', prefetchedRuntimeZip = '', prefetchedDeltaZip = '', prefetchedManifest = '', wait = 10 }) {
   const begin = updater.indexOf('// UPDATE-HELPER-BEGIN');
   const end = updater.indexOf('// UPDATE-HELPER-END');
   const block = updater.slice(begin, end);
@@ -44,7 +52,7 @@ function renderHelper({ pid, resultPath, logPath, destination, label, prefetched
     .replace('\\(helperWaitSeconds)', String(wait))
     .replace(/\\\(quoted\((\w+)\)\)/g, (_, key) => {
       const values = { tag: 'v9.9.9', installURL: 'https://invalid.example/install.sh',
-        resultPath, logPath, destination, label, prefetchedZip, prefetchedAppZip, prefetchedRuntimeZip };
+        resultPath, logPath, destination, label, prefetchedZip, prefetchedAppZip, prefetchedRuntimeZip, prefetchedDeltaZip, prefetchedManifest };
       return "'" + values[key].replaceAll("'", "'\\''") + "'";
     });
 }
@@ -76,6 +84,7 @@ function run(fakeInstallExit, options = {}) {
   writeFileSync(install, `#!/bin/bash
     printf 'version=%s\\nzip=%s\\n' "$TATWO_OS_VERSION" "$TATWO_OS_PREFETCHED_ZIP" >> "$TEST_DIR/install.calls"
     printf 'app=%s\\nruntime=%s\\n' "$TATWO_OS_PREFETCHED_APP_ZIP" "$TATWO_OS_PREFETCHED_RUNTIME_ZIP" > "$TEST_DIR/layers.calls"
+    printf 'delta=%s\\nmanifest=%s\\n' "$TATWO_OS_PREFETCHED_DELTA_ZIP" "$TATWO_OS_PREFETCHED_MANIFEST" > "$TEST_DIR/delta.calls"
     [ "\${RELAUNCH_DURING_INSTALL:-0}" = 0 ] || touch "$TEST_DIR/relaunched"
     exit ${fakeInstallExit}
   `);
@@ -91,7 +100,7 @@ function run(fakeInstallExit, options = {}) {
   const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
   writeFileSync(script, renderHelper({
     pid, resultPath: join(dir, 'result.json'), logPath: join(dir, 'update.log'),
-    destination, prefetchedZip, prefetchedAppZip: options.appZip ?? '', prefetchedRuntimeZip: options.runtimeZip ?? '',
+    destination, prefetchedZip, prefetchedAppZip: options.appZip ?? '', prefetchedRuntimeZip: options.runtimeZip ?? '', prefetchedDeltaZip: options.deltaZip ?? '', prefetchedManifest: options.manifest ?? '',
     label: 'ai.tatwo.tatwo2.updater.test', wait: options.stillRunning ? 0 : 10,
   }).replace('export PATH=/usr/bin:/bin:/usr/sbin:/sbin', `export PATH=${quote(bin)}:/usr/bin:/bin:/usr/sbin:/sbin`));
   const started = Date.now();
@@ -138,11 +147,15 @@ test('W20 production runtime reuse decision: hash, missing paths, old apps and u
   { skip: process.platform !== 'darwin' }, () => {
     const dir = mkdtempSync(join(tmpdir(), 'w20-decision-'));
     const source = updater.slice(updater.indexOf('private struct UpdateRuntimeLayer:'),
-      updater.indexOf('private struct UpdateArchives'));
+      updater.indexOf('@MainActor\nfinal class InAppUpdater'));
     const swift = join(dir, 'Decision.swift'), binary = join(dir, 'decision');
     writeFileSync(swift, `import Foundation\n${source}
 let reuse = UpdateRuntimeLayer.canReuse(contents: URL(fileURLWithPath: CommandLine.arguments[1]),
                                        archiveName: CommandLine.arguments[2])
+precondition(UpdateDelta.name(installed: "2.0.5", tag: "v2.0.6") == "TATWO-OS-delta-v2.0.5-v2.0.6.zip")
+for old in [nil, "v2.0.6", "../bad"] { precondition(UpdateDelta.name(installed: old, tag: "v2.0.6") == nil) }
+for size: Int64 in [-1, 0, 100, 101] { precondition(!UpdateDelta.reasonable(size, appSize: 100)) }
+precondition(UpdateDelta.reasonable(99, appSize: 100))
 print(reuse ? "reuse" : "download")
 `);
     const compile = spawnSync('swiftc', [swift, '-o', binary], { encoding: 'utf8', timeout: 60_000 });

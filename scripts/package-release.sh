@@ -22,7 +22,26 @@ ditto -c -k --norsrc --keepParent "$OUT/TATWO OS.app" "$OUT/TATWO-OS.zip"
 [[ "$(unzip -Z1 "$OUT/TATWO-OS.zip" | grep -c '/\._')" == 0 ]] || { echo 'zip 內含 ._ AppleDouble 檔，拒絕發佈' >&2; exit 1; }
 (cd "$OUT" && shasum -a 256 TATWO-OS.zip > TATWO-OS.zip.sha256)
 bash scripts/runtime-layer.sh split "$OUT/TATWO OS.app" "$OUT"
+BASE="${TATWO_OS_DELTA_FROM:-}"
+if [[ -z "$BASE" ]]; then
+  BASE="$(gh release list --repo tatwo214/TATWO-OS-2.0-beta1-dev-test --exclude-drafts --limit 100 \
+    --json tagName --jq "[.[] | select(.tagName != \"$VERSION\")][0].tagName // empty")" || BASE=""
+fi
+OLD=""
+if [[ "$BASE" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ && "$BASE" != "$VERSION" ]]; then
+  mkdir "$OUT/.delta-base"
+  if gh release download "$BASE" --repo tatwo214/TATWO-OS-2.0-beta1-dev-test --dir "$OUT/.delta-base" \
+      --pattern TATWO-OS.manifest.json --pattern TATWO-OS.manifest.json.sha256 &&
+     (cd "$OUT/.delta-base" && read -r expected _ < TATWO-OS.manifest.json.sha256 &&
+      [[ "$expected" =~ ^[0-9a-f]{64}$ && "$(shasum -a 256 < TATWO-OS.manifest.json)" == "$expected  -" ]] &&
+      [[ "$(plutil -extract tag raw -o - TATWO-OS.manifest.json)" == "$BASE" ]]); then
+    OLD="$OUT/.delta-base/TATWO-OS.manifest.json"
+  else echo "略過 delta：$BASE 的 manifest 無法取得或校驗不符" >&2; fi
+else echo '略過 delta：沒有可用的上一個已發行 tag' >&2; fi
+python3 scripts/per-file-delta.py "$OUT/TATWO OS.app" "$OUT" "$VERSION" "$OLD" ||
+  echo 'delta 產生／離線驗證失敗；保留診斷材料，只發完整與層級附件' >&2
 echo '打包完成。人工確認後才執行以下命令（本腳本不發佈）：'
 printf 'gh release create %q' "$VERSION"
 printf ' %q' "$OUT"/*.zip "$OUT"/*.zip.sha256
+printf ' %q' "$OUT"/TATWO-OS.manifest.json "$OUT"/TATWO-OS.manifest.json.sha256
 printf ' --repo tatwo214/TATWO-OS-2.0-beta1-dev-test --title %q\n' "$VERSION"

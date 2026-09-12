@@ -9,7 +9,8 @@ struct PeerUpdateEntry: Codable, Sendable {
     var sha256: [String: String] = [:]
     var sizes: [String: Int64] = [:]
     var installedApp: String?
-    private enum CodingKeys: String, CodingKey { case app, runtime, runtimeSha, sha256, sizes, installedApp }
+    var files: [String: String] = [:]
+    private enum CodingKeys: String, CodingKey { case app, runtime, runtimeSha, sha256, sizes, installedApp, files }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -19,6 +20,7 @@ struct PeerUpdateEntry: Codable, Sendable {
         installedApp = try c.decodeIfPresent(String.self, forKey: .installedApp)
         sha256 = try c.decodeIfPresent([String: String].self, forKey: .sha256) ?? [:]
         sizes = try c.decodeIfPresent([String: Int64].self, forKey: .sizes) ?? [:]
+        files = try c.decodeIfPresent([String: String].self, forKey: .files) ?? [:]
     }
 }
 
@@ -125,12 +127,13 @@ enum PeerUpdateSource {
     static func pull(_ offer: Offer, tag: String, name: String, folder: URL) async throws -> URL? {
         guard validTag(tag), let entry = offer.entries[tag] else { return nil }
         let runtime = safe(name, pattern: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$")
-        guard runtime || ["TATWO-OS.zip", "TATWO-OS-app.zip"].contains(name) else { return nil }
+        let delta = safe(name, pattern: #"^TATWO-OS-delta-v[0-9]+[.][0-9]+[.][0-9]+-v[0-9]+[.][0-9]+[.][0-9]+[.]zip$"#)
+        guard runtime || delta || ["TATWO-OS.zip", "TATWO-OS-app.zip", "TATWO-OS.manifest.json"].contains(name) else { return nil }
         let key = SHA256.hash(data: Data("\(offer.device.id)/\(name)".utf8)).map { String(format: "%02x", $0) }.joined()
         let stage = folder.appendingPathComponent("peer-\(key)", isDirectory: true)
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let output = stage.appendingPathComponent(name)
-        if let path = runtime ? entry.runtime : entry.app, cachePath(path, tag: tag, name: name) {
+        if let path = entry.files[name] ?? (runtime ? entry.runtime : entry.app), cachePath(path, tag: tag, name: name) {
             _ = try await run(rsync(offer, path: path, destination: output), seconds: 86_400)
         } else if runtime, entry.installedApp == "/Applications/TATWO OS.app",
                   let sha = entry.runtimeSha, safe(sha, pattern: "^[0-9a-f]{64}$"),

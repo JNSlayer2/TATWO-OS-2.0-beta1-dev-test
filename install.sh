@@ -129,11 +129,92 @@ layer_download() {
   fi
   actual="$(shasum -a 256 "$output")" || return 1
   [[ "${actual%% *}" == "$expected" ]] || return 1
+  [[ "$name" != TATWO-OS.manifest.json ]] || return 0
   unzip -Z1 "$output" > "$output.entries" || return 1
   while IFS= read -r entry; do
     case "$entry" in /*|../*|*/../*|*/..) return 1 ;; esac
   done < "$output.entries"
 }
+# DELTA-TREE-BEGIN
+delta_tree() (
+  unzip -Z1 "$2" > "$4.entries" || exit 1
+  osascript -l JavaScript - "$@" <<'JXA' > "$4.assemble.sh" || exit 1
+ObjC.import('Foundation');
+function run(a) {
+  const read = p => ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(p, $.NSUTF8StringEncoding, null));
+  const m = JSON.parse(read(a[0])), zip = a[1], old = a[2], out = a[3] + '/Contents';
+  const q = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  const safe = p => typeof p === 'string' && p.length && !/[\x00-\x1f\x7f]/.test(p);
+  const entries = new Map(), commands = ['set -euo pipefail', 'mkdir -p ' + q(out)];
+  if (m.schema !== 1 || !Array.isArray(m.files) || !m.files.length) throw Error('manifest schema');
+  for (const e of m.files) {
+    if (!safe(e.path) || (e.path !== '.' && e.path.split('/').some(p => !p || p === '.' || p === '..')) ||
+        entries.has(e.path) || !/^[0-7]{1,4}$/.test(e.mode) || !/^[0-9a-f]{64}$/.test(e.sha256) ||
+        !Number.isSafeInteger(e.size) || e.size < 0) throw Error('manifest record');
+    const parts = e.path.split('/'); parts.pop();
+    if (e.path !== '.' && !(entries.get(parts.join('/') || '.') || {}).directory) throw Error('manifest parent');
+    if (e.symlink !== undefined) {
+      if (e.directory || !safe(e.symlink) || e.symlink[0] === '/') throw Error('symlink target');
+      const resolved = parts.slice();
+      for (const p of e.symlink.split('/')) {
+        if (p === '..') { if (!resolved.length) throw Error('symlink escape'); resolved.pop(); }
+        else if (p && p !== '.') resolved.push(p);
+      }
+    }
+    if (e.directory && (e.size !== 0 || e.sha256 !== 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')) throw Error('directory record');
+    entries.set(e.path, e);
+  }
+  if (!(entries.get('.') || {}).directory) throw Error('manifest root');
+  const packed = read(a[3] + '.entries').split('\n').filter(Boolean), seen = new Set();
+  for (const p of packed) {
+    const key = p.replace(/\/$/, ''), e = entries.get(key);
+    if (!e || seen.has(key) || p.endsWith('/') !== !!e.directory) throw Error('delta entry');
+    seen.add(key);
+  }
+  for (const [p, e] of entries) {
+    const target = out + '/' + p, source = old + '/Contents/' + p, blob = a[3] + '.part-' + commands.length;
+    if (e.directory) { commands.push('mkdir -p ' + q(target)); continue; }
+    let input = source;
+    if (seen.has(p)) {
+      commands.push('unzip -p ' + q(zip) + ' ' + q(p.replace(/[\\*?[\]]/g, '\\$&')) + ' > ' + q(blob),
+        '[[ "$(shasum -a 256 < ' + q(blob) + ')" == ' + q(e.sha256 + '  -') + ' ]]',
+        '[[ "$(stat -f %z ' + q(blob) + ')" == ' + q(e.size) + ' ]]');
+      input = blob;
+      if (e.symlink !== undefined) { input += '.link'; commands.push('ln -s ' + q(e.symlink) + ' ' + q(input)); }
+      commands.push('chmod ' + (e.symlink !== undefined ? '-h ' : '') + e.mode + ' ' + q(input));
+    } else {
+      for (let parent = source.slice(0, source.lastIndexOf('/')); parent !== old; parent = parent.slice(0, parent.lastIndexOf('/')))
+        commands.push('[[ ! -L ' + q(parent) + ' ]]');
+      commands.push('[[ ! -L ' + q(old) + ' ]]', '[[' + (e.symlink !== undefined ? ' -L ' + q(source) : ' -f ' + q(source) + ' && ! -L ' + q(source)) + ' ]]');
+    }
+    commands.push((e.symlink !== undefined ? 'cp -Pp ' : 'ditto ') + q(input) + ' ' + q(target), '[[ "$(stat -f %Lp ' + q(target) + ')" == ' + q(e.mode.replace(/^0+/, '') || '0') + ' ]]');
+    commands.push(e.symlink !== undefined
+      ? '[[ -L ' + q(target) + ' && "$(readlink ' + q(target) + ')" == ' + q(e.symlink) + ' && "$(printf %s "$(readlink ' + q(target) + ')" | shasum -a 256)" == ' + q(e.sha256 + '  -') + ' && "$(stat -f %z ' + q(target) + ')" == ' + q(e.size) + ' ]]'
+      : '[[ -f ' + q(target) + ' && ! -L ' + q(target) + ' && "$(stat -f %z ' + q(target) + ')" == ' + q(e.size) + ' && "$(shasum -a 256 < ' + q(target) + ')" == ' + q(e.sha256 + '  -') + ' ]]');
+  }
+  for (const [p, e] of Array.from(entries).reverse()) if (e.directory) commands.push('chmod ' + e.mode + ' ' + q(out + '/' + p));
+  return commands.map(c => c + ' || exit 1').join('\n');
+}
+JXA
+  bash "$4.assemble.sh"
+)
+# DELTA-TREE-END
+assemble_delta() (
+  trap - EXIT ERR
+  local manifest="$STAGE/manifest.json" from tag installed
+  layer_download TATWO-OS.manifest.json "$TATWO_OS_PREFETCHED_MANIFEST" "$manifest" || exit 1
+  from="$(plutil -extract fromTag raw -o - "$manifest")" || exit 1
+  tag="$(plutil -extract tag raw -o - "$manifest")" || exit 1
+  installed="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist")" || exit 1
+  [[ "$from" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ && "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ && "$from" == "v${installed#v}" &&
+     "$tag" == "$(plutil -extract tag_name raw -o - "$TEMP/release.json")" ]] || exit 1
+  layer_download "TATWO-OS-delta-$from-$tag.zip" "$TATWO_OS_PREFETCHED_DELTA_ZIP" "$STAGE/delta.zip" || exit 1
+  delta_tree "$manifest" "$STAGE/delta.zip" "$DEST" "$STAGE/delta.app.disabled" || exit 1
+  SOURCE="$STAGE/delta.app.disabled"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE/Contents/Info.plist")" == "${tag#v}" ]] || exit 1
+  verify_signed_app "$SOURCE"
+  verify_continuity "$DEST" "$SOURCE"
+)
 assemble_runtime() (
   trap - EXIT ERR
   local meta="$SOURCE/Contents/Resources/runtime-layer.json" sha old_sha path parent n=0 reuse=1
@@ -177,7 +258,15 @@ else
   fail "另一個更新正在執行，或先前更新中斷；請確認後再處理更新鎖"
 fi
 SOURCE="$TEMP/split/TATWO OS.app"
-if [[ -n "$APP_URL" ]] && assemble_runtime; then
+STAGE="$(mktemp -d /Applications/.tatwo-update.XXXXXX)"
+mv "$STAGE" "$STAGE.noindex"; STAGE="$STAGE.noindex"
+if [[ -n "${TATWO_OS_PREFETCHED_DELTA_ZIP:-}" && -n "${TATWO_OS_PREFETCHED_MANIFEST:-}" ]]; then
+  if assemble_delta; then SOURCE="$STAGE/delta.app.disabled"
+  else printf '差異更新驗證失敗或版本不符，改用層級下載\n' >&2; fi
+fi
+if [[ "$SOURCE" != "$TEMP/split/TATWO OS.app" ]]; then
+  printf '差異更新組裝與簽章驗證成功。\n'
+elif [[ -n "$APP_URL" ]] && assemble_runtime; then
   printf '執行環境層組裝與簽章驗證成功。\n'
 else
   [[ -z "$APP_URL" ]] || printf '執行環境層與簽章不符，改用完整下載\n' >&2
@@ -199,9 +288,6 @@ else
   spctl --assess --type execute "$SOURCE" || fail "首次安裝未通過 macOS 安全檢查；不會移除隔離標記"
 fi
 pgrep -x tatwo2 >/dev/null && fail "請先儲存工作並退出 TATWO OS，再執行更新"
-STAGE="$(mktemp -d /Applications/.tatwo-update.XXXXXX)"
-mv "$STAGE" "$STAGE.noindex"
-STAGE="$STAGE.noindex"
 ditto "$SOURCE" "$STAGE/TATWO OS.app"
 verify_signed_app "$STAGE/TATWO OS.app"
 if [[ -e "$DEST" ]]; then

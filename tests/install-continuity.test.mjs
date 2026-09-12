@@ -14,6 +14,21 @@ test('install.sh and public/install.sh stay byte-identical', () => {
   assert.equal(install, publicInstall);
 });
 
+test('W22 production selection falls through delta, layer, then full without replacing installed App', () => {
+  const selection = install.slice(install.indexOf('SOURCE="$TEMP/split/TATWO OS.app"'), install.indexOf('# Do not silently'));
+  for (const [delta, layer, expected] of [[0, 0, 'delta'], [1, 0, 'delta layer'], [1, 1, 'delta layer full']]) {
+    const temp = mkdtempSync(join(tmpdir(), 'w22-order-'));
+    const result = spawnSync('bash', ['-c', `set -eu; TEMP=${JSON.stringify(temp)}; APP_URL=yes
+      TATWO_OS_PREFETCHED_DELTA_ZIP=yes; TATWO_OS_PREFETCHED_MANIFEST=yes
+      assemble_delta() { echo delta >> "$TEMP/order"; return ${delta}; }
+      assemble_runtime() { echo layer >> "$TEMP/order"; return ${layer}; }
+      download_full() { echo full >> "$TEMP/order"; }; verify_signed_app() { :; }
+      ${selection.replace('/Applications/.tatwo-update.XXXXXX', `${temp}/stage.XXXXXX`)}`], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(temp, 'order'), 'utf8').trim().replaceAll('\n', ' '), expected);
+  }
+});
+
 test('continuity check passes the designated requirement as inline text, not a file path', () => {
   // 2026-09-12：v2.0.1 驗收時發現 -R "$requirement" 會被 codesign 當成檔案路徑
   // （No such file or directory），等於每一次升級都會被判「簽章身分不相容」。
@@ -136,7 +151,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
   const repo = 'fixture/repo', base = `https://github.com/${repo}/releases/download/v9.9.9`;
   const functions = install.slice(install.indexOf('download_full() {'), install.indexOf('# RUNTIME-ASSEMBLY-END'));
   const selection = install.slice(install.indexOf('SOURCE="$TEMP/split/TATWO OS.app"'),
-    install.indexOf('# Do not silently move development copies'));
+    install.indexOf('# Do not silently move development copies')).replace('/Applications/.tatwo-update.XXXXXX', '$TEMP/stage.XXXXXX');
   for (const mode of ['reuse', 'changed', 'cached', 'missing', 'corrupt', 'old-release', 'bad-prefetch', 'no-runtime-asset']) {
     const temp = join(dir, mode), dest = join(temp, 'installed.app');
     mkdirSync(temp);
@@ -179,7 +194,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
       ZIP_URL: `${base}/TATWO-OS.zip`, SHA_URL: `${base}/TATWO-OS.zip.sha256`,
       APP_URL: mode === 'old-release' ? '' : `${base}/TATWO-OS-app.zip`,
       RUNTIME_NAMES: mode === 'no-runtime-asset' ? ' ' : ` ${runtimeName} `,
-      TATWO_OS_PREFETCHED_ZIP: '',
+      TATWO_OS_PREFETCHED_ZIP: '', TATWO_OS_PREFETCHED_DELTA_ZIP: '', TATWO_OS_PREFETCHED_MANIFEST: '',
       TATWO_OS_PREFETCHED_APP_ZIP: mode === 'bad-prefetch' ? join(temp, 'missing.zip')
         : mode === 'cached' ? join(assets, 'TATWO-OS-app.zip') : '',
       TATWO_OS_PREFETCHED_RUNTIME_ZIP: mode === 'cached' ? join(assets, runtimeName) : '',
