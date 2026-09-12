@@ -1,0 +1,119 @@
+import SwiftUI
+import Combine
+import TatwoUltraworkCore
+
+/// T0 (使用者需求): 一頁看懂「有沒有代理在動」。純燈號，不求詳細 —
+/// 掃 dispatch registry 全部 run 檔，每個代理一顆燈：灰排隊/藍執行中/綠完成/紅失敗。
+struct WorkingPage: View {
+    @State private var records: [TatwoDispatchRecord] = []
+    private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+
+    private var active: [TatwoDispatchRecord] {
+        records.filter { $0.status == .queued || $0.status == .running }
+    }
+    private var recent: [TatwoDispatchRecord] {
+        Array(records.filter { $0.status == .completed || $0.status == .failed }.prefix(20))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            GlassCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Text("Working")
+                            .font(.title3.weight(.black))
+                        if active.isEmpty {
+                            Badge("目前沒有代理在動")
+                        } else {
+                            Badge("\(active.count) 個代理工作中")
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    if active.isEmpty && recent.isEmpty {
+                        Text("還沒有任何派工記錄。開一個 OS session 並派工後，這裡會亮燈。")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(active) { record in
+                        WorkingLightRow(record: record)
+                    }
+                }
+            }
+            if !recent.isEmpty {
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("最近結束")
+                            .font(.caption.weight(.black))
+                            .foregroundStyle(.secondary)
+                        ForEach(recent) { record in
+                            WorkingLightRow(record: record)
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .task { refresh() }
+        .onReceive(refreshTimer) { _ in refresh() }
+    }
+
+    private func refresh() {
+        let runs = TatwoDispatchRegistry.default().allRuns()
+        // One light per (contract, binding): the most recent record wins, newest first.
+        var flattened: [TatwoDispatchRecord] = []
+        for run in runs {
+            var latest: [String: TatwoDispatchRecord] = [:]
+            for record in run.records {
+                if let existing = latest[record.bindingID], existing.updatedAt >= record.updatedAt {
+                    continue
+                }
+                latest[record.bindingID] = record
+            }
+            flattened.append(contentsOf: latest.values)
+        }
+        records = flattened.sorted { $0.updatedAt > $1.updatedAt }
+    }
+}
+
+struct WorkingLightRow: View {
+    let record: TatwoDispatchRecord
+    @State private var pulsing = false
+
+    private var color: Color {
+        switch record.status {
+        case .queued: .gray
+        case .running: .blue
+        case .completed: .green
+        case .failed: .red
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+                .opacity(record.status == .running ? (pulsing ? 0.35 : 1.0) : 1.0)
+                .animation(
+                    record.status == .running
+                        ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default,
+                    value: pulsing)
+            Text(record.modelID.isEmpty ? record.bindingID : record.modelID)
+                .font(.caption.weight(.black))
+                .lineLimit(1)
+            Text(record.bindingID)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text(record.updatedAt, style: .relative)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 2)
+        .onAppear { pulsing = true }
+    }
+}
+---
+ARCHIVED Wave1 2026-07-28: TatwoPage.working dead page + WorkingPage/ActivityPage placeholders.
+Not compiled (outside SPM Sources). LoopsActivityMonitor remains the live dispatch-light consumer.

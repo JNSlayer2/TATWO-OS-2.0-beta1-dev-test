@@ -1,0 +1,582 @@
+{
+  "catalogRevision": "2026-07-29.1",
+  "deferredSystemPullItemIDs": [
+    "work.goal-state",
+    "work.plan-state",
+    "work.loop-state",
+    "work.execution-manifests",
+    "work.receipts",
+    "scenario.config",
+    "registry.plugins",
+    "registry.models",
+    "device.policy-overlays",
+    "sync.catalog-meta",
+    "skills.runtime-consumer",
+    "work.dispatch-lifecycle",
+    "work.plg-chain",
+    "chat.native-threads",
+    "chat.attachments",
+    "sessions.unified-ledger",
+    "work.issue-list",
+    "browser.annotations",
+    "preferences.file",
+    "preferences.userdefaults",
+    "config.audit",
+    "ratings.human-trait",
+    "ratings.human-collab",
+    "ratings.trait-cards",
+    "memory.gbrain-curated",
+    "device.registry",
+    "device.authority-ledger",
+    "device.channel-artifacts",
+    "device.update-plans",
+    "device.native-md-bindings",
+    "app.source-version"
+  ],
+  "entries": [
+    {
+      "activationPolicy": "stagedHumanApproval",
+      "displayName": "Work OS constitution",
+      "id": "os.constitution",
+      "kind": "osDocument",
+      "mergePolicy": "markdownSections",
+      "relativePath": "os/os.md",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Work OS issue blueprint",
+      "id": "os.issue",
+      "kind": "osDocument",
+      "mergePolicy": "markdownSections",
+      "relativePath": "os/issue.md",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Work OS implementation backlog",
+      "id": "os.todo",
+      "kind": "osDocument",
+      "mergePolicy": "markdownSections",
+      "relativePath": "os/TODO.md",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Goal contracts",
+      "id": "work.goal-state",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "work-os/goals",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Operational plans",
+      "id": "work.plan-state",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "work-os/plans",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Loops state",
+      "id": "work.loop-state",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "work-os/loops",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "readOnlyMirror",
+      "displayName": "Execution manifests",
+      "id": "work.execution-manifests",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "work-os/execution-manifests",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "readOnlyMirror",
+      "displayName": "Work OS receipts",
+      "id": "work.receipts",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "work-os/receipts",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "stagedHumanApproval",
+      "displayName": "Scenario configuration",
+      "id": "scenario.config",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "config/scenarios",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Plugin registry",
+      "id": "registry.plugins",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "registries/plugins",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Model identity registry",
+      "id": "registry.models",
+      "kind": "durableState",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "registries/models",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "canaryThenStable",
+      "displayName": "Skillet private skill repositories",
+      "id": "skills.skillet",
+      "kind": "skillRepository",
+      "mergePolicy": "repositoryRevision",
+      "relativePath": "skillet/repositories",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "scope": "shared"
+    },
+    {
+      "activationPolicy": "stagedHumanApproval",
+      "displayName": "Device policy overlays",
+      "id": "device.policy-overlays",
+      "kind": "devicePolicy",
+      "mergePolicy": "keyedJSON",
+      "relativePath": "device-overlays",
+      "requiredOnDevices": [],
+      "scope": "deviceOverlay"
+    },
+    {
+      "activationPolicy": "never",
+      "displayName": "Keychain and credentials",
+      "id": "machine.keychain",
+      "kind": "machineLocal",
+      "mergePolicy": "never",
+      "relativePath": null,
+      "requiredOnDevices": [],
+      "scope": "forbidden"
+    },
+    {
+      "activationPolicy": "never",
+      "displayName": "Vendor-native sessions",
+      "id": "machine.sessions",
+      "kind": "machineLocal",
+      "mergePolicy": "never",
+      "relativePath": null,
+      "requiredOnDevices": [],
+      "scope": "forbidden"
+    },
+    {
+      "activationPolicy": "never",
+      "displayName": "LaunchAgent state",
+      "id": "machine.launchagents",
+      "kind": "machineLocal",
+      "mergePolicy": "never",
+      "relativePath": null,
+      "requiredOnDevices": [],
+      "scope": "localOnly"
+    },
+    {
+      "activationPolicy": "never",
+      "displayName": "Signed application bundles",
+      "id": "machine.signed-bundles",
+      "kind": "machineLocal",
+      "mergePolicy": "never",
+      "relativePath": null,
+      "requiredOnDevices": [],
+      "scope": "localOnly"
+    },
+    {
+      "activationPolicy": "never",
+      "displayName": "Runtime sockets, PIDs and caches",
+      "id": "machine.runtime-state",
+      "kind": "machineLocal",
+      "mergePolicy": "never",
+      "relativePath": null,
+      "requiredOnDevices": [],
+      "scope": "localOnly"
+    },
+    {
+      "id": "sync.catalog-meta",
+      "displayName": "Sync catalog and durable writer discovery",
+      "kind": "governanceDocument",
+      "scope": "shared",
+      "relativePath": "sync/catalog",
+      "mergePolicy": "singleCanonicalWriter",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "skills.runtime-consumer",
+      "displayName": "Active skill runtime projection",
+      "kind": "devicePolicy",
+      "scope": "deviceOverlay",
+      "relativePath": "device-overlays/skills-runtime",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": []
+    },
+    {
+      "id": "work.dispatch-lifecycle",
+      "displayName": "Dispatch lifecycle state",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "work-os/dispatch-lifecycle",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "work.plg-chain",
+      "displayName": "PLG chain ledger",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "work-os/plg-chain",
+      "mergePolicy": "appendOnlyLedger",
+      "activationPolicy": "readOnlyMirror",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "chat.native-threads",
+      "displayName": "Native chat threads",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "chat/native-threads",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "chat.attachments",
+      "displayName": "Chat attachments",
+      "kind": "contentAddressedStore",
+      "scope": "shared",
+      "relativePath": "chat/attachments",
+      "mergePolicy": "contentAddressed",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "sessions.unified-ledger",
+      "displayName": "Unified session ledger",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "sessions/unified-ledger",
+      "mergePolicy": "appendOnlyLedger",
+      "activationPolicy": "readOnlyMirror",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "work.issue-list",
+      "displayName": "Thread issue list",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "work-os/issue-list",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "browser.annotations",
+      "displayName": "Browser annotations",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "browser/annotations",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "preferences.file",
+      "displayName": "Portable application preferences",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "preferences/file",
+      "mergePolicy": "perKeyOverlay",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "preferences.userdefaults",
+      "displayName": "Device UI preferences",
+      "kind": "devicePolicy",
+      "scope": "deviceOverlay",
+      "relativePath": "device-overlays/user-defaults",
+      "mergePolicy": "perKeyOverlay",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": []
+    },
+    {
+      "id": "config.audit",
+      "displayName": "Configuration audit ledger",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "config/audit",
+      "mergePolicy": "appendOnlyLedger",
+      "activationPolicy": "readOnlyMirror",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "ratings.human-trait",
+      "displayName": "Human trait ratings",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "ratings/human-trait",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "ratings.human-collab",
+      "displayName": "Human collaboration ratings",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "ratings/human-collab",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "ratings.trait-cards",
+      "displayName": "Model trait cards",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "ratings/trait-cards",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "memory.gbrain-curated",
+      "displayName": "GBrain curated memory",
+      "kind": "externalCuratedStore",
+      "scope": "shared",
+      "relativePath": "memory/gbrain-curated",
+      "mergePolicy": "curatedProposal",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "device.registry",
+      "displayName": "Enrolled device registry",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "devices/registry",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "device.authority-ledger",
+      "displayName": "Device authority and epoch ledger",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "devices/authority-ledger",
+      "mergePolicy": "appendOnlyLedger",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "device.sync-outbox",
+      "displayName": "Device sync outbox runtime",
+      "kind": "machineLocal",
+      "scope": "localOnly",
+      "relativePath": null,
+      "mergePolicy": "never",
+      "activationPolicy": "never",
+      "requiredOnDevices": []
+    },
+    {
+      "id": "device.local-actions",
+      "displayName": "Device local action outbox",
+      "kind": "machineLocal",
+      "scope": "localOnly",
+      "relativePath": null,
+      "mergePolicy": "never",
+      "activationPolicy": "never",
+      "requiredOnDevices": []
+    },
+    {
+      "id": "device.channel-artifacts",
+      "displayName": "Private channel request and receipt ledger",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "devices/channel-artifacts",
+      "mergePolicy": "appendOnlyLedger",
+      "activationPolicy": "readOnlyMirror",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "device.update-plans",
+      "displayName": "Device update plans",
+      "kind": "durableState",
+      "scope": "shared",
+      "relativePath": "devices/update-plans",
+      "mergePolicy": "appendOnlyLedger",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "device.native-md-bindings",
+      "displayName": "Brand-native upstream binding overlays",
+      "kind": "devicePolicy",
+      "scope": "deviceOverlay",
+      "relativePath": "device-overlays/native-md-bindings",
+      "mergePolicy": "keyedJSON",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": []
+    },
+    {
+      "id": "app.source-version",
+      "displayName": "Application source candidate version",
+      "kind": "sourceArtifact",
+      "scope": "shared",
+      "relativePath": "app/source-version",
+      "mergePolicy": "singleCanonicalWriter",
+      "activationPolicy": "stagedHumanApproval",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ]
+    },
+    {
+      "id": "app.installed-runtime",
+      "displayName": "Installed application runtime",
+      "kind": "machineLocal",
+      "scope": "localOnly",
+      "relativePath": null,
+      "mergePolicy": "never",
+      "activationPolicy": "never",
+      "requiredOnDevices": []
+    }
+  ],
+  "persistentSurfaceIDs": [
+    "os.constitution",
+    "os.issue",
+    "os.todo",
+    "work.goal-state",
+    "work.plan-state",
+    "work.loop-state",
+    "work.execution-manifests",
+    "work.receipts",
+    "scenario.config",
+    "registry.plugins",
+    "registry.models",
+    "skills.skillet",
+    "device.policy-overlays",
+    "machine.keychain",
+    "machine.sessions",
+    "machine.launchagents",
+    "machine.signed-bundles",
+    "machine.runtime-state",
+    "sync.catalog-meta",
+    "skills.runtime-consumer",
+    "work.dispatch-lifecycle",
+    "work.plg-chain",
+    "chat.native-threads",
+    "chat.attachments",
+    "sessions.unified-ledger",
+    "work.issue-list",
+    "browser.annotations",
+    "preferences.file",
+    "preferences.userdefaults",
+    "config.audit",
+    "ratings.human-trait",
+    "ratings.human-collab",
+    "ratings.trait-cards",
+    "memory.gbrain-curated",
+    "device.registry",
+    "device.authority-ledger",
+    "device.sync-outbox",
+    "device.local-actions",
+    "device.channel-artifacts",
+    "device.update-plans",
+    "device.native-md-bindings",
+    "app.source-version",
+    "app.installed-runtime"
+  ],
+  "schemaVersion": 1,
+  "systemPullItemIDs": [
+    "os.constitution",
+    "os.issue",
+    "os.todo",
+    "skills.skillet"
+  ]
+}

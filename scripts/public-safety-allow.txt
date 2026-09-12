@@ -1,0 +1,56 @@
+App/Sources/Tatwo2/Facade/BrowserMetadataAcceptance.swift | email address | Browser URL credential-redaction acceptance uses a synthetic user and secret on the example domain.
+App/Sources/Tatwo2/Facade/BrowserRuntimeAcceptance.swift | email address | Browser typing acceptance uses a fixture mailbox on the invalid example domain.
+App/Sources/Tatwo2/Facade/IslandCoreAcceptance.swift | email address | Navigation rejection acceptance uses a synthetic user in a credentialed trading-site URL, not a mailbox.
+App/Sources/Tatwo2/Facade/OSBindingAcceptance.swift | email address | Temporary Git repository uses the fixture identity on the invalid example domain.
+App/Sources/Tatwo2/SelfTest.swift | email address | Temporary Git fixtures use test identities on local or invalid example domains.
+App/Sources/Tatwo2/SelfTest.swift | private key | Secret rejection fixture contains only a key header or explicitly non-key placeholder text, never a private key body.
+App/Tests/Tatwo2Tests/NativeStagingIsolationTests.swift | email address | Mock login status and its assertion use the synthetic mailbox on the invalid example domain.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/ChatNativeAgentRoutingTests.swift | email address | Mock account responses use an owner mailbox on the invalid example domain.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/ChatNativeClaudeProfileTokenTests.swift | provider token | Profile token loading and environment assertions use a short demo-labelled dummy value.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/ChatNativeSubscriptionRuntimeTests.swift | email address | Mock account responses use an owner mailbox on the invalid example domain.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/EmbeddedBrowserSecurityPolicyTests.swift | email address | Credential rejection and redaction URLs use synthetic user/password pairs on the example domain.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/GitHubRepoUpdateCheckerTests.swift | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/GovernedDevSessionRunnerTests.swift | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/MiniMaxChatClientTests.swift | provider token | Mock client keys are short test/file/raw-secret and never-leak placeholders with no random payload.
+Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/TatwoSparkleUpdateCoordinatorTests.swift | email address | Update-feed rejection fixture uses synthetic URL credentials on the invalid example domain.
+Packages/AISwitchCore/Tests/AISwitchCoreTests/AISwitchCoreTests.swift | email address | Account migration fixtures use demo, other and fresh mailboxes on the example domain.
+Packages/TatwoDeviceSyncCore/Tests/TatwoDeviceSyncCoreTests/TatwoDeviceSyncCoreTests.swift | email address | HTTP transport rejection fixture uses synthetic URL credentials on the example domain.
+Packages/TatwoDomainContracts/Tests/TatwoDomainContractsTests/TatwoDomainContractsTests.swift | private key | Secret rejection fixture contains only a key header or explicitly non-key placeholder text, never a private key body.
+Packages/TatwoDomainContracts/Tests/TatwoDomainContractsTests/TatwoDomainContractsTests.swift | provider token | Payload rejection fixtures use sequential alphabet/digit dummy credentials and short synthetic event identifiers.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/CLICommandHistoryTests.swift | private key | Secret rejection fixture contains only a key header or explicitly non-key placeholder text, never a private key body.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/ColimaSandboxTests.swift | provider token | Redaction assertion checks a short alphabetic dummy token.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/HostExecutorTests.swift | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/HostPreparationTests.swift | provider token | Redaction assertion checks a short alphabetic dummy token.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/TatwoAppPressureServiceTests.swift | provider token | Pressure redaction fixture and assertion use a sequential alphabet dummy token.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/TatwoBrowserSessionPolicyTests.swift | email address | Address resolution fixture uses a someone mailbox on the example domain.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/TatwoDevicePressureMonitorTests.swift | provider token | Monitor redaction fixture and assertion use a sequential alphabet dummy token.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/TatwoNativeDevelopmentToolTests.swift | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/TatwoSkilletRepositoryStoreTests.swift | provider token | Secret rejection fixtures construct fake provider payloads from repeated uppercase letters.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/TatwoToolchainFingerprintTests.swift | email address | Synthetic toolchain summary combines a version and fixture local hostname, not email.
+Packages/TatwoUltraworkCore/Tests/TatwoUltraworkCoreTests/WorkflowRunTests.swift | provider token | Redaction assertion checks a short alphabetic dummy token.
+Packages/TatwoUpdater/Tests/TatwoUpdaterTests/TatwoAppVersionAlignmentPlannerTests.swift | email address | Planner assertions use a synthetic builder SSH identity and a fixture LAN hostname, not email.
+scripts/tatwo-device-sync-perf-test.sh | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/dispatch-worktree-failures.test.mjs | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/fixtures/browser-resource-block.mm.in | email address | Resource-block redaction fixture uses synthetic Alice/password URL credentials on the example domain.
+tests/tatwo-code-health-mcp.test.mjs | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/tatwo-device-enroll-channel.test.sh | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/tatwo-device-governance.test.sh | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/tatwo-device-sync-flexprimary.test.sh | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/tatwo-device-trust-channel.test.sh | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/tatwo-domain-coordinator.test.mjs | private key | Secret rejection fixture contains only a key header or explicitly non-key placeholder text, never a private key body.
+tests/tatwo-domain-coordinator.test.mjs | provider token | Payload rejection fixtures use sequential alphabet/digit dummy credentials and short synthetic event identifiers.
+tests/tatwo-local-app-install.test.mjs | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/tatwo-local-provenance.test.mjs | email address | Temporary Git fixture uses an explicitly test-labelled identity on an invalid example or reserved invalid domain.
+tests/tatwo-model-collab-presets.test.mjs | provider token | Roster rejection fixture injects a short leaked-credential-value placeholder.
+tests/tatwo-skillet-cli-merge-resolve.test.sh | provider token | Secret rejection fixture appends a provider prefix followed by repeated uppercase letters.
+tests/tatwo-skillet-live-audit.test.mjs | provider token | Audit redaction fixtures use a literal supersecrettokenvalue placeholder and sequential alphabet/digit payload.
+tests/tatwo-sparkle-bundle-contract.test.mjs | email address | Update-feed rejection fixture uses synthetic URL credentials on the invalid example domain.
+App/Sources/Tatwo2/New/GitHubAccountsCard.swift | email address | Lead-reviewed 2026-09-12: UI help text shows a GitHub user-at-host URL example, not a mailbox.
+Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/Resources/BrowserBlocklists/browser-host-deny-list.json | provider token | Lead-reviewed 2026-09-12: blocked domain names whose short prefixes match the token regex; no credentials.
+Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoSkilletRepositoryStore.swift | private key | Lead-reviewed 2026-09-12: sensitive-data detector header constants, no key body.
+Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoSkilletRepositoryStore.swift | provider token | Lead-reviewed 2026-09-12: detector token-prefix constants, no payload.
+scripts/tatwo-macbook-autosync.sh | email address | Lead-reviewed 2026-09-12: public GitHub SSH URL pattern for the 1.0 public repo, not a mailbox.
+scripts/tatwo-macbook-bootstrap.sh | email address | Lead-reviewed 2026-09-12: public GitHub SSH URL pattern for the 1.0 public repo, not a mailbox.
+scripts/tatwo-model-collab-presets.mjs | provider token | Lead-reviewed 2026-09-12: credential-rejection regex plus an obviously synthetic selftest key value; no real key.
+App/Sources/Tatwo2/Facade/PullRequestService.swift | email address | Lead-reviewed 2026-09-12: GitHub SSH URL prefix handling, not a mailbox.
+App/Tests/Tatwo2Tests/PullRequestServiceTests.swift | email address | Lead-reviewed 2026-09-12: GitHub SSH URL fixtures and a fixture git identity on the invalid example domain.

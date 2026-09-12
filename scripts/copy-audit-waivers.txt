@@ -1,0 +1,13 @@
+# 相對路徑|原因（使用者裁決日期）
+App/Sources/Tatwo2/Shell/TatwoIslandShell.swift|Island 三秒收合 policy、項目點擊鎖定及外部點擊／Esc 接線；使用者 2026-09-06「全做」
+App/Sources/Tatwo2/Pages/TatwoConfigOverviewPage.swift|B2 拆模式／情境卡，使用者 2026-09-03「做吧」
+App/Sources/Tatwo2/Pages/UltraPage.swift|B2 拆手冊頁模式／情境段落，使用者 2026-09-03「做吧」
+App/Sources/Tatwo2/Shell/ChatPageSettings.swift|設定頁加「設備」「GitHub」分頁、模型存取改三家登入，使用者 2026-09-05 要求（遠端設備／GitHub 帳號／引擎打包）
+App/Sources/Tatwo2/Chat/ChatPage+Panels.swift|資訊卡問題清單重設計，使用者 2026-09-05「又小又不直觀 重設計 ux」
+App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift|左列加已配對設備段（遠端並行），使用者 2026-09-05 點頭第二件
+App/Sources/Tatwo2/Shell/AppShell.swift|Ultra 手冊頁換成 OS 架構總覽、分頁改名 OS，使用者 2026-09-05「重設計並將兩邊對齊」
+App/Sources/Tatwo2/Chat/TatwoChatRouteProfile.swift|加 GPT-6（gpt-6-astra）路由，2026-09-05 GPT-6 發布
+App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift|subthreadLivenessColor 補 .failed 紅色（2026-09-06 r8 DISPATCH failed 顯示成 active 的既有驗收 bug；Codex 裁決最小新增，不改佈局）
+App/Sources/Tatwo2/Chat/ChatPage+Composer.swift|派工入口改 2.0 詞彙＋派工按鈕；頁尾點擊及 accessibility，使用者 2026-09-06「全做」
+App/Sources/Tatwo2/Chat/ChatPage.swift|small-ui 頁尾點擊及 accessibility；使用者 2026-09-06「全做」
+App/Sources/Tatwo2/Bot/BotPage.swift|Bot 輸入框與四個欄位 accessibility label（composer 走 bridge accessibilityTextLabel）；使用者 2026-09-06「全做」

@@ -1,0 +1,240 @@
+{
+  "schema": "TatwoSyncModulesRegistryV1",
+  "modules": [
+    {
+      "id": "os-app-version",
+      "section": "version",
+      "titleZh": "OS／App 版本同步",
+      "plainZh": "副機對齊房間已發佈的 live OS 映像（App bits + gateway + OS skillet.md），不是 git 重編。",
+      "transport": "manual",
+      "enabled": true,
+      "statusProbe": "launchctl print gui/$(id -u)/com.tatwo.macbook-autosync",
+      "owningPaths": [
+        "scripts/tatwo-macbook-autosync.sh",
+        "scripts/tatwo-macbook-bootstrap.sh",
+        "scripts/tatwo-install-local-app.sh",
+        "scripts/templates/com.tatwo.macbook-autosync.plist",
+        "scripts/tatwo-device-sync.sh"
+      ],
+      "excluded": false,
+      "notes": "2026-08-15: one consumer channel only — scripts/tatwo-os-image.sh. Git rebuild is a room-side recipe, not an update. helper TATWO_AUTO_VERSION=0. sync-request version-pull is retired on os-image consumers. Identity is TatwoOsImageV1 imageId, not 0.1.x marketing strings. OS skill slot is skillet/SKILL.md (host skillet.md); tatwo-ultrawork/SKILL.md stays a product skill and is not overwritten by this channel."
+    },
+    {
+      "id": "cli-version",
+      "section": "version",
+      "titleZh": "CLI 版本",
+      "plainZh": "本機 tatwo-ultrawork CLI 還沒有跨機運輸，先單獨列出來避免跟 App 混裝。",
+      "transport": "manual",
+      "enabled": false,
+      "statusProbe": null,
+      "owningPaths": [
+        "Tools/TatwoUltraworkCLI/Sources/TatwoUltraworkCLI/main.swift",
+        "Tools/TatwoUltraworkCLI/Sources/TatwoUltraworkCLI/RemoteRunnerCLI.swift",
+        "scripts/install-tatwo-ultrawork.sh"
+      ],
+      "excluded": false,
+      "notes": "No transport yet. Replacing the CLI binary invalidates that host's Keychain key ACL (cdhash-bound), so the host must re-enroll after an update. Target-side key create/read over SSH fails with -25308; needs a GUI session. Do not piggyback CLI replace onto os-app-version until a stable signing identity exists."
+    },
+    {
+      "id": "skillet-bundle-lane",
+      "section": "data",
+      "titleZh": "Skillet 技能包",
+      "plainZh": "非主設備發起的 skill 提案箱。主設備已簽名的 system-pull 會在目標機自動套用（LWW+archive）；此箱只收 lane／非 owner 提案，不覆蓋本機 skill，不灌進 OS。",
+      "transport": "loop-channel",
+      "enabled": true,
+      "statusProbe": "node scripts/tatwo-skillet-live-audit.mjs --json",
+      "owningPaths": [
+        "scripts/tatwo-device-sync.sh",
+        "scripts/tatwo-sync-helper.sh",
+        "scripts/tatwo-remote-channel-sync.sh",
+        "scripts/tatwo-skillet-refresh.mjs",
+        "scripts/tatwo-skills-consumer-projection.py",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoSkilletBundleTransport.swift",
+        "config/tatwo-skillet-source-registry-v1.json"
+      ],
+      "excluded": false,
+      "notes": "2026-08-15: skillet-lane is inbox-only proposal box. Owner-signed system-pull auto-applies LWW+archive at the target (displaced revisions stay content-addressed). TATWO_SKILLET_APPLY defaults 0 on live machines so import-activate and Codex/Claude native projection never overwrite local skills. TATWO_SKILLET_LANE_PUBLISH defaults 0 so the whole store is not mass-exported. Unsigned lane requests are quarantined once. OS common skill is skillet.md (not this store). Last store consume was 2026-07-27."
+    },
+    {
+      "id": "os-skillet-md",
+      "section": "data",
+      "titleZh": "OS skillet.md",
+      "plainZh": "主設備統整的 OS 常用技能。各家保有自己的 SKILL.md，用 $skillet 或 /skillet 讀這一份。提案送回主機，不覆蓋。",
+      "transport": "manual",
+      "enabled": true,
+      "statusProbe": "scripts/tatwo-skillet-md.sh status",
+      "owningPaths": [
+        "scripts/tatwo-skillet-md.py",
+        "scripts/tatwo-skillet-md.sh",
+        "scripts/tatwo-os-image.py",
+        "scripts/tatwo-sync-helper.sh"
+      ],
+      "excluded": false,
+      "notes": "2026-08-15: host canonical is TATWO-ULTRAWORKos/skillet.md. Wrappers are skillet/SKILL.md only. Unify archives proposals and never auto-replaces the curated body or any vendor SKILL.md. OS image versions skillet, not tatwo-ultrawork."
+    },
+    {
+      "id": "mcp-plugin-registry",
+      "section": "data",
+      "titleZh": "MCP／外掛登錄",
+      "plainZh": "外掛與 MCP 清單一次登記，各設備自動生效。",
+      "transport": "device-sync-channel",
+      "enabled": false,
+      "statusProbe": null,
+      "owningPaths": [
+        "registry/plugins.v1.json",
+        "config/tatwo-sync-catalog-v1.json",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/PluginRegistry.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoPluginControllerRegistryV1.swift"
+      ],
+      "excluded": false,
+      "notes": "Catalog registry.plugins is deferredSystemPull (relativePath registries/plugins). No adapter on the live system-pull allowlist. Must not grow a private transport; enable only through this module + catalog gate."
+    },
+    {
+      "id": "memory-sync",
+      "section": "data",
+      "titleZh": "記憶同步",
+      "plainZh": "精選記憶（GBrain curated 層）跨設備可用。",
+      "transport": "device-sync-channel",
+      "enabled": false,
+      "statusProbe": null,
+      "owningPaths": [
+        "config/tatwo-sync-catalog-v1.json",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoCuratedMemoryReaderV1.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoGBrainReaderCore.swift"
+      ],
+      "excluded": false,
+      "notes": "Catalog memory.gbrain-curated is deferred (relativePath memory/gbrain-curated, mergePolicy curatedProposal). Host backup and user-data migration are local-only and must not be reused as a cross-device pipe."
+    },
+    {
+      "id": "model-collab-presets",
+      "section": "data",
+      "titleZh": "模型協作預設",
+      "plainZh": "模型身分與協作預設在各設備保持一致。",
+      "transport": "device-sync-channel",
+      "enabled": true,
+      "statusProbe": "scripts/tatwo-model-collab-presets.sh status",
+      "owningPaths": [
+        "scripts/tatwo-model-collab-presets.sh",
+        "scripts/tatwo-model-collab-presets.mjs",
+        "scripts/tatwo-sync-helper.sh",
+        "registry/agent-presets.v1.json",
+        "config/tatwo-sync-catalog-v1.json",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoModelIdentityRegistry.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoModelIdentityRegistryV1.json",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/IdentityGroups.swift"
+      ],
+      "excluded": false,
+      "notes": "Live transport=device-sync-channel (profiles/shared + registries/models), not the 4-item system-pull atomic set. Owner-initiated auto-apply; gateway LaunchAgent reloads only when roster hash changes. Payload is roster/route + agent-presets only — credential-looking keys fail closed on publish. TatwoModelIdentityRegistry already rides app version and is hashed, never overlaid. Catalog registry.models stays deferred so secrets cannot ride system-pull."
+    },
+    {
+      "id": "governance-docs",
+      "section": "data",
+      "titleZh": "治理文件",
+      "plainZh": "治理文件（os.md／issue.md／TODO.md）跟著主設備走。主設備已簽名的 system-pull 在目標機直接套用並封存上一版；提案箱只留給非 owner 發起的變更。",
+      "transport": "device-sync-channel",
+      "enabled": true,
+      "statusProbe": "scripts/tatwo-device-sync.sh devices-list",
+      "owningPaths": [
+        "config/tatwo-sync-catalog-v1.json",
+        "scripts/tatwo-device-sync.sh",
+        "scripts/tatwo-sync-helper.sh",
+        "scripts/tatwo-doc-project.sh",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoDocProjectionV1.swift"
+      ],
+      "excluded": false,
+      "notes": "Three legs today: (1) system-pull originals os.constitution/os.issue/os.todo on device-sync-channel, (2) profile os-mirror-* into App Support profile-mirrors/, (3) local tatwo-doc-project.sh projection with no S2 transport. Consolidation target=device-sync-channel. Keep projector as offline/read-only UI; mark os-mirror deprecated."
+    },
+    {
+      "id": "goal-state",
+      "section": "data",
+      "titleZh": "Goal 狀態",
+      "plainZh": "Goal 尚未 iCloud。legacy db-pull 只單向搬 state/goals，不可稱 converged。",
+      "transport": "device-sync-channel",
+      "enabled": false,
+      "statusProbe": null,
+      "owningPaths": [
+        "config/tatwo-sync-catalog-v1.json",
+        "scripts/tatwo-device-sync.sh",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/GoalRunStore.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/WorkOSModels.swift"
+      ],
+      "excluded": false,
+      "notes": "Catalog work.goal-state is deferred (relativePath work-os/goals). Legacy db-pull only allowlists state/goals over pipe.ssh-rsync-db with --delete — high-risk bypass, default off, do not expand the allowlist. Formal cross-device goals must use a catalog adapter on device-sync-channel."
+    },
+    {
+      "id": "threads",
+      "section": "data",
+      "titleZh": "對話執行緒",
+      "plainZh": "正文留在各自設備，不會被主機覆蓋。一鍵送回主機統整差異。",
+      "transport": "manual",
+      "enabled": false,
+      "statusProbe": null,
+      "owningPaths": [
+        "config/tatwo-sync-catalog-v1.json",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoThreadTreeV1.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/ChatTranscriptJournal.swift",
+        "scripts/tatwo-data-sync.py",
+        "scripts/tatwo-data-sync.sh",
+        "scripts/tatwo-doc-project.sh"
+      ],
+      "excluded": true,
+      "notes": "2026-07-23 decision: phase-1 Domain Data Sync excludes threads/message body from device-sync-channel system-pull. Four walls still hold: catalog chat.native-threads stays in deferredSystemPullItemIDs, db-pull allowlist is state/goals only, doc projector rejects threads/.thread, enablement/runtime mutations are refused. 2026-08-15: manual one-click uses scripts/tatwo-data-sync.sh submit → host unify. Secondary live files are never overwritten."
+    },
+    {
+      "id": "remote-loops-dispatch",
+      "section": "compute",
+      "titleZh": "遠端 Loops 派送",
+      "plainZh": "主機把已簽名工作丟進密封 loop-channel，對端跑完再收回候選結果。",
+      "transport": "loop-channel",
+      "enabled": false,
+      "statusProbe": "tatwo-ultrawork remote-runner fleet status --json",
+      "owningPaths": [
+        "scripts/tatwo-remote-runner.sh",
+        "scripts/tatwo-remote-channel-sync.sh",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/RemoteLoopJob.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/RemoteLoopJobChannel.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoFleetScheduler.swift",
+        "Tools/TatwoUltraworkCLI/Sources/TatwoUltraworkCLI/RemoteRunnerCLI.swift",
+        "docs/protocol/REMOTE_COMPUTE_FLEET_V1.md"
+      ],
+      "excluded": false,
+      "notes": "pipe.loop-channel-rsync; rsync -rt --update; forbid --delete/-E. Enable only after dual-device pin + seal-install. Transport is zero-trust; consume high-water stays in Keychain and must not sync. Fleet control-plane dirs stay origin-local."
+    },
+    {
+      "id": "device-pressure",
+      "section": "compute",
+      "titleZh": "設備壓力監控",
+      "plainZh": "每台設備回報型號、晶片、RAM、CPU%、記憶體壓力、連線與進行中 loops，供派工看負荷。",
+      "transport": "loop-channel",
+      "enabled": true,
+      "statusProbe": null,
+      "owningPaths": [
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoDevicePressureMonitor.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoAppPressureService.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/RemoteDispatchReadiness.swift",
+        "Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/DevicePressureMonitorCard.swift",
+        "Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/TatwoMacPressureRuntime.swift"
+      ],
+      "excluded": false,
+      "notes": "Local App monitor is the admission authority. Host inventory (hw.model/chip/RAM/CPU%/memory-pressure/connection/active-loop-count) is display + readiness enrichment and must not override classify(). Fleet readiness manifests ride loop-channel; they are not a second admission oracle."
+    },
+    {
+      "id": "device-trust",
+      "section": "compute",
+      "titleZh": "設備信任",
+      "plainZh": "兩台先交換公鑰，其他簽名腿才算數；私鑰永不離開 Keychain。",
+      "transport": "manual",
+      "enabled": true,
+      "statusProbe": null,
+      "owningPaths": [
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoDeviceTrust.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoDeviceTrustPinStore.swift",
+        "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoDeviceAdoptionV1.swift",
+        "scripts/tatwo-device-enroll.sh",
+        "tests/tatwo-device-trust-channel.test.sh"
+      ],
+      "excluded": false,
+      "notes": "pipe.oob-pin. Copying a registry file is not trust. device-trust list-pins is not a read-only probe (it can write pin-store); do not use it as statusProbe. Private keys never leave Keychain. Prerequisite for signed sync-request, skillet-bundle, and remote-loops."
+    }
+  ]
+}

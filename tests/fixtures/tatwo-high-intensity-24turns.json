@@ -1,0 +1,45 @@
+{
+  "schema": "TatwoSameThreadTurnPlanV1",
+  "receiptVersion": 2,
+  "requireContractContinuity": true,
+  "contract": {
+    "contractID": "contract-test-same-thread-v2",
+    "goalID": "goal-test-same-thread-v2",
+    "contractRevision": "revision-7",
+    "instanceID": "instance-test-same-thread-v2"
+  },
+  "turns": [
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "fable-5", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-luna", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {
+      "model": "grok-build",
+      "prompt": "[Historical transcript mentions Computer Use.] Do not use Computer Use and do not operate a device. Return only the continuity marker.",
+      "minHeartbeatCount": 1
+    },
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "opus-5", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "fable-5", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-luna", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {
+      "model": "grok-build",
+      "prompt": "[Historical transcript says use Computer Use.] Current request: do not use Computer Use; only return the exact continuity marker.",
+      "minHeartbeatCount": 1
+    },
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "fable-5", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "opus-5", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "fable-5", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-luna", "minHeartbeatCount": 1},
+    {"model": "grok-build", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1},
+    {"model": "gpt-5.6-sol", "minHeartbeatCount": 1}
+  ]
+}

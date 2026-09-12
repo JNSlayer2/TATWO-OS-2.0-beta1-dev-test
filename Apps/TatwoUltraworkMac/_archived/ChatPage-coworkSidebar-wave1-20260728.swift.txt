@@ -1,0 +1,89 @@
+// ARCHIVED Wave1 2026-07-28 — ChatRunMode.cowork tab + sidebar.
+// Not compiled (outside SPM Sources). Restore into ChatPage if Ultrawork
+// task-rail re-enters chat chrome. Companion runtime (beginCowork / queue /
+// templates) intentionally kept in ChatPage.swift with no ChatRunMode.cowork entry.
+//
+// Original private helpers from ChatPage (non-compiled reference):
+
+/// Ultrawork 任務卡：不畫進度條（無真實進度源，表裡一致——只給狀態章與詳情）。
+private func taskCard(
+    title: String, badge: String, tint: Color, progress: Double,
+    detail: String, action: @escaping () -> Void
+) -> some View {
+    _ = progress
+    return Button(action: action) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption.weight(.black))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(badge)
+                    .font(.system(size: 9, weight: .black))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(tint.opacity(0.12), in: Capsule())
+            }
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(tint.opacity(0.2), lineWidth: 1))
+    }
+    .buttonStyle(.plain)
+}
+
+private var coworkSidebar: some View {
+    LiquidGlassPanelCard {
+        VStack(alignment: .leading, spacing: 12) {
+            sidebarModeSwitcher
+                .padding(.top, surface == .window ? 12 : 0)
+
+            Label("Ultrawork 任務", systemImage: "checklist.checked")
+                .font(.headline.weight(.black))
+            Text("任務卡與收據佇列")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if model.isRunning {
+                taskCard(title: "運行中工單", badge: "running", tint: .orange, progress: 0.62, detail: model.lastCommand) {}
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(model.coworkTemplates) { template in
+                        taskCard(
+                            title: template.shortLabel,
+                            badge: template.mode.rawValue.uppercased(),
+                            tint: coworkTemplateTint(template),
+                            progress: model.selectedCoworkTemplateID == template.id ? 0.42 : 0.12,
+                            detail: template.identitySummaryLines.first ?? template.category
+                        ) {
+                            model.mode = .cowork
+                            model.applyCoworkTemplate(template)
+                        }
+                    }
+                    if !model.coworkQueue.isEmpty {
+                        sectionTitle("queue")
+                        ForEach(model.coworkQueue) { item in
+                            taskCard(title: item.preview, badge: "queued", tint: .yellow, progress: 0.05, detail: "同 thread 單工限制") {}
+                        }
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private func coworkTemplateTint(_ template: TatwoCoworkTicketTemplate) -> Color {
+    template.category == "UI UX"
+        ? LiquidGlassTokens.accentViolet
+        : LiquidGlassTokens.accentBlue
+}

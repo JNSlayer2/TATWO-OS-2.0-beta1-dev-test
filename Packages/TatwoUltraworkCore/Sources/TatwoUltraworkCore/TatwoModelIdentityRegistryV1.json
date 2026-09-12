@@ -1,0 +1,111 @@
+{
+  "schema": "TatwoModelIdentityRegistryV1",
+  "canonicalAsOf": "2026-08-13",
+  "records": [
+    {
+      "canonicalModelID": "gpt-5.6-sol",
+      "aliases": ["gpt56-sol", "gpt-5-6-sol"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "gpt-5.6-terra",
+      "aliases": ["gpt56-terra", "gpt-5-6-terra"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "gpt-5.6-luna",
+      "aliases": ["gpt56-luna", "gpt-5-6-luna"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "gpt-5.5",
+      "aliases": ["gpt55", "gpt-5-5"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "gpt-5.4",
+      "aliases": ["gpt54", "gpt-5-4"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "gpt-5.4-mini",
+      "aliases": [],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "gpt-5.3-codex",
+      "aliases": [],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "gpt-5.3-codex-spark",
+      "aliases": [],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "chatgpt-pro-consult",
+      "aliases": [],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "sonnet-5",
+      "aliases": [
+        "sonnet5",
+        "claude-sonnet-5",
+        "sonnet4.6",
+        "sonnet-4-6",
+        "claude-sonnet-4-6"
+      ],
+      "currentHealth": "DEFER_UNTIL_ROUTE_HEALTH_V2",
+      "datedHistoricalEvidenceIDs": [
+        "sonnet-5-web-arena-v1-20260702",
+        "sonnet-5-blender-q1-20260702",
+        "gpt55-sonnet5-vs-fable5-20260706"
+      ]
+    },
+    {
+      "canonicalModelID": "minimax-m3",
+      "aliases": ["minimax"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "grok-build",
+      "aliases": ["grok", "grok-4.6", "grok4.6"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "opus-5",
+      "aliases": ["opus5", "opus-5", "claude-opus-5", "opus"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "haiku-4-5",
+      "aliases": [
+        "haiku4.5",
+        "claude-haiku-4-5",
+        "haiku",
+        "haiku-4-5"
+      ],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    },
+    {
+      "canonicalModelID": "fable-5",
+      "aliases": ["fable5"],
+      "currentHealth": "MANAGED_EXTERNALLY",
+      "datedHistoricalEvidenceIDs": []
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+.DS_Store
+node_modules/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.tatwo2/
+receipts/
+sessions/
+._*
+.Spotlight-V100/
+.Trashes/
+.fseventsd/

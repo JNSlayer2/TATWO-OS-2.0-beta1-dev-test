@@ -1,0 +1,145 @@
+// 2.0 新畫面（不是照搬）：遠端系統 R1／R2 的設定頁「設備」卡。白話：家裡的 mini 是主機，MacBook 是遙控器。
+// 新畫面一律放 New/；Facade 禁自畫 View。
+import SwiftUI
+
+/// 設定頁「設備」：配對碼（主機端）、加入主機（副機端）、已配對清單、遙控模式開關。
+struct DevicesCard: View {
+    @ObservedObject var model: ChatPageModel
+    @State private var hostField = ""
+    @State private var portField = ""
+    @State private var codeField = ""
+    @State private var nameField = Host.current().localizedName ?? "這台"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("設備")
+                .font(.title3.bold())
+
+            // 主機端：出一組碼
+            VStack(alignment: .leading, spacing: 8) {
+                Text("讓另一台加入這台（這台當主機）")
+                    .font(.headline)
+                if let window = model.pairingWindow {
+                    let listen = model.pairingListenAddress ?? "—"
+                    HStack(spacing: 12) {
+                        Text(window.code)
+                            .font(.system(size: 28, weight: .bold, design: .monospaced))
+                            .textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("在另一台輸入 \(listen)")
+                                .font(.footnote)
+                            Text("5 分鐘內有效、只能用一次；\(Self.remaining(window.expiresAt)) 後失效")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("取消") { model.cancelPairingWindow() }
+                            .buttonStyle(.bordered)
+                    }
+                } else {
+                    HStack {
+                        Text("按下去會出一組 6 碼，對方輸入後它的鑰匙就進這台的名單。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("產生配對碼") { model.startPairingWindow() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+
+            Divider()
+
+            // 副機端：加入主機
+            VStack(alignment: .leading, spacing: 8) {
+                Text("把這台加到另一台主機（這台當遙控器）")
+                    .font(.headline)
+                HStack(spacing: 8) {
+                    TextField("主機位址（例：192.168.0.10 或 ssh-mac-mini.tatwo214.com）", text: $hostField)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("配對埠", text: $portField)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                    TextField("6 碼", text: $codeField)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                    TextField("這台叫什麼", text: $nameField)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                    Button("加入") {
+                        let port = Int(portField) ?? 0
+                        model.pairWithHost(host: hostField.trimmingCharacters(in: .whitespaces),
+                                           port: port,
+                                           code: codeField.trimmingCharacters(in: .whitespaces),
+                                           name: nameField)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(hostField.isEmpty || codeField.count != 6)
+                }
+                if let pairMessage = model.pairingClientMessage {
+                    Text(pairMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            // 已配對清單
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("已配對（\(model.devices.count)）")
+                        .font(.headline)
+                    Spacer()
+                    if let remote = model.remoteMode {
+                        Text("遙控中：\(remote.name)")
+                            .font(.footnote.weight(.semibold))
+                        Button("回到本機") { model.exitRemoteMode() }
+                            .buttonStyle(.bordered)
+                    }
+                }
+                if model.devices.isEmpty {
+                    Text("還沒有配對任何設備。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.devices) { device in
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(device.name)
+                                    .font(.subheadline.weight(.medium))
+                                Text("\(device.user)@\(device.host):\(device.sshPort) · 指紋 \(device.publicKeyFingerprint.prefix(16))…")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text("加入 \(Self.stamp(device.addedAt))・最近 \(Self.stamp(device.lastSeenAt))")
+                                    .font(.footnote)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Spacer()
+                            if model.remoteMode?.id != device.id {
+                                Button("遙控它") { _ = model.enterRemoteMode(device) }
+                                    .buttonStyle(.bordered)
+                                    .help("左列與對話改成這台主機的，送出的話由它跑；離線時回到本機")
+                            }
+                            Button("移除") { model.removeDevice(device.id) }
+                                .buttonStyle(.bordered)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private static func remaining(_ date: Date) -> String {
+        let s = max(0, Int(date.timeIntervalSinceNow))
+        return "\(s / 60) 分 \(s % 60) 秒"
+    }
+
+    private static func stamp(_ date: Date) -> String {
+        let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"; return f.string(from: date)
+    }
+}

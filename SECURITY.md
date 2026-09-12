@@ -1,7 +1,14 @@
-# Security Policy
+# Security / 安全聲明
 
-Please report vulnerabilities privately through the repository host's security-advisory feature. Do not include real credentials, private prompts, personal paths, or customer data in a report.
+Tatwo Ultrawork is a local-first workflow controller. The public project is designed to ship workflow logic, UI, CLI, MCP schemas, and installer checks — not user credentials or private workspace data.
 
-The public reference core has no host-execution authority. A downstream integration that adds model login, process launch, sockets, networking, file mutation, deployment, device control, or destructive actions must publish its own security boundary and tests.
+## Security posture
 
-Supported security updates currently apply only to the latest `0.2.x` public candidate.
+- Model and plugin connections should use the user's own official login or API flow.
+- Tatwo defaults to planning, receipts, smoke checks, and explicit install prompts.
+- Host-changing actions require clear user approval and should be reversible.
+- Public issues should use minimal examples and should not include credentials or private machine data.
+
+## Reporting
+
+If you find a security problem, open a GitHub issue with a minimal reproduction, or contact the project maintainer privately if disclosure would expose user data.

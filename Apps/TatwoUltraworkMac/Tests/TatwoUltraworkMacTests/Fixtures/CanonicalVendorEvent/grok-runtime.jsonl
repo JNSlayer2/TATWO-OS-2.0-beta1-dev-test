@@ -1,0 +1,3 @@
+{"type":"assistant_delta","text":"Hel"}
+{"type":"assistant_delta","text":"lo"}
+{"type":"result","stopReason":"EndTurn","text":"{\"kind\":\"assistant_text\",\"text\":\"Hello\"}"}

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- TatwoOS 副設備同步 helper（系統 LaunchDaemon 版）。
+     用於 GUI session 經 SSH 遠端登入、launchd on-demand-only mode 導致
+     LaunchAgent 無法自動常駐的機器。需 sudo 安裝到 /Library/LaunchDaemons/，
+     不受登入/鎖定狀態影響。必須由 tatwo-render-device-sync-daemon.sh
+     從已驗證的 LaunchAgent 設定產生；不得直接安裝此 placeholder template。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tatwo.device-sync-helper</string>
+  <key>UserName</key>
+  <string>__UNIX_USER__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HELPER_PATH__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TATWO_TEST_MODE</key>
+    <string>0</string>
+    <key>TATWO_DEVICE_NAME</key>
+    <string>__DEVICE_NAME__</string>
+    <key>TATWO_PRIMARY_SSH_HOST</key>
+    <string>__PRIMARY_HOST__</string>
+    <key>TATWO_SYNC_REPO</key>
+    <string>__REPO__</string>
+    <key>TATWO_SYNC_INTERVAL</key>
+    <string>__INTERVAL__</string>
+    <key>TATWO_CHANNEL_REMOTE</key>
+    <string>__CHANNEL_REMOTE__</string>
+    <key>TATWO_OS_ROOT</key>
+    <string>__OS_ROOT__</string>
+    <!-- Default coordinate is App Support/skills (mini may symlink to <your-volume>/skills). -->
+    <key>TATWO_SKILLET_SOURCE_ROOT</key>
+    <string>__SKILLET_SOURCE_ROOT__</string>
+    <key>TATWO_SKILLS_RUNTIME_ROOT</key>
+    <string>__SKILLS_RUNTIME_ROOT__</string>
+    <key>TATWO_SKILLS_CONSUMER_ROOT</key>
+    <string>__SKILLS_CONSUMER_ROOT__</string>
+    <key>TATWO_CODEX_SKILLS_LINK</key>
+    <string>__CODEX_SKILLS_LINK__</string>
+    <key>TATWO_CLAUDE_SKILLS_LINK</key>
+    <string>__CLAUDE_SKILLS_LINK__</string>
+    <key>TATWO_SKILLS_CONSUMER_PROJECTION_SCRIPT</key>
+    <string>__SKILLS_CONSUMER_PROJECTION_SCRIPT__</string>
+    <key>TATWO_SKILLET_SOURCE_REGISTRY</key>
+    <string>__SKILLET_SOURCE_REGISTRY__</string>
+    <key>TATWO_SKILLET_CLI</key>
+    <string>__SKILLET_CLI__</string>
+    <key>TATWO_DEVICE_TRUST_CLI</key>
+    <string>__DEVICE_TRUST_CLI__</string>
+    <key>TATWO_DEVICE_TRUST_CLI_SHA256</key>
+    <string>__DEVICE_TRUST_CLI_SHA256__</string>
+    <key>TATWO_DEVICE_TRUST_CLI_CDHASH</key>
+    <string>__DEVICE_TRUST_CLI_CDHASH__</string>
+    <key>TATWO_REMOTE_APP_SUPPORT</key>
+    <string>__REMOTE_APP_SUPPORT__</string>
+    <key>PATH</key>
+    <string>__PATH_ENV__</string>
+    <key>HOME</key>
+    <string>__HOME_DIR__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+</dict>
+</plist>

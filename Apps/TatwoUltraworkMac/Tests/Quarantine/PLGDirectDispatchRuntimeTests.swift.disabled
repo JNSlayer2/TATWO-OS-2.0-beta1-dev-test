@@ -1,0 +1,53 @@
+import Foundation
+import XCTest
+
+@testable import TatwoUltraworkMac
+
+/// Quarantined by Policy A: the App is a read-only Work OS console and no
+/// longer contains a process runtime for direct model dispatch.
+final class PLGDirectDispatchRuntimeTests: XCTestCase {
+    func testCaptureReturnsStdoutAndExitCode() throws {
+        let fixture = try makeScript(
+            #"process.stdout.write('{"type":"turn.completed"}\n'); process.exit(7);"#)
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        let result = TatwoPLGDirectDispatchRuntime.run(
+            scriptURL: fixture,
+            modelArgument: "fixture-model",
+            dispatchID: "dispatch-fixture",
+            prompt: "fixture prompt",
+            workingDirectory: fixture.deletingLastPathComponent(),
+            timeout: 5)
+
+        XCTAssertEqual(result.exitCode, 7)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertTrue(result.stdout.contains(#""type":"turn.completed""#))
+    }
+
+    func testCaptureTerminatesTimedOutAdapter() throws {
+        let fixture = try makeScript("setTimeout(() => {}, 10_000);")
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        let result = TatwoPLGDirectDispatchRuntime.run(
+            scriptURL: fixture,
+            modelArgument: "fixture-model",
+            dispatchID: "dispatch-fixture",
+            prompt: "fixture prompt",
+            workingDirectory: fixture.deletingLastPathComponent(),
+            timeout: 0.2)
+
+        XCTAssertTrue(result.timedOut)
+        XCTAssertEqual(result.exitCode, -1)
+    }
+
+    private func makeScript(_ body: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tatwo-plg-runtime-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true)
+        let script = directory.appendingPathComponent("fixture.mjs")
+        try body.write(to: script, atomically: true, encoding: .utf8)
+        return script
+    }
+}

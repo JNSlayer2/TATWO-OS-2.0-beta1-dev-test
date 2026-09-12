@@ -1,0 +1,65 @@
+{
+  "generatedAt": "2026-09-01T03:02:57Z",
+  "output": {
+    "bytes": 2056835,
+    "exactCount": 0,
+    "file": "browser-host-deny-list.json",
+    "sha256": "ff769a62904d8df39588f3eff69f4249166044e12bd05a4c02665e684d8caeb0",
+    "suffixCount": 91430
+  },
+  "parser": {
+    "acceptedSyntax": [
+      "ABP unconditional ||host^ rules without options",
+      "hosts-file 0.0.0.0/127.0.0.1 host entries"
+    ],
+    "semantics": "host-level suffix blocking only; exceptions, options, paths, regex, cosmetic filters, redirects, and scriptlets are deliberately excluded for Phase 2a",
+    "version": "TatwoHostSubsetV1"
+  },
+  "schema": "TatwoBrowserBlocklistManifestV1",
+  "sources": [
+    {
+      "acceptedSuffixCount": 46447,
+      "etag": "W/\"6a963f47-202bf2\"",
+      "format": "abp",
+      "id": "easylist",
+      "lastModified": "Tue, 01 Sep 2026 02:58:15 GMT",
+      "retrievedAt": "2026-09-01T03:02:57Z",
+      "sha256": "281e976ca96f69781ea499d46b8366e4637822ca97c49528d023d80e37a2c468",
+      "url": "https://easylist.to/easylist/easylist.txt",
+      "version": "202609010257"
+    },
+    {
+      "acceptedSuffixCount": 42991,
+      "etag": "W/\"6a963d3f-16e2fb\"",
+      "format": "abp",
+      "id": "easyprivacy",
+      "lastModified": "Tue, 01 Sep 2026 02:49:35 GMT",
+      "retrievedAt": "2026-09-01T03:02:57Z",
+      "sha256": "24a4ffe036f663099e0740a088d589a9723b446772743e053a18c45a2d2d5545",
+      "url": "https://easylist.to/easylist/easyprivacy.txt",
+      "version": "202609010249"
+    },
+    {
+      "acceptedSuffixCount": 376,
+      "etag": "\"2c48-65a631d8008da\"",
+      "format": "hosts",
+      "id": "urlhaus",
+      "lastModified": "Tue, 01 Sep 2026 03:00:03 GMT",
+      "retrievedAt": "2026-09-01T03:02:57Z",
+      "sha256": "24b0edd4e9866ae12de42e3713043dba3be05da1bb931ad6499dbc3cfd8663ca",
+      "url": "https://urlhaus.abuse.ch/downloads/hostfile/",
+      "version": "2026-09-01 02:47:05 (UTC)"
+    },
+    {
+      "acceptedSuffixCount": 16809,
+      "etag": "\"4fe57f24900584d2ca1c42fbf73e837915bb27b3080299d8aa62cbeddc35d603\"",
+      "format": "abp",
+      "id": "brave-firstparty-cname",
+      "lastModified": null,
+      "retrievedAt": "2026-09-01T03:02:57Z",
+      "sha256": "62686ce875274a636b8e8b40fb05d64ce6f49e9b1ab77099877ba7d140aebac4",
+      "url": "https://raw.githubusercontent.com/brave/adblock-lists/master/brave-lists/brave-firstparty-cname.txt",
+      "version": "sha256:62686ce875274a636b8e8b40fb05d64ce6f49e9b1ab77099877ba7d140aebac4"
+    }
+  ]
+}

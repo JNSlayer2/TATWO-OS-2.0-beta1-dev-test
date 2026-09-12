@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Browser native input acceptance fixture</title>
+<style>
+  body { font: 16px system-ui; margin: 24px; max-width: 900px }
+  .lane { display: flex; gap: 100px; align-items: center; height: 140px }
+  #source, #htmlSource { padding: 20px; touch-action: none }
+  #drop { border: 3px dashed #537; padding: 40px }
+  canvas { border: 2px solid #537; display: block; margin-top: 20px }
+  pre { white-space: pre-wrap }
+</style>
+<h1>Native input — manual verification only</h1>
+<p>Use an approved test origin. This fixture does not change the browser network policy.</p>
+<div class="lane">
+  <button id="source">Pointer drag source</button>
+  <div id="drop">Drop zone</div>
+  <div id="htmlSource" draggable="true">HTML drag source</div>
+</div>
+<label>Keyboard <input id="keyboard" aria-label="Keyboard test"></label>
+<label>Password <input type="password" aria-label="Password test" autocomplete="off"></label>
+<label><input id="check" type="checkbox"> Checkbox</label>
+<label>Choice <select id="choice" aria-label="Choice">
+  <option value="red">Red</option><option value="blue">Blue</option>
+  <option value="disabled" disabled>Disabled</option>
+</select></label>
+<canvas width="480" height="90"></canvas>
+<pre id="status"></pre>
+<script>
+  // No synthetic input dispatch. Only actual DOM events update these counters.
+  const source=document.querySelector('#source'), drop=document.querySelector('#drop');
+  const counts={down:0,move:0,up:0,cancel:0,untrusted:0,dropped:false,
+    htmlDrop:false,canvasClick:false,lastKey:'',checkbox:false,selected:'red'};
+  const render=()=>document.querySelector('#status').textContent=JSON.stringify(counts,null,2);
+  const trusted=e=>{ if (!e.isTrusted) counts.untrusted++; };
+  source.addEventListener('pointerdown',e=>{
+    trusted(e); counts.down++; counts.dropped=false;
+    source.setPointerCapture(e.pointerId); render();
+  });
+  source.addEventListener('pointermove',e=>{
+    if (!source.hasPointerCapture(e.pointerId)) return;
+    trusted(e); counts.move++; render();
+  });
+  source.addEventListener('pointerup',e=>{
+    trusted(e); counts.up++;
+    const r=drop.getBoundingClientRect();
+    counts.dropped=e.clientX>=r.left && e.clientX<r.right && e.clientY>=r.top && e.clientY<r.bottom;
+    render();
+  });
+  source.addEventListener('pointercancel',e=>{trusted(e);counts.cancel++;render();});
+  document.querySelector('#htmlSource').addEventListener('dragstart',e=>{
+    trusted(e); e.dataTransfer.setData('text/plain','fixture');
+  });
+  drop.addEventListener('dragover',e=>e.preventDefault());
+  drop.addEventListener('drop',e=>{e.preventDefault();trusted(e);counts.htmlDrop=true;render();});
+  document.querySelector('#keyboard').addEventListener('keydown',e=>{
+    trusted(e); counts.lastKey=`${e.metaKey?'cmd+':''}${e.shiftKey?'shift+':''}${e.key}`; render();
+  });
+  document.querySelector('#check').addEventListener('change',e=>{counts.checkbox=e.target.checked;render();});
+  document.querySelector('#choice').addEventListener('change',e=>{counts.selected=e.target.value;render();});
+  const canvas=document.querySelector('canvas'), context=canvas.getContext('2d');
+  context.fillStyle='#287';context.fillRect(300,15,150,60);
+  context.fillStyle='white';context.font='16px system-ui';context.fillText('Pixel-only target',310,50);
+  canvas.addEventListener('click',e=>{
+    trusted(e); const r=canvas.getBoundingClientRect();
+    const x=(e.clientX-r.left)*canvas.width/r.width, y=(e.clientY-r.top)*canvas.height/r.height;
+    counts.canvasClick=x>=300&&x<450&&y>=15&&y<75;render();
+  });
+  render();
+</script>

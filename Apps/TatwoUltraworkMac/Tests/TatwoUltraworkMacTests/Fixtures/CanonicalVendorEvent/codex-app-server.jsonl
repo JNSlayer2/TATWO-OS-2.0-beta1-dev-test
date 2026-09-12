@@ -1,0 +1,4 @@
+{"method":"item/agentMessage/delta","params":{"delta":"Hel"}}
+{"method":"item/agentMessage/delta","params":{"delta":"lo"}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"Hello"}}}
+{"method":"turn/completed","params":{"turn":{"status":"completed"}}}

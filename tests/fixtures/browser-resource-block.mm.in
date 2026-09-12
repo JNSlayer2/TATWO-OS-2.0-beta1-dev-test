@@ -1,0 +1,221 @@
+// Compiles the actual production policy, request handler and delivery function.
+// CEF transport, DNS and final UI publication are fake; no website is contacted.
+#import <Foundation/Foundation.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <atomic>
+#include <map>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <iostream>
+#define CefString FixtureSDKCefString
+#include "include/internal/cef_types.h"
+#undef CefString
+using CefString = std::string;
+template<class T> using CefRefPtr = T*;
+class CefBrowser {};
+class CefFrame { public: bool main=true; bool IsMain() { return main; } };
+class CefResponse {};
+class CefCallback {};
+class CefCookieAccessFilter {};
+class CefRequest {
+ public:
+  cef_resource_type_t type;
+  std::string url;
+  cef_resource_type_t GetResourceType() { return type; }
+  CefString GetURL() { return url; }
+  CefString GetReferrerURL() { return {}; }
+  void SetHeaderByName(const char*, const char*, bool) {}
+  void SetReferrer(CefString, cef_referrer_policy_t) {}
+};
+class CefResourceRequestHandler {
+ public:
+  virtual CefCookieAccessFilter* GetCookieAccessFilter(CefBrowser*, CefFrame*, CefRequest*) = 0;
+  virtual cef_return_value_t OnBeforeResourceLoad(CefBrowser*, CefFrame*, CefRequest*, CefCallback*) = 0;
+  virtual void OnResourceRedirect(CefBrowser*, CefFrame*, CefRequest*, CefResponse*, CefString&) = 0;
+  virtual void OnProtocolExecution(CefBrowser*, CefFrame*, CefRequest*, bool&) = 0;
+};
+class TatwoThirdPartyCookieAccessFilter: public CefCookieAccessFilter {
+ public: TatwoThirdPartyCookieAccessFilter(bool, NSString*) {}
+};
+#define IMPLEMENT_REFCOUNTING(Type)
+NSString *FromCefString(const CefString &s) { return [NSString stringWithUTF8String:s.c_str()]; }
+CefString ToCefString(NSString *s) { return s.UTF8String; }
+// INSERT urlPolicy
+// INSERT urlCredentials
+// INSERT list
+// INSERT policy
+// INSERT decision
+
+@interface TatwoCEFBrowserView : NSObject @end
+@implementation TatwoCEFBrowserView @end
+enum TatwoCEFBrowserErrorKind { TatwoCEFBrowserErrorKindNavigation, TatwoCEFBrowserErrorKindSecurity };
+enum TatwoCEFBrowserPhase { TatwoCEFBrowserPhaseNavigationFailed, TatwoCEFBrowserPhaseBlockedBySecurity };
+struct BrowserState { uint64_t mount_generation=7; bool close_requested=false, close_completed=false; bool navigation_in_flight=false; uint64_t navigation_generation=1; };
+BrowserState state;
+BrowserState *State(TatwoCEFBrowserView*) { return &state; }
+int visibleErrors=0, checks=0;
+NSString *lastMessage;
+int lastCode=0;
+TatwoCEFBrowserErrorKind lastKind=TatwoCEFBrowserErrorKindNavigation;
+void PublishVisibleError(TatwoCEFBrowserView*, NSString *s, TatwoCEFBrowserErrorKind kind, NSInteger code, TatwoCEFBrowserPhase) {
+  ++visibleErrors; lastMessage=s; lastCode=(int)code; lastKind=kind;
+}
+void PublishResourceError(TatwoCEFBrowserView*, ResourceErrorContext, NSString*, bool=false);
+// INSERT finishNavigation
+uint64_t BeginNavigationFrameTelemetry(TatwoCEFBrowserView*, BrowserState *current, NSString*) {
+  current->navigation_in_flight=true;
+  return ++current->navigation_generation;
+}
+// INSERT rendererNavigation
+// INSERT delivery
+enum class PublicAddressResult { kPublic, kNonPublic, kDNSFailure };
+PublicAddressResult dnsResult=PublicAddressResult::kPublic;
+dispatch_semaphore_t dnsGate;
+PublicAddressResult ResolvePublicAddressResult(NSString*) {
+  if (dnsGate) dispatch_semaphore_wait(dnsGate, DISPATCH_TIME_FOREVER);
+  return dnsResult;
+}
+bool URLHostIsIPAddress(NSString *url) {
+  in_addr addr{}; return inet_aton(CanonicalHost(url).UTF8String, &addr)==1;
+}
+bool IsSameOrigin(NSString*, NSString*) { return false; }
+NSString *OriginForURLString(NSString*) { return nil; }
+std::atomic<int> completions{0};
+std::atomic<bool> lastAllowed{false};
+bool RegisterPendingResourceDecision(CefCallback*, uint64_t *id) { *id=1; return true; }
+void CompletePendingResourceDecision(uint64_t, bool allowed) { lastAllowed=allowed; ++completions; }
+int blockedMain=0, blockedSub=0;
+void RecordHostBlocklistRequest(bool main, cef_resource_type_t) { if(main) ++blockedMain; else ++blockedSub; }
+void LogBrowserNavigationTrace(NSString*, int, bool) {}
+// INSERT handler
+bool IsActiveMountCallback(TatwoCEFBrowserView*, uint64_t mount, NSString*) { return mount==state.mount_generation; }
+void StopLoadingActiveMessagePump(TatwoCEFBrowserView*, uint64_t, NSString*) {}
+bool HasVisibleSecurityError(TatwoCEFBrowserView*) { return lastKind==TatwoCEFBrowserErrorKindSecurity; }
+void PublishState(TatwoCEFBrowserView*) {}
+class LoadBase {
+ public:
+  using ErrorCode=cef_errorcode_t;
+  virtual void OnLoadError(CefBrowser*, CefFrame*, ErrorCode, const CefString&, const CefString&)=0;
+};
+class LoadClient : public LoadBase {
+ public:
+  __weak TatwoCEFBrowserView *owner_;
+  uint64_t mount_generation_=7;
+  // INSERT loadError
+};
+void check(bool value, const char *message) {
+  if (!value) { std::cerr << "FAIL " << message << '\n'; exit(1); }
+  ++checks;
+}
+void drain() {
+  [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.025]];
+}
+void waitCompletion(int expected) {
+  for(int i=0; i<80 && completions<expected; ++i) drain();
+  check(completions==expected, "DNS callback completed exactly once"); drain();
+}
+int main() { @autoreleasepool {
+  auto list=std::make_shared<BrowserHostDenyListSnapshot>();
+  list->suffix_hosts.insert("ads.example");
+  BrowserRequestPolicySnapshot policy; policy.host_deny_list=list;
+  auto epoch=std::make_shared<ResourceNavigationEpoch>();
+  TatwoCEFBrowserView *view=[TatwoCEFBrowserView new];
+  CefFrame frame; CefCallback callback;
+  auto context=[&] { return ResourceErrorContext{epoch,epoch->Capture(),7}; };
+  const cef_resource_type_t subtypes[]={RT_SUB_FRAME,RT_STYLESHEET,RT_SCRIPT,RT_IMAGE,RT_FONT_RESOURCE,RT_SUB_RESOURCE,RT_OBJECT,RT_MEDIA,RT_WORKER,RT_SHARED_WORKER,RT_PREFETCH,RT_FAVICON,RT_XHR,RT_PING,RT_SERVICE_WORKER,RT_CSP_REPORT};
+  for(auto type:subtypes) {
+    TatwoResourceRequestHandler handler(view,@"https://example.com",policy,context());
+    CefRequest request{type,"https://pixel.ads.example/private?token=do-not-display"};
+    int before=visibleErrors;
+    check(handler.OnBeforeResourceLoad(nullptr,&frame,&request,&callback)==RV_CANCEL,"listed subresource cancelled");
+    drain(); check(visibleErrors==before,"listed subresource never replaces page");
+    CefString redirect="https://ads.example/path?secret=hidden";
+    handler.OnResourceRedirect(nullptr,&frame,&request,nullptr,redirect);
+    drain(); check(visibleErrors==before && redirect=="about:blank","subresource redirect isolated");
+  }
+  check(blockedMain==0 && blockedSub==16,"correct block counters");
+  check(!IsMainFrameRequest(nullptr),"missing request is not a main document");
+  TatwoResourceRequestHandler handler(view,@"",policy,context());
+  CefRequest main{RT_MAIN_FRAME,"https://ads.example/path?token=hidden"};
+  int before=visibleErrors;
+  check(handler.OnBeforeResourceLoad(nullptr,&frame,&main,&callback)==RV_CANCEL,"listed main document cancelled");
+  drain(); check(visibleErrors==before+1,"main document shows error");
+  check([lastMessage containsString:@"ads.example"] && [lastMessage containsString:@"內建名單"] && ![lastMessage containsString:@"token"],"domain and source only");
+  CefString redirect="https://ads.example/redirect";
+  handler.OnResourceRedirect(nullptr,&frame,&main,nullptr,redirect);
+  drain(); check(visibleErrors==before+2,"main redirect shows error");
+
+  // Queue a resource error, then navigate before its UI delivery.
+  before=visibleErrors;
+  handler.OnBeforeResourceLoad(nullptr,&frame,&main,&callback);
+  epoch->Advance(); drain(); check(visibleErrors==before,"stale queued error dropped");
+  for(auto result:{PublicAddressResult::kDNSFailure,PublicAddressResult::kNonPublic,PublicAddressResult::kPublic}) {
+    dnsResult=result;
+    for(auto type:{RT_MAIN_FRAME,RT_IMAGE,RT_PING}) {
+      TatwoResourceRequestHandler h(view,@"",policy,context());
+      CefRequest r{type,"https://example.com/"};
+      before=visibleErrors; int expected=completions+1;
+      check(h.OnBeforeResourceLoad(nullptr,&frame,&r,&callback)==RV_CONTINUE_ASYNC,"DNS is asynchronous");
+      waitCompletion(expected);
+      check(lastAllowed==(result==PublicAddressResult::kPublic),"DNS decision enforced");
+      bool show=type==RT_MAIN_FRAME && result!=PublicAddressResult::kPublic;
+      check(visibleErrors==before+(show?1:0),"DNS failure visibility limited to main document");
+      if(show) check(lastCode==(result==PublicAddressResult::kDNSFailure?ERR_NAME_NOT_RESOLVED:ERR_BLOCKED_BY_CLIENT),"DNS failure distinct from private IP");
+    }
+  }
+  dnsGate=dispatch_semaphore_create(0); dnsResult=PublicAddressResult::kDNSFailure;
+  TatwoResourceRequestHandler delayed(view,@"",policy,context());
+  CefRequest ordinary{RT_MAIN_FRAME,"https://example.com/"};
+  before=visibleErrors; int expected=completions+1;
+  delayed.OnBeforeResourceLoad(nullptr,&frame,&ordinary,&callback);
+  epoch->Advance(); dispatch_semaphore_signal(dnsGate); waitCompletion(expected);
+  dnsGate=nil; check(visibleErrors==before,"old navigation DNS result cannot cover new page");
+  PublishResourceError(view,context(),@"closing"); state.close_requested=true;
+  drain(); check(visibleErrors==before,"closed view error dropped"); state.close_requested=false;
+  auto oldMount=context(); oldMount.mount_generation=6;
+  PublishResourceError(view,oldMount,@"old mount"); drain(); check(visibleErrors==before,"replaced mount error dropped");
+
+  NSString *custom=@"{\"schema\":\"TatwoBrowserHostDenyListV1\",\"exactHosts\":[\"custom.example\"],\"suffixes\":[\"track.example\"]}";
+  size_t exact=0,suffix=0;
+  check(MergeDenyListJSON([custom dataUsingEncoding:NSUTF8StringEncoding],list.get(),&exact,&suffix,@"使用者名單"),"custom list parses");
+  check([ResourceBlockMessage(policy,@"https://sub.track.example/") containsString:@"使用者名單"],"custom suffix provenance");
+  check([ResourceBlockMessage(policy,@"https://custom.example/") containsString:@"使用者名單"],"custom exact provenance");
+  check(!list->Blocks(@"notads.example") && !list->Blocks(@"ads.example.evil"),"domain boundary preserved");
+  check(list->Blocks(@"PIXEL.ADS.EXAMPLE."),"case and trailing dot normalized");
+  BrowserRequestPolicySnapshot missing;
+  check(IsDeniedByLocalHostList(missing,@"https://github.com/"),"missing list stays blocked");
+  check([ResourceBlockMessage(missing,@"https://github.com/") containsString:@"尚未就緒"],"missing list is not reported as a matching rule");
+  check([ResourceBlockMessage(policy,@"http://127.0.0.1/") containsString:@"私有網路"],"local URL reason");
+  check(![ResourceBlockMessage(policy,@"https://alice:password@example.com/") containsString:@"alice"],"credentials never shown");
+  state.navigation_in_flight=true;
+  const auto beforeGeneration=state.navigation_generation;
+  before=visibleErrors;
+  PublishResourceError(view,context(),@"current DNS denial"); drain();
+  check(!state.navigation_in_flight,"current blocked navigation finishes telemetry");
+  check(visibleErrors==before+1,"current denial both finishes and publishes its error");
+  BeginRendererNavigationIfNeeded(view);
+  check(state.navigation_in_flight && state.navigation_generation==beforeGeneration+1,
+        "renderer navigation after denial begins a fresh generation");
+  auto staleFinish=context(); epoch->Advance();
+  PublishResourceError(view,staleFinish,@"stale denial"); drain();
+  check(state.navigation_in_flight,"stale denial does not finish the newer navigation");
+  LoadClient load; load.owner_=view;
+  before=visibleErrors; state.navigation_in_flight=true;
+  load.OnLoadError(nullptr,&frame,ERR_ABORTED,"","");
+  check(visibleErrors==before && state.navigation_in_flight,"old aborted navigation does not stop or replace new page");
+  CefFrame subframe; subframe.main=false;
+  load.OnLoadError(nullptr,&subframe,ERR_NAME_NOT_RESOLVED,"","");
+  check(visibleErrors==before,"iframe load error stays local");
+  lastKind=TatwoCEFBrowserErrorKindNavigation;
+  load.OnLoadError(nullptr,&frame,ERR_CONNECTION_REFUSED,"","");
+  check(visibleErrors==before+1,"ordinary main document load failure remains visible");
+  lastKind=TatwoCEFBrowserErrorKindSecurity;
+  load.OnLoadError(nullptr,&frame,ERR_BLOCKED_BY_CLIENT,"","");
+  check(visibleErrors==before+1,"generic load failure preserves specific security reason");
+  std::cout << "RESOURCEBLOCK RESULT passed=" << checks << " failed=0 skipped=0\n";
+} }

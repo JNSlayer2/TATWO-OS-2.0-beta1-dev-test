@@ -1,14 +1,60 @@
-.DS_Store
+.build/
 node_modules/
-coverage/
-*.log
+*.xcodeproj
+# The shipped iPad runtime needs these shared project files in a clean checkout.
+!/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/
+/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/*
+!/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/project.pbxproj
+!/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/project.xcworkspace/
+/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/project.xcworkspace/*
+!/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+!/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/xcshareddata/
+/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/xcshareddata/*
+!/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/xcshareddata/xcschemes/
+/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/xcshareddata/xcschemes/*
+!/Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/xcshareddata/xcschemes/TatwoIPadDevice.xcscheme
+.DS_Store
+dist/
+Engines/claude-sidecar/dist/
+# Build artifacts
+.build
+.build-browser/
+.browser-caller-*/
+.swiftpm/
+DerivedData/
+runtime-backups/
+__pycache__/
+*.py[cod]
+# macOS / Xcode user state
+._*
+.__*
+*.xcuserdata/
+xcuserdata/
+*.xcuserstate
+# Local Codex / Tatwo / GitNexus state
+.codex/
+.gitnexus/
+.tatwo-ultrawork/
+.sandbox-remote-loops-r2/
+output/
 .env
 .env.*
-!.env.example
-.tatwo2/
-receipts/
-sessions/
-._*
-.Spotlight-V100/
-.Trashes/
-.fseventsd/
+*.log
+*.pid
+# Secrets / local auth backups
+*auth*.json
+*token*
+# 2026-08-21 豁免：*token* 是防洩密規則，不得吃掉測試源碼
+!*TokenTests.swift
+!*TokenPreflightTests.swift
+*.key
+*.pem
+# Liquid Glass / theme 設計常數檔（非 secret），豁免 *token*
+!*TokenPreflightTests.swift 規則
+!LiquidGlassTokens.swift
+!TatwoThemeTokensV1.swift
+# tatwo security harness local state (keep README only)
+.tatwo-security/*
+!.tatwo-security/README.md
+docs/UI定位冊/截圖-2x/
+.build-sol/

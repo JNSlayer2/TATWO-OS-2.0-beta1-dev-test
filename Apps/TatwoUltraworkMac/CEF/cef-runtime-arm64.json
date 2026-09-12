@@ -1,0 +1,15 @@
+{
+  "schema": "TatwoCEFDistributionPinV1",
+  "platform": "macosarm64",
+  "channel": "stable",
+  "cefVersion": "151.3.24+g2384915+chromium-151.0.7922.174",
+  "chromiumVersion": "151.0.7922.174",
+  "archive": "cef_binary_151.3.24+g2384915+chromium-151.0.7922.174_macosarm64_minimal.tar.bz2",
+  "url": "https://cef-builds.spotifycdn.com/cef_binary_151.3.24+g2384915+chromium-151.0.7922.174_macosarm64_minimal.tar.bz2",
+  "officialIndexURL": "https://cef-builds.spotifycdn.com/index.json",
+  "officialIndexSHA1": "82af2c0cadaafc4ad057f54c14cb3791cc139852",
+  "sha256": "3557fa980ce83103ec488dd2e5cc6cc51d2b890718c41005b3ef15ca5944a811",
+  "size": 130984661,
+  "licenseRelativePath": "LICENSE.txt",
+  "licenseSHA256": "058c3827ffb827ff3edda471ae7e1bb1d1aa5931985f0126043ccd33409e792f"
+}

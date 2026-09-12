@@ -1,11 +1,11 @@
-# TATWO OS 2.0 — Public Constitution
+# tatwo2 憲法（2026-09-03，共六條，不得超過二十行）
 
-1. **Reuse upstream engines.** The OS coordinates provider runtimes; it does not recreate them.
-2. **Keep governance thin.** Goal, plain-language plan, bounded loops, and direct verification live with the discussion thread and project evidence.
-3. **Identity before brand.** User, lead, worker, reviewer, and monitor are roles; model vendors are replaceable bindings.
-4. **Isolate workers.** Every delegated room has an explicit brief, bounded working root, separate workspace, and a stop condition.
-5. **Verify honestly.** Process liveness and worker claims are not completion. The lead reruns relevant checks and reports missing evidence.
-6. **Fail closed at authority boundaries.** Credentials, sessions, network exposure, host mutation, deployment, device control, and destructive actions require explicit external configuration and approval. The public package grants none of them.
-7. **Protect private data.** Secrets, personal paths, account identifiers, browser state, receipts, and real project fixtures never enter public artifacts.
-8. **Prefer reversible changes.** Preview first; avoid destructive defaults; preserve rollback evidence.
-9. **Document incidents instead of growing hidden machinery.** Stable rules remain short and reviewable.
+1. Claude Code 或 Codex 已經有的功能，用它們的，不自己造。
+2. 連續五個工作天不斷線、不報錯之前，禁止加任何治理、收據、閘門、簽章程式碼。
+3. 新寫 Swift 上限 15,000 行（不含 Visual/ 搬運檔）。超過就先刪再加。
+4. 第一個月單一寫手，不開平行 sub，不做三簽；sub 只做審查。
+5. 每個落地的改動，使用者當天就能用到。
+6. 事故寫進 `經驗.md`，不寫進程式碼。
+
+骨架只有四塊：Claude 引擎（Agent SDK 常駐 sidecar）、Codex 引擎（app-server 常駐）、Grok（isolated 逐輪）、Swift 殼。沒有第五塊。
+OS 1.0 凍結於 tag `os1-frozen-20260903`（GitHub tatwo214/tatwo-ultrawork），只作視覺層與經驗的來源池。

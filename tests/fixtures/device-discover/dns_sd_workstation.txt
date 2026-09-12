@@ -1,0 +1,5 @@
+Browsing for _workstation._tcp.local
+DATE: ---Thu 30 Jul 2026---
+20:00:00.000  ...STARTING...
+20:00:00.100  Add        2   6 local.               _workstation._tcp.  studio\032Pro
+20:00:00.110  Add        2   6 local.               _workstation._tcp.  macbook-air

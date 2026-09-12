@@ -1,0 +1,60 @@
+import Foundation
+import Darwin
+enum Bridge {
+// INSERT production
+}
+let root = CommandLine.arguments[1]
+if CommandLine.arguments.count > 2 {
+    exit(Bridge.acquireSocketLease(at: root) < 0 ? 0 : 1)
+}
+try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+var count = 0
+func check(_ ok: Bool, _ name: String) { count += 1; print("\(ok ? "PASS" : "FAIL") \(name)"); if !ok { exit(1) } }
+func bindSocket(_ path: String, listening: Bool) -> Int32 {
+ let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+ var a = sockaddr_un(); a.sun_family = sa_family_t(AF_UNIX)
+ withUnsafeMutablePointer(to: &a.sun_path) { p in p.withMemoryRebound(to: CChar.self, capacity: 104) { _ = strlcpy($0,path,104) } }
+ let rc = withUnsafePointer(to: &a) { p in p.withMemoryRebound(to: sockaddr.self,capacity:1) { Darwin.bind(fd,$0,socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+ check(rc == 0, "bind fixture")
+ if listening { check(Darwin.listen(fd,8) == 0,"listen fixture") }
+ return fd
+}
+let path = root + "/browser.sock"
+let lease = Bridge.acquireSocketLease(at:path)
+check(lease >= 0,"first owner gets lease")
+check(Bridge.acquireSocketLease(at:path) < 0,"second owner cannot acquire lease")
+let child = Process()
+child.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+child.arguments = [#filePath, path, "lease-child"]
+try child.run(); child.waitUntilExit()
+check(child.terminationStatus == 0,"other process cannot acquire lease")
+let starting = bindSocket(root + "/starting.sock",listening:false)
+check(Bridge.acquireSocketLease(at:path) < 0,"startup owner still excludes recovery")
+close(starting)
+let fd = bindSocket(path,listening:true)
+check(!Bridge.archiveStaleSocket(at:path),"live socket preserved")
+close(fd)
+check(Bridge.archiveStaleSocket(at:path),"dead socket archived")
+check(!FileManager.default.fileExists(atPath:path),"original endpoint freed")
+check(try FileManager.default.contentsOfDirectory(atPath:root).filter{$0.contains(".stale-")}.count == 1,"archive retained")
+let revived = bindSocket(path,listening:true)
+if case .alive = Bridge.probeSocket(at:path) { check(true,"endpoint can listen after recovery") } else { check(false,"endpoint can listen after recovery") }
+close(revived); close(lease)
+let next = Bridge.acquireSocketLease(at:path)
+check(next >= 0,"new owner acquires released lease"); close(next)
+let regular = root + "/regular"
+try Data("keep".utf8).write(to:URL(fileURLWithPath:regular))
+check(!Bridge.archiveStaleSocket(at:regular),"ordinary file preserved")
+let link = root + "/link"
+try FileManager.default.createSymbolicLink(atPath:link,withDestinationPath:regular)
+check(!Bridge.archiveStaleSocket(at:link),"symlink preserved")
+try FileManager.default.createSymbolicLink(atPath:root + "/unsafe.lock",withDestinationPath:regular)
+check(Bridge.acquireSocketLease(at:root + "/unsafe") < 0,"symlink lease rejected")
+let writable = root + "/writable.lock"
+try Data().write(to:URL(fileURLWithPath:writable))
+chmod(writable, 0o666)
+check(Bridge.acquireSocketLease(at:root + "/writable") < 0,"group writable lease rejected")
+let hard = root + "/hard.lock"
+try FileManager.default.linkItem(atPath:regular,toPath:hard)
+check(Bridge.acquireSocketLease(at:root + "/hard") < 0,"hard linked lease rejected")
+print("RESULT checks=\(count) failures=0")

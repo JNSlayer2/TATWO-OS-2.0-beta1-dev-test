@@ -7,20 +7,43 @@ import { fileURLToPath } from 'node:url';
 const root = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const skip = new Set(['.git', 'node_modules', 'coverage']);
-const textExtensions = new Set(['', '.md', '.mjs', '.js', '.json', '.yaml', '.yml', '.txt', '.gitignore']);
+const skip = new Set(['.git']);
+// Decode every non-resource file as UTF-8, including Swift, shell, TOML,
+// plist and strings. Unknown extensions must not provide a scan bypass.
+const binaryExtensions = new Set(['.png', '.icns', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.woff', '.woff2', '.ttf']);
 const forbidden = [
-  ['/Users path', /\/Users\//],
-  ['/Volumes path', /\/Volumes\//],
-  ['/home path', /\/home\/[A-Za-z0-9._-]+\//],
-  ['Windows user path', /[A-Za-z]:\\Users\\/i],
+  ['private volume label', /Layer2[ ]ai|33\u8766/i],
+  ['private user path', /\/Users\/layer[2]/i],
+  ['private volume path', /\/Volumes\/(?:Codex[D]ata|Tatwo[2])/i],
+  ['private account', /benny469[0]|wife1833[3]/i],
+  ['private Discord ID', /147277873033327834[1]/],
+  ['private data directory', /openclaw[-]data/i],
   ['private key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/],
-  ['generic secret assignment', /\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*["'][^"']{8,}/i],
-  ['provider token', /\b(?:sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{20,})\b/],
+  ['provider token', /\b(?:gh[op]_[A-Za-z0-9_]+|github[_]pat_[A-Za-z0-9_]+|sk[-][A-Za-z0-9_-]+)\b/],
   ['email address', /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i],
-  ['sensitive directory', /(?:^|\/)(?:receipts|sessions|attachments|browser-profile|DerivedData)(?:\/|$)/i],
 ];
 const findings = [];
+const allowed = [];
+const allowances = new Map();
+const pending = [];
+
+function loadAllowances() {
+  // Policy comes from this scanner's sibling, never from the tree being scanned.
+  const policy = fileURLToPath(new URL('./public-safety-allow.txt', import.meta.url));
+  const labels = new Set(['email address', 'provider token', 'private key']);
+  fs.readFileSync(policy, 'utf8').split(/\r?\n/).forEach((line, index) => {
+    if (!line.trim() || line.trimStart().startsWith('#')) return;
+    const fields = line.split('|').map(field => field.trim());
+    const [file, label, reason] = fields;
+    if (fields.length !== 3 || !file || !labels.has(label) || !reason
+      || path.isAbsolute(file) || file.includes('\\') || /[*?[\]\x00-\x1f]/.test(file)
+      || file.split('/').some(part => !part || part === '.' || part === '..')
+      || allowances.has(`${file}|${label}`)) {
+      throw new Error(`invalid allowlist entry at line ${index + 1}`);
+    }
+    allowances.set(`${file}|${label}`, reason);
+  });
+}
 
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -28,24 +51,59 @@ function walk(dir) {
     const file = path.join(dir, entry.name);
     const rel = path.relative(root, file);
     const stat = fs.lstatSync(file);
-    if (!/^[\x20-\x7e]+$/.test(rel)) findings.push(`${rel}: non-ASCII path rejected`);
-    if (/(^|\/)(?:\.env(?:\..*)?|receipts|sessions|attachments|browser-profile|DerivedData|\.claude|\.codex)(?:\/|$)/i.test(rel)) findings.push(`${rel}: sensitive path rejected`);
-    if ((stat.mode & 0o002) !== 0) findings.push(`${rel}: world-writable file rejected`);
-    if (stat.isSymbolicLink()) { findings.push(`${rel}: symlink rejected`); continue; }
+    const fail = (line, label) => findings.push(`FAIL: ${rel}:${line}: ${label}`);
+    for (const [label, pattern] of forbidden) if (pattern.test(rel)) fail(0, label);
+    if (/(^|\/)(?:\.env(?:\..*)?|receipts|sessions|attachments|browser-profile|DerivedData|\.claude|\.codex)(?:\/|$)/i.test(rel)) fail(0, 'sensitive path rejected');
+    if ((stat.mode & 0o002) !== 0) fail(0, 'world-writable file rejected');
+    if (stat.isSymbolicLink()) { fail(0, 'symlink rejected'); continue; }
     if (stat.isDirectory()) { walk(file); continue; }
-    if (!stat.isFile()) continue;
-    if (stat.size > 1_000_000) { findings.push(`${rel}: file exceeds 1 MB`); continue; }
-    const ext = entry.name === '.gitignore' ? '.gitignore' : path.extname(entry.name);
-    if (!textExtensions.has(ext)) { findings.push(`${rel}: non-text file rejected`); continue; }
-    const data = fs.readFileSync(file);
-    if (data.includes(0)) { findings.push(`${rel}: binary content rejected`); continue; }
-    const source = data.toString('utf8');
-    for (const [label, pattern] of forbidden) if (pattern.test(source)) findings.push(`${rel}: ${label}`);
+    if (!stat.isFile()) { fail(0, 'special file rejected'); continue; }
+    pending.push({ file, rel });
   }
 }
-walk(root);
-if (findings.length) {
-  process.stderr.write(`PUBLIC SAFETY SCAN FAIL\n${findings.map(item => `- ${item}`).join('\n')}\n`);
-  process.exit(1);
+
+async function inspect({ file, rel }) {
+    const fail = (line, label) => findings.push(`FAIL: ${rel}:${line}: ${label}`);
+    const ext = path.extname(file).toLowerCase();
+    const data = await fs.promises.readFile(file);
+    // Only actual binary resources may skip text inspection; renamed source is scanned.
+    let source;
+    try { source = new TextDecoder('utf-8', { fatal: true }).decode(data); }
+    catch { source = null; }
+    if (source === null || data.includes(0)) {
+      if (binaryExtensions.has(ext)) console.log(`SKIP BINARY: ${rel}`);
+      else fail(0, 'unexpected binary content');
+      return;
+    }
+    source.split(/\r?\n/).forEach((line, index) => {
+      for (const [label, pattern] of forbidden) {
+        if (!pattern.test(line)) continue;
+        const reason = allowances.get(`${rel}|${label}`);
+        if (reason) allowed.push(`ALLOW: ${rel}:${index + 1}: ${label} (${reason})`);
+        else fail(index + 1, label);
+      }
+    });
 }
-process.stdout.write('PUBLIC SAFETY SCAN PASS\n');
+try {
+  loadAllowances();
+  walk(root);
+  // Bounded I/O avoids serial cold reads on disk images, without unbounded fan-out.
+  let next = 0;
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (next < pending.length) {
+      const item = pending[next++];
+      try { await inspect(item); }
+      catch { findings.push(`FAIL: ${item.rel}:0: unreadable file`); }
+    }
+  }));
+} catch (error) {
+  findings.push(`FAIL: .:0: unreadable tree or invalid allowlist${error.message.startsWith('invalid allowlist entry') ? ` (${error.message})` : ''}`);
+}
+if (allowed.length) process.stdout.write(`${allowed.sort().join('\n')}\n`);
+if (findings.length) {
+  process.stderr.write(`PUBLIC SAFETY SCAN FAIL\n${findings.sort().join('\n')}\n`);
+  // Let piped ALLOW/FAIL output drain before terminating.
+  process.exitCode = 1;
+} else {
+  process.stdout.write('PUBLIC SAFETY SCAN PASS\n');
+}

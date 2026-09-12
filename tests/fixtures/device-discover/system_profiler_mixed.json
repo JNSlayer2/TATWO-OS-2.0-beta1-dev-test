@@ -1,0 +1,60 @@
+{
+  "SPThunderboltDataType": [
+    {
+      "_name": "thunderboltusb4_bus_0",
+      "device_name_key": "Mac mini",
+      "vendor_name_key": "Apple Inc.",
+      "switch_uid_key": "0xHOSTONLY",
+      "receptacle_1_tag": {
+        "receptacle_status_key": "receptacle_no_devices_connected"
+      }
+    },
+    {
+      "_name": "thunderboltusb4_bus_2",
+      "device_name_key": "Mac mini",
+      "vendor_name_key": "Apple Inc.",
+      "switch_uid_key": "0xHOSTWITHPEER",
+      "_items": [
+        {
+          "_name": "Peer MacBook",
+          "device_name_key": "Peer MacBook",
+          "vendor_name_key": "Apple Inc.",
+          "vendor_id": "0x05ac",
+          "device_id_key": "0x0001",
+          "serial_number": "TB-SERIAL-AAA"
+        }
+      ]
+    }
+  ],
+  "SPUSBDataType": [
+    {
+      "_name": "USB 3.0 Bus",
+      "_items": [
+        {
+          "_name": "Cruzer",
+          "manufacturer": "SanDisk",
+          "vendor_id": "0x0781",
+          "product_id": "0x5583"
+        }
+      ]
+    }
+  ],
+  "SPUSBHostDataType": [
+    {
+      "_name": "USB 3.1 Bus",
+      "USBKeyHardwareType": "Built-in",
+      "_items": [
+        {
+          "_name": "ESD360C",
+          "USBDeviceKeyLinkSpeed": "10 Gb/s",
+          "USBDeviceKeyProductID": "0x2100",
+          "USBDeviceKeySerialNumber": "USB-SERIAL-BBB",
+          "USBDeviceKeyVendorID": "0x2174",
+          "USBDeviceKeyVendorName": "Transcend",
+          "USBKeyHardwareType": "Removable",
+          "USBKeyLocationID": "0x01200000"
+        }
+      ]
+    }
+  ]
+}
