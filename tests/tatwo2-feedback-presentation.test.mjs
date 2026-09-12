@@ -40,7 +40,26 @@ test('native feedback states and compact Chat/note presentation', {
   assert.ok(shapeStart >= 0 && shapeEnd > shapeStart);
   const drawerShape = composer.slice(shapeStart, shapeEnd)
     .replace('RoundedInvertedTrapezoid', 'FeedbackFixtureDrawerShape');
-  const swift = source + '\nimport AppKit\n' + drawerShape + String.raw`
+  // Compile the real split feedback types; only external app/account seams are inert.
+  const dependencies = ['Facade/FeedbackCoordinator.swift', 'Facade/FeedbackService.swift',
+    'Facade/FeedbackNativeReview.swift'].map(file =>
+    readFileSync(path.join(repo, 'App/Sources/Tatwo2', file), 'utf8')).join('\n');
+  const swift = dependencies + '\n' + source + '\nimport AppKit\n' + drawerShape + String.raw`
+struct ClaudeSidecar { static func engineHomeRoot() -> URL { fatalError("no engine in presentation fixture") } }
+struct GitHubAccountsStore {
+    struct Account { var username: String }
+    func loadAccounts() throws -> [Account] { [] }
+    func mcpToken(username: String) throws -> String? { nil }
+}
+struct FeedbackFixtureModel {
+    struct Login { var isLoggedIn: Bool }
+    struct Route { var engine = Engine.none; enum Engine: String { case none } }
+    var engineLogins: [Login] = []; var selectedThread: String?; var routeChoice = Route()
+}
+enum TatwoAppMCPRuntimeRegistry { static var state: Bool { false } }
+enum TatwoChatProcessCompositionRegistry {
+    static func chatPageModel(_ state: () -> Bool) -> FeedbackFixtureModel { FeedbackFixtureModel() }
+}
 extension FeedbackPanel {
     var fixtureCanReview: Bool { canReview }
 }
@@ -60,7 +79,7 @@ extension FeedbackPanel {
                title: String = rawTitle, content: String = rawBody) -> FeedbackPanel {
         FeedbackPanel(title: .constant(title), content: .constant(content), source: source,
                       account: account, destination: destination, phase: phase,
-                      close: {}, review: {}, edit: {}, submit: {}, checkSubmission: {}, openIssue: {})
+                      close: {}, review: {}, edit: {}, submit: {}, checkSubmission: {}, openIssue: {}, manualConfirmation: .constant(false))
     }
     check(panel(.draft).title == rawTitle && panel(.draft).content == rawBody, "exact caller text retained")
     check(panel(.draft).fixtureCanReview, "complete draft enables review affordance")
@@ -145,7 +164,7 @@ try MainActor.assumeIsolated { try runFeedbackFixture() }
 `;
   writeFileSync(path.join(root, 'fixture.swift'), swift);
   const lock = path.join(repo, 'scripts/tatwo-build-lock.sh');
-  const acquisition = run('/bin/bash', [lock, 'acquire', '--timeout', '1', '--pid', String(process.pid)]);
+  const acquisition = run('/bin/bash', [lock, 'acquire', '--timeout', '120', '--pid', String(process.pid)], { timeout: 130_000 });
   assert.equal(acquisition.status, 0, acquisition.stderr);
   const token = acquisition.stdout.match(/^token=(.+)$/m)?.[1];
   assert.ok(token, 'owned build lock token required');

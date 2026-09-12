@@ -46,7 +46,9 @@ final class ChatPageModel: ObservableObject {
     var cliSessionsByThread: [UUID: [TatwoNativeCLISessionBook.Session]] = [:]
     var activeCLITabByThread: [UUID: UUID] = [:]
     private var loadedCLIThreadIDs: Set<UUID> = []
-    private var pluginEntries: [PluginRegistryEntry]
+    @Published private var pluginEntries: [PluginRegistryEntry]
+    private var lastPluginScanAt = Date.distantPast
+    private(set) var pluginRefreshTask: Task<Void, Never>?
     var cliTabOwner: [UUID: UUID] = [:]
     var cliTabLinesByID: [UUID: [TatwoTerminalLine]] = [:]
     var cliTabPTYByID: [UUID: CLIWorkbenchTerminalSession] = [:]
@@ -66,6 +68,7 @@ final class ChatPageModel: ObservableObject {
             if skillSuggestionSelectedIndex != nil { skillSuggestionSelectedIndex = nil }
             if slashCommandSelectedIndex != nil { slashCommandSelectedIndex = nil }
             if issueMentionSelectedIndex != nil { issueMentionSelectedIndex = nil }
+            if activeSkillQuery != nil { reloadPluginRegistry(ifOlderThan: 60) }
         }
     }
     // 同 1.0：匯出／假資料模式下由 TATWO_ULTRAWORK_EXPORT_CHAT_MODE 決定 chat / cli / bot
@@ -870,14 +873,7 @@ final class ChatPageModel: ObservableObject {
             if environment["TATWO2_BOTTEST"] == "1" {
                 scheduleBotSelfTest(environment: environment)
             }
-            let pluginEnvironment = environment
-            Task.detached { [weak self] in
-                let fresh = PluginsSource.refreshNow(environment: pluginEnvironment)
-                await MainActor.run {
-                    self?.pluginEntries = fresh
-                    self?.objectWillChange.send()
-                }
-            }
+            reloadPluginRegistry()
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 await SpaceWorkspaceController.shared.load(model: self)
@@ -2739,16 +2735,27 @@ final class ChatPageModel: ObservableObject {
         if let id = selectedThreadID { live?.togglePinned(id) }
     }
     func selectStandaloneThread(_ threadID: UUID) { selectLocalThread(threadID) }
-    func reloadPluginRegistry() {
-        guard isLive else { return }
+    @discardableResult
+    func reloadPluginRegistry(ifOlderThan age: TimeInterval = 0, now: Date = Date()) -> Task<Void, Never>? {
+        guard isLive else { return nil }
+        if let pluginRefreshTask { return pluginRefreshTask }
+        guard now.timeIntervalSince(lastPluginScanAt) > age else { return nil }
         let environment = runtimeEnvironment
-        Task.detached { [weak self] in
-            let fresh = PluginsSource.refreshNow(environment: environment)
-            await MainActor.run {
-                self?.pluginEntries = fresh
-                self?.objectWillChange.send()
-            }
+        pluginRefreshTask = Task { @MainActor [weak self] in
+            // Skills are local files; publish them before the potentially slow MCP probe.
+            let scanned = await Task.detached(priority: .utility) {
+                PluginsSource.scanNow(environment: environment)
+            }.value
+            self?.pluginEntries = scanned
+            self?.skillSuggestionSelectedIndex = nil
+            let fresh = await Task.detached(priority: .utility) {
+                PluginsSource.refreshNow(environment: environment)
+            }.value
+            self?.pluginEntries = fresh
+            self?.lastPluginScanAt = now
+            self?.pluginRefreshTask = nil
         }
+        return pluginRefreshTask
     }
     func isThreadPluginEnabled(_ pluginID: String) -> Bool {
         guard let engine = PluginsSource.mcpEngine(from: pluginID) else { return true }

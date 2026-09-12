@@ -14,13 +14,14 @@ struct ClaudeSidecar {
 @MainActor
 final class Probe {
     var reviews = 0
+    var reviewedText = ""
     var calls: [URLRequest] = []
     var output = #"{"decision":"allow","reason":"none"}"#
     var status = 201
     var networkError = false
     var reconcileBody = "[]"
     var identity = "fixture-user"
-    func review(_ text: String) async throws -> String { reviews += 1; return output }
+    func review(_ text: String) async throws -> String { reviews += 1; reviewedText = text; return output }
     func http(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         calls.append(request)
         let code: Int; let body: String
@@ -47,7 +48,7 @@ func fails(_ expected: FeedbackFailure, _ body: () async throws -> Void) async {
         let identity = FeedbackIdentity(username: "fixture-user", token: "synthetic-credential-not-real")
         func fixture() throws -> (FeedbackService, Probe, URL) {
             let probe = Probe(), url = root.appendingPathComponent(UUID().uuidString).appendingPathComponent("draft.json")
-            let service = try FeedbackService(draftURL: url, reviewer: probe.review, http: probe.http)
+            let service = try FeedbackService(draftURL: url, reviewer: probe.review, http: probe.http, repository: { "fixture-owner/feedback" })
             try service.update(title: "A critical bug", body: "This feature is broken. Repro: print(1).", account: identity.username)
             return (service, probe, url)
         }
@@ -109,7 +110,7 @@ func fails(_ expected: FeedbackFailure, _ body: () async throws -> Void) async {
         do {
             let (service, probe, url) = try fixture()
             try await service.review(identity: identity)
-            let reopened = try FeedbackService(draftURL: url, reviewer: probe.review, http: probe.http)
+            let reopened = try FeedbackService(draftURL: url, reviewer: probe.review, http: probe.http, repository: { "fixture-owner/feedback" })
             await fails(.changed) { _ = try await reopened.submit(identity: identity) }
             let before = service.draft
             let number = try await service.submit(identity: identity)
@@ -117,8 +118,14 @@ func fails(_ expected: FeedbackFailure, _ body: () async throws -> Void) async {
             check(probe.calls.count == 2 && probe.calls[0].url!.path == "/user", "identity validation missing")
             let post = probe.calls.last!
             let payload = try JSONSerialization.jsonObject(with: post.httpBody!) as! [String: String]
-            check(payload == ["title": before.title, "body": before.body], "original text modified/extra content attached")
-            check(post.url!.absoluteString == "https://api.github.com/repos/tatwo214/tatwo2/issues", "wrong repo")
+            // W4 intentionally reviews and submits the original body plus an environment footer.
+            let expectedBody = FeedbackEnvironment.current().appending(to: before.body)
+            check(expectedBody.hasPrefix(before.body + "\n\n---\n"), "environment footer changed original text")
+            check(service.draft.title == before.title && service.draft.body == before.body, "raw draft modified")
+            check(payload == ["title": before.title, "body": expectedBody], "unexpected augmented payload")
+            let reviewed = try JSONSerialization.jsonObject(with: Data(probe.reviewedText.utf8)) as! [String: String]
+            check(reviewed == payload && service.draft.deliveryBody == expectedBody, "review/delivery bytes differ")
+            check(post.url!.absoluteString == "https://api.github.com/repos/fixture-owner/feedback/issues", "wrong repo")
             await fails(.uncertain) { _ = try await service.submit(identity: identity) }
             check(probe.calls.count == 2, "successful issue retried")
             try service.beginNewDraft()
@@ -142,7 +149,7 @@ func fails(_ expected: FeedbackFailure, _ body: () async throws -> Void) async {
             try await service.review(identity: identity)
             await fails(.uncertain) { _ = try await service.submit(identity: identity) }
             check(service.draft.deliveryPending, "unknown response unlocked retry")
-            let reopened = try FeedbackService(draftURL: url, reviewer: probe.review, http: probe.http)
+            let reopened = try FeedbackService(draftURL: url, reviewer: probe.review, http: probe.http, repository: { "fixture-owner/feedback" })
             await fails(.uncertain) { _ = try await reopened.submit(identity: identity) }
             check(probe.calls.count == 2, "restart caused duplicate POST")
             let result = try await reopened.reconcile(identity: identity)
@@ -153,7 +160,7 @@ func fails(_ expected: FeedbackFailure, _ body: () async throws -> Void) async {
             try await service.review(identity: identity)
             await fails(.uncertain) { _ = try await service.submit(identity: identity) }
             let stamp = ISO8601DateFormatter().string(from: Date())
-            let row: [String: Any] = ["number": 88, "title": service.draft.title, "body": service.draft.body,
+            let row: [String: Any] = ["number": 88, "title": service.draft.title, "body": service.draft.deliveryBody!,
                                       "created_at": stamp, "user": ["login": identity.username]]
             probe.reconcileBody = String(decoding: try JSONSerialization.data(withJSONObject: [row]), as: UTF8.self)
             let found = try await service.reconcile(identity: identity)
@@ -162,7 +169,7 @@ func fails(_ expected: FeedbackFailure, _ body: () async throws -> Void) async {
         // Native model failure is not fabricated approval.
         do {
             let probe = Probe(), url = root.appendingPathComponent("unavailable/draft.json")
-            let service = try FeedbackService(draftURL: url, reviewer: { _ in throw URLError(.timedOut) }, http: probe.http)
+            let service = try FeedbackService(draftURL: url, reviewer: { _ in throw URLError(.timedOut) }, http: probe.http, repository: { "fixture-owner/feedback" })
             try service.update(title: "normal", body: "normal bug", account: identity.username)
             await fails(.reviewUnavailable) { try await service.review(identity: identity) }
             await fails(.changed) { _ = try await service.submit(identity: identity) }
@@ -182,7 +189,7 @@ test('feedback service enforces review and preserves uncertain drafts (no real m
   const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: 'utf8', timeout: 120_000,
     env: { ...process.env, TMPDIR: `${dir}/` }, maxBuffer: 8 * 1024 * 1024 });
   const lock = path.join(root, 'scripts/tatwo-build-lock.sh');
-  const acquired = run('bash', [lock, 'acquire', '--timeout', '0', '--pid', String(process.pid)]);
+  const acquired = run('bash', [lock, 'acquire', '--timeout', '60', '--pid', String(process.pid)]);
   assert.equal(acquired.status, 0, `build lock unavailable: ${acquired.stderr}`);
   const token = acquired.stdout.match(/^token=([a-f0-9]+)$/m)?.[1]; assert.ok(token);
   try {

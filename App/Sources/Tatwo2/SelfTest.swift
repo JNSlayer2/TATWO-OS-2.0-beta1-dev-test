@@ -8,6 +8,14 @@ enum SelfTest {
     @MainActor private static var headlessHostModel: ChatPageModel?
 
     @MainActor static func runIfRequested() {
+        if ProcessInfo.processInfo.environment["TATWO2_SKILLREFRESHTEST"] == "1" {
+            Task { @MainActor in
+                do { exit(try await skillRefreshChecks() ? 0 : 1) }
+                catch { print("SKILLREFRESHTEST ERROR \(error)"); exit(1) }
+            }
+            NSApplication.shared.run()
+            return
+        }
         if ProcessInfo.processInfo.environment["TATWO2_OSUPSTREAMREFRESHTEST"] == "1" {
             exit(runOSUpstreamRefreshTest() ? 0 : 1)
         }
@@ -179,6 +187,48 @@ enum SelfTest {
             }
         }
         NSApplication.shared.run()
+    }
+
+    @MainActor private static func skillRefreshChecks() async throws -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        guard NativeStagingIsolation.isEnabled(env), NativeStagingIsolation.validationError(env) == nil,
+              env["TATWO2_SOURCETEST"] == "1", let path = env["TATWO2_LIVE_ROOT"] else { return false }
+        let root = URL(fileURLWithPath: path)
+        let skills = EnginePaths(environment: env).codexHome.appendingPathComponent("skills")
+        let manifest = skills.appendingPathComponent("w15e-refresh/SKILL.md")
+        let engine = ChatLiveEngine(store: ChatLiveStore(root: root), environment: env)
+        let model = ChatPageModel(environment: env, botCoreFixture: (engine, BotStore(root: root)))
+        var failures = 0
+        func check(_ name: String, _ ok: Bool) {
+            if !ok { failures += 1 }
+            print("SKILLREFRESHTEST \(ok ? "PASS" : "FAIL") \(name)")
+        }
+        check("missing root starts empty", !FileManager.default.fileExists(atPath: skills.path)
+              && model.availableThreadPluginEntries.isEmpty)
+        await model.reloadPluginRegistry(now: Date().addingTimeInterval(-61))?.value
+        try FileManager.default.createDirectory(at: manifest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "---\nname: w15e-refresh\ndescription: isolated refresh check\n---\n".write(to: manifest, atomically: true, encoding: .utf8)
+        check("source scan alone leaves model stale", PluginsSource.scanNow(environment: env).contains { $0.id == "w15e-refresh" }
+              && model.availableThreadPluginEntries.isEmpty)
+        model.prompt = "$"
+        var notifications = 0
+        let observer = model.objectWillChange.sink { notifications += 1 }
+        let pending = model.pluginRefreshTask
+        check("dollar schedules stale scan", pending != nil)
+        check("in-flight scans coalesce", model.reloadPluginRegistry() != nil)
+        await pending?.value
+        check("rescan publishes without another keystroke", model.prompt == "$"
+              && model.skillSuggestions.contains { $0.id == "w15e-refresh" } && notifications > 0)
+        model.prompt = "$w15e"
+        check("fresh dollar does not rescan", model.pluginRefreshTask == nil
+              && model.reloadPluginRegistry(ifOlderThan: 60) == nil)
+        try "---\nname: w15e-updated\n---\n".write(to: manifest, atomically: true, encoding: .utf8)
+        await model.reloadPluginRegistry(now: Date().addingTimeInterval(61))?.value
+        check("changed manifest refreshes", model.skillSuggestions.contains { $0.id == "w15e-updated" }
+              && !model.skillSuggestions.contains { $0.id == "w15e-refresh" })
+        observer.cancel()
+        print("SKILLREFRESHTEST RESULT failures=\(failures)")
+        return failures == 0
     }
 
     @MainActor private static func planCanvasChecks() throws -> Bool {
