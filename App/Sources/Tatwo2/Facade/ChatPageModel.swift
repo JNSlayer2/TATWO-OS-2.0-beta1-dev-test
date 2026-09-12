@@ -1338,7 +1338,7 @@ final class ChatPageModel: ObservableObject {
     private func loadActivePlanCanvas() {
         activePlanArtifact = nil
         guard selectedRemote == nil, let id = selectedThreadID, let engine = localLive else { return }
-        do { activePlanArtifact = try engine.loadPlanArtifact(id) }
+        do { activePlanArtifact = try engine.loadPlanArtifact(id, recoverInterrupted: !preparingPR && !pendingPR.contains(id)) }
         catch { flashComposerHint("計畫讀取失敗；原檔保留，請先修復資料") }
     }
     @discardableResult
@@ -1369,6 +1369,15 @@ final class ChatPageModel: ObservableObject {
             }
             localLive?.appendSystemMessage(threadID: plan.threadID, text: "計畫已確認；說「開始」即執行", status: "info|Plan")
         }
+    }
+    func returnActivePRToDiscussion() {
+        guard selectedRemote == nil, var plan = activePlanArtifact, plan.kind == "pr",
+              plan.prImplementationInterrupted == true, plan.state == .discussing,
+              localLive?.isRunning(plan.threadID) == false, !preparingPR,
+              !pendingPR.contains(plan.threadID) else { return }
+        plan.prImplementationInterrupted = nil
+        plan.prMessage = nil
+        _ = persistPlanCanvas(plan)
     }
     func editablePlanTextForCanvas() -> String? { activePlanArtifact?.editableText() }
     func finishFeedbackPlan(_ id: UUID) {
@@ -2593,7 +2602,8 @@ final class ChatPageModel: ObservableObject {
                     moved.executionTurnID = sourcePlan.executionTurnID
                     try engine.savePlanArtifact(moved)
                     var original = sourcePlan
-                    original.prMessage = "畫布已移到貢獻專案的新討論串，請到該串繼續。"
+                    original.prContinuationThreadID = id
+                    original.prMessage = TatwoPlanArtifactV1.prMovedMessage
                     try engine.savePlanArtifact(original)
                 }
                 planInspectorRequest = UUID()
@@ -2752,7 +2762,7 @@ final class ChatPageModel: ObservableObject {
                 PluginsSource.refreshNow(environment: environment)
             }.value
             self?.pluginEntries = fresh
-            self?.lastPluginScanAt = now
+            self?.lastPluginScanAt = Date()
             self?.pluginRefreshTask = nil
         }
         return pluginRefreshTask

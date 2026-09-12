@@ -39,11 +39,9 @@ enum PluginsSource {
     static func refreshNow(environment: [String: String] = ProcessInfo.processInfo.environment) -> [PluginRegistryEntry] {
         guard NativeStagingIsolation.validationError(environment) == nil else { return [] }
         let statuses = probeClaudeStatuses(environment: environment)
-        if NativeStagingIsolation.isEnabled(environment) || !(statuses ?? [:]).isEmpty {
-            statusLock.lock()
-            liveStatuses = statuses ?? [:]
-            statusLock.unlock()
-        }
+        statusLock.lock()
+        liveStatuses = statuses ?? [:]
+        statusLock.unlock()
         return scanNow(environment: environment)
     }
 

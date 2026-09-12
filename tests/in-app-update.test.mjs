@@ -33,7 +33,7 @@ test('updater reuses install.sh from the same public repository for signing and 
   assert.match(updater, /"submit", "-l", label/);
   assert.match(updater, /NSApp\.terminate\(nil\)/);
   assert.match(updater, /TATWO_OS_VERSION="\$TAG" bash "\$SCRIPT"/);
-  assert.doesNotMatch(updater, /codesign|shasum|unzip|spctl/);
+  assert.doesNotMatch(updater.slice(updater.indexOf("// UPDATE-HELPER-BEGIN")), /codesign|shasum|unzip|spctl/);
   assert.match(updater, /\^v\?\[0-9\]\+\[\.\]\[0-9\]\+/);
 });
 
@@ -600,6 +600,11 @@ test('W26 terminal helper receipt is idempotent; two run IDs never overwrite eac
 
 test('W26 actual Swift run liveness removes stale labels and acknowledges newest result by UUID', () => {
   const dir=mkdtempSync(join(tmpdir(),'w26-runs-'));
+  // Real strict-valid synthetic restore baseline (ad-hoc is allowed for recovery).
+  const old=join(dir,'Applications/TATWO OS.app.old'); mkdirSync(join(old,'Contents/MacOS'),{recursive:true});
+  writeFileSync(join(old,'Contents/Info.plist'), '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>ai.tatwo.tatwo2</string><key>CFBundleExecutable</key><string>fixture</string></dict></plist>');
+  assert.equal(spawnSync('cp',['/usr/bin/true',join(old,'Contents/MacOS/fixture')]).status,0);
+  assert.equal(spawnSync('codesign',['--force','--sign','-',old]).status,0);
   const reconcile=updater.slice(updater.indexOf('    static func reconcileOnLaunch('),updater.indexOf('    private func records('));
   const records=updater.slice(updater.indexOf('    private func records('),updater.indexOf('    static func installScriptURL'));
   const active=updater.slice(updater.indexOf('    private func helperIsActive('),updater.indexOf('    private func prefetch(')).replace('private func','func');
@@ -642,6 +647,8 @@ import Darwin
    .write(to:stage.appendingPathComponent("transaction.json"))
  Probe.reconcileOnLaunch(destination:dest.path)
  precondition(fm.fileExists(atPath:dest.path))
+ precondition(!fm.fileExists(atPath:parent.appendingPathComponent(".tatwo-update.lock").path))
+ precondition(!(try! fm.contentsOfDirectory(atPath:parent.path)).contains(where: { $0.hasPrefix(".tatwo-lock-retained.") }))
  precondition(fm.fileExists(atPath:stage.appendingPathComponent("result.json").path))
  let before=try fm.contentsOfDirectory(atPath:parent.path).sorted()
  Probe.reconcileOnLaunch(destination:dest.path)

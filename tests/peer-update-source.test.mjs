@@ -22,7 +22,7 @@ test('GitHub release and all fresh checksums precede peer lookup; misses alone d
   // The first digest(zip) belongs to the independently revalidated local cache.
   positions[8] = updater.indexOf('Self.digest(zip) == expected.lowercased()', positions[7]);
   assert.ok(positions.every((n, i) => n >= 0 && (!i || n > positions[i - 1])), positions);
-  assert.match(updater, /session\.data\(for: try assetRequest\(checksum\)\)/);
+  assert.match(updater, /session\.data\(for: try assetRequest\(checksum\), delegate: UpdateRedirectDelegate.shared\)/);
   assert.match(updater, /try\? await PeerUpdateSource\.pull[\s\S]*try\? await Self\.digest/);
   assert.match(updater, /try Task\.checkCancellation\(\)\s+downloadSource = deltaProgress \+ "從 GitHub 下載…"/);
   assert.match(updater, /invalid-\\\(UUID\(\)\.uuidString\)/);
@@ -69,7 +69,7 @@ ${fixtureTypes}
     let offer = PeerUpdateSource.Offer(device: device, host: "sample.local", entries: [:])
     if mode == "capture" || mode == "invalid" {
       for command in [PeerUpdateSource.ssh(device, host: "sample.local"),
-        PeerUpdateSource.rsync(offer, path: "/Users/sample/Library/Application Support/TATWO OS/Updater/download/v2.0.4/TATWO-OS-app.zip",
+        PeerUpdateSource.rsync(offer, path: "/Users/sample/Library/Application Support/TATWO OS/Updater/download/sample/project/v2.0.4/TATWO-OS-app.zip",
           destination: root.appendingPathComponent("app.zip")),
         PeerUpdateSource.rsync(offer, path: "/Applications/TATWO OS.app/Contents/./Resources/runtime",
           destination: root.appendingPathComponent("runtime"), relative: true),
@@ -88,7 +88,7 @@ ${fixtureTypes}
     var bad = device; bad.user = "-oProxyCommand=bad"; precondition(PeerUpdateSource.hosts(bad).isEmpty)
     bad = device; bad.host = "bad;host"; bad.lanHost = nil; precondition(PeerUpdateSource.hosts(bad).isEmpty)
     for tag in ["../escape", "v1.2.3\\n", "v1.2.3/other"] { precondition(!PeerUpdateSource.validTag(tag)) }
-    let path = "/Users/sample/Library/Application Support/TATWO OS/Updater/download/v2.0.4/TATWO-OS-app.zip"
+    let path = "/Users/sample/Library/Application Support/TATWO OS/Updater/download/sample/project/v2.0.4/TATWO-OS-app.zip"
     precondition(PeerUpdateSource.cachePath(path, tag: "v2.0.4", name: "TATWO-OS-app.zip"))
     for wrong in [path.replacingOccurrences(of: "/sample/", with: "/../"), path + "\\n", "/etc/passwd"] {
       precondition(!PeerUpdateSource.cachePath(wrong, tag: "v2.0.4", name: "TATWO-OS-app.zip"))
@@ -179,6 +179,7 @@ test('production prefetch decision executes SHA gates and per-archive fallback w
     const harness = `
 import Foundation
 import CryptoKit
+${read('App/Sources/Tatwo2/Facade/GitHubReleaseUpdateChecker.swift').split('// UPDATE-TRANSPORT-BEGIN\n')[1].split('// UPDATE-TRANSPORT-END')[0]}
 ${entry}
 struct UpdateChannel {
   static let privateRepository = "tatwo214/TATWO-OS-2.0-private"
@@ -255,7 +256,7 @@ enum PeerUpdateSource {
   }
   static func pull(_ offer: Offer, tag: String, name: String, folder: URL) async throws -> URL? {
     IO.events.append("peer:" + name)
-    if IO.mode == "offline" || IO.mode == "private" { throw URLError(.timedOut) }
+    if IO.mode == "offline" || IO.mode == "private" || IO.mode == "badgithub" { throw URLError(.timedOut) }
     if IO.mode == "partial" && name == IO.runtime { return nil }
     let candidate = folder.appendingPathComponent(UUID().uuidString)
     try (IO.mode == "badsha" ? Data("bad".utf8) : IO.bytes(name)).write(to: candidate)
@@ -280,7 +281,7 @@ ${policy}
       name = IO.assetNames[Int(url.lastPathComponent)! - 1]
     } else { name = url.lastPathComponent }
     IO.events.append("github:" + name)
-    try IO.bytes(name).write(to: destination)
+    try (IO.mode == "badgithub" ? Data("corrupt".utf8) : IO.bytes(name)).write(to: destination)
     return destination
   }
 }
@@ -315,7 +316,7 @@ ${digest}
     let session = URLSession(configuration: config), probe = Probe(root)
     do {
       let result = try await probe.prefetch(tag: "v9.9.9", repository: IO.mode == "private" ? UpdateChannel.privateRepository : "demo/repo", session: session, id: probe.downloadID)
-      precondition(!["malformedsha", "cancel"].contains(IO.mode))
+      precondition(!["malformedsha", "cancel", "legacy", "badgithub"].contains(IO.mode))
       let paths = [result.zip, result.appZip, result.runtimeZip, result.deltaZip, result.manifest].compactMap { $0 }
       precondition(paths.count == (IO.mode == "legacy" ? 1 : 2))
       if IO.mode == "delta" { precondition(result.deltaZip != nil && result.manifest != nil && probe.downloadSource.hasPrefix("差異更新：")) }
@@ -325,8 +326,8 @@ ${digest}
         precondition(result.privateInstaller != nil && result.username == nil)
         precondition(!(try! String(contentsOf:result.privateInstaller!, encoding:.utf8)).contains("fixture-only"))
       }
-    } catch { precondition(["malformedsha", "cancel"].contains(IO.mode), "unexpected error: \\(error)") }
-    if IO.mode == "malformedsha" { precondition(!IO.events.contains("discover")) }
+    } catch { precondition(["malformedsha", "cancel", "legacy", "badgithub"].contains(IO.mode), "unexpected error: \\(error)") }
+    if ["malformedsha", "legacy"].contains(IO.mode) { precondition(!IO.events.contains("discover")) }
     else {
       let index = IO.events.firstIndex(of: "discover")!
       precondition(IO.events[..<index].filter { $0.hasSuffix(".sha256") }.count == (IO.mode == "legacy" ? 3 : 4))
@@ -334,10 +335,12 @@ ${digest}
     let downloads = IO.events.filter { $0.hasPrefix("github:") }
     switch IO.mode {
     case "badsha", "offline", "private": precondition(downloads.count == 2)
+    case "badgithub": precondition(downloads.count == 1)
     case "partial": precondition(downloads == ["github:" + IO.runtime])
     default: precondition(downloads.isEmpty)
     }
     if IO.mode == "cache" { precondition(!IO.events.contains(where: { $0.hasPrefix("peer:") })) }
+    precondition(!(try! FileManager.default.contentsOfDirectory(atPath: folder.path)).contains(where: { $0.hasPrefix("invalid-") }))
     print(IO.events.joined(separator: " -> "))
   }
 }
@@ -347,7 +350,7 @@ ${digest}
     const compiled = spawnSync('swiftc', ['-swift-version', '5', '-parse-as-library', join(root, 'Main.swift'), '-o', binary],
       { encoding: 'utf8', timeout: 90_000 });
     assert.equal(compiled.status, 0, compiled.stderr);
-    for (const mode of ['peer', 'badsha', 'offline', 'partial', 'cache', 'corruptcache', 'legacy', 'malformedsha', 'cancel', 'delta', 'private']) {
+    for (const mode of ['peer', 'badsha', 'badgithub', 'offline', 'partial', 'cache', 'corruptcache', 'legacy', 'malformedsha', 'cancel', 'delta', 'private']) {
       const result = spawnSync(binary, [join(root, mode), mode], { encoding: 'utf8', timeout: 10_000 });
       assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
     }

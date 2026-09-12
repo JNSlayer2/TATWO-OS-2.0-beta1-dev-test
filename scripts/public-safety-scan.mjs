@@ -33,15 +33,20 @@ function loadAllowances() {
   const labels = new Set(['email address', 'provider token', 'private key']);
   fs.readFileSync(policy, 'utf8').split(/\r?\n/).forEach((line, index) => {
     if (!line.trim() || line.trimStart().startsWith('#')) return;
-    const fields = line.split('|').map(field => field.trim());
-    const [file, label, reason] = fields;
-    if (fields.length !== 3 || !file || !labels.has(label) || !reason
+    const fields = line.split('|');
+    const [file, label, reason] = fields.slice(0, 3).map(field => field.trim());
+    // Preserve whitespace inside regex alternatives (notably exact key-header lines).
+    const harmless = fields.slice(3).join('|').trim();
+    if (fields.length < 4 || !harmless.startsWith("^") || !harmless.endsWith("$") || !file || !labels.has(label) || !reason
       || path.isAbsolute(file) || file.includes('\\') || /[*?[\]\x00-\x1f]/.test(file)
       || file.split('/').some(part => !part || part === '.' || part === '..')
       || allowances.has(`${file}|${label}`)) {
       throw new Error(`invalid allowlist entry at line ${index + 1}`);
     }
-    allowances.set(`${file}|${label}`, reason);
+    let pattern;
+    try { pattern = new RegExp(`^(?:${harmless})$`); }
+    catch { throw new Error(`invalid allowlist entry at line ${index + 1}`); }
+    allowances.set(`${file}|${label}`, { reason, pattern });
   });
 }
 
@@ -52,7 +57,10 @@ function walk(dir) {
     const rel = path.relative(root, file);
     const stat = fs.lstatSync(file);
     const fail = (line, label) => findings.push(`FAIL: ${rel}:${line}: ${label}`);
-    for (const [label, pattern] of forbidden) if (pattern.test(rel)) fail(0, label);
+    for (const [label, pattern] of forbidden) {
+      pattern.lastIndex = 0;
+      if (pattern.test(rel)) fail(0, label);
+    }
     if (/(^|\/)(?:\.env(?:\..*)?|receipts|sessions|attachments|browser-profile|DerivedData|\.claude|\.codex)(?:\/|$)/i.test(rel)) fail(0, 'sensitive path rejected');
     if ((stat.mode & 0o002) !== 0) fail(0, 'world-writable file rejected');
     if (stat.isSymbolicLink()) { fail(0, 'symlink rejected'); continue; }
@@ -77,9 +85,13 @@ async function inspect({ file, rel }) {
     }
     source.split(/\r?\n/).forEach((line, index) => {
       for (const [label, pattern] of forbidden) {
+        pattern.lastIndex = 0;
         if (!pattern.test(line)) continue;
-        const reason = allowances.get(`${rel}|${label}`);
-        if (reason) allowed.push(`ALLOW: ${rel}:${index + 1}: ${label} (${reason})`);
+        const allowance = allowances.get(`${rel}|${label}`);
+        // Every occurrence must be harmless; a fixture on the same line cannot hide another value.
+        const values = label === 'private key' ? [line]
+          : [...line.matchAll(new RegExp(pattern.source, [...new Set(pattern.flags + 'g')].join('')))].map(match => match[0]);
+        if (allowance && values.length > 0 && values.every(value => allowance.pattern.test(value))) allowed.push(`ALLOW: ${rel}:${index + 1}: ${label} (${allowance.reason})`);
         else fail(index + 1, label);
       }
     });

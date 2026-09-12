@@ -6,7 +6,7 @@ description: Use when the user invokes TATWO Ultrawork, asks how to split work b
 # TATWO Ultrawork（2.0，2026-09-12 重寫）
 
 一份技能，一套工作邏輯。舊版的 contract、receipt、S/M/L/XL 分級、Loop Governor 全部退役，
-原文封存在 `references/legacy-20260912/`，只供考古，不是現行規矩。
+不再作為現行規矩；本檔是現行分工說明。
 上游規矩仍是 TATWO OS 的 `os.md` 與 `os-upstream.md`；本技能只講「怎麼分工、怎麼驗收」。
 
 ## 1. 一句話
@@ -88,4 +88,4 @@ tmux new-session -d -s sol-<room> \
 ## 9. 本技能的維護
 
 - 主檔保持 150 行以內；規矩改了直接改這裡，不另開技能。
-- `references/legacy-20260912/` 是舊版封存，不再引用；要刪除時走第 7 節的封存流程。
+- 舊版資料不屬於本技能依賴；要刪除時走第 7 節的封存流程。

@@ -78,8 +78,9 @@ test('public default endpoint and draft/prerelease filter unchanged; private lab
   assert.match(checker, /私人通道需要 GitHub 登入/);
   assert.match(checker, /tatwo2\/os\/update-channel/);
   assert.match(checker, /if isPrivateChannel != channel.isPrivate \{ availableRelease = nil \}/);
-  assert.match(checker, /contents\/scripts\/install-private.sh\?ref=beta1\/integration/);
-  assert.match(checker, /: Self.installCommand/);
+  assert.match(checker, /contents\/scripts\/install-private.sh\?ref=\\\(tag\)/);
+  assert.match(checker, /TATWO_OS_VERSION=/);
+  assert.doesNotMatch(checker, /ref=beta1\/integration/);
   const card = read('App/Sources/Tatwo2/New/UpdateAvailableCard.swift');
   assert.equal((card.match(/checker.isPrivateChannel \? "私人通道 · "/g) || []).length,2);
   assert.match(read('scripts/public-export.sh'), /\['scripts\/install-private.sh', 'scripts\/promote-release.sh', 'scripts\/withdraw-release.sh'\].includes\(file\)/);

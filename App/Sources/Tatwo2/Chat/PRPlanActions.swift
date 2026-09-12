@@ -6,6 +6,7 @@ struct PRPlanActions: View {
     let isDisabled: Bool
     let onConfirm: () -> Void
     let onSubmit: () -> Void
+    let onReturnToDiscussion: () -> Void
     @StateObject private var accounts = GitHubAccountsStore()
     @State private var loggedIn = false
     @State private var loggingIn = false
@@ -53,10 +54,15 @@ struct PRPlanActions: View {
                     .disabled(isDisabled || !loggedIn || artifact.prReview?.attempted != false)
                     .accessibilityIdentifier("pr-plan-submit")
             } else {
-                Button(artifact.state == .confirmed ? "計畫已確認" : "確認計畫", action: onConfirm)
+                Button(artifact.prImplementationInterrupted == true ? "重試實作" : (artifact.state == .confirmed ? "計畫已確認" : "確認計畫"), action: onConfirm)
                     .buttonStyle(.borderedProminent)
                     .disabled(isDisabled || !loggedIn || artifact.state != .discussing || artifact.sections.isEmpty)
                     .accessibilityIdentifier("pr-plan-confirm")
+                if artifact.prImplementationInterrupted == true {
+                    Button("回到討論", action: onReturnToDiscussion)
+                        .disabled(isDisabled)
+                        .accessibilityIdentifier("pr-plan-discuss")
+                }
             }
         }
         .onAppear { loggedIn = (try? PullRequestCoordinator.shared.identity()) != nil }

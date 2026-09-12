@@ -15,6 +15,13 @@ COMMITTED=0
 cleanup() {
   local status=$?
   trap - EXIT
+  # A completed rename is installation, even if the following journal write was interrupted.
+  if [[ "$COMMITTED" == 0 && "$REPLACED" == 1 && ! -e "$DEST.new" && -d "$DEST" ]]; then
+    if valid_restore_app "$DEST" && [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist")" == "${TAG#v}" ]]; then
+      COMMITTED=1
+      write_transaction committed || true
+    fi
+  fi
   if [[ "$COMMITTED" == 0 ]]; then
     # Infer rename completion as well, covering a signal immediately after mv.
     if [[ -n "$STAGE" && ! -e "$DEST.new" && -e "$DEST" && "$REPLACED" == 1 ]]; then
@@ -29,7 +36,11 @@ cleanup() {
       fi
     fi
   fi
-  if [[ -n "$LOCK" ]]; then mv "$LOCK" "$STAGE/lock.finished" || true; fi
+  if [[ -n "$LOCK" && -n "$STAGE" ]]; then mv "$LOCK" "$STAGE/lock.finished" || true; fi
+  if [[ "$REPLACED" == 0 && -n "$STAGE" && -d "$STAGE" && ! -f "$STAGE/transaction.json" ]]; then
+    local archives="$HOME/Library/Application Support/TATWO OS/UpdateArchives"
+    mkdir -p "$archives" && mv "$STAGE" "$archives/failed-$(basename "$STAGE")" || true
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -41,28 +52,66 @@ trap 'fail "指令失敗（第 $LINENO 行）；暫存與備份保留，不會�
 write_transaction() {
   local phase="$1" file="$STAGE/transaction.json"
   plutil -create xml1 "$file.tmp"
-  for pair in phase runID source expectedSHA backup previousVersion nextVersion owner; do
+  for pair in phase runID source expectedSHA backup previousVersion nextVersion owner ownerStart; do
     case "$pair" in
       phase) value="$phase";; runID) value="$(basename "$STAGE")";; source) value="$REPO:${TAG:-}";;
       expectedSHA) value="${EXPECTED_RELEASE_SHA:-}";; backup) value="$DEST.old";;
-      previousVersion) value="${OLD_VERSION:-}";; nextVersion) value="${TAG#v}";; owner) value="$$";;
+      previousVersion) value="${OLD_VERSION:-}";; nextVersion) value="${TAG#v}";; owner) value="$$";; ownerStart) value="$(process_start "$$")";;
     esac
     plutil -insert "$pair" -string "$value" "$file.tmp"
   done
   plutil -convert json "$file.tmp"; mv "$file.tmp" "$file"; sync
 }
+process_start() { LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+owner_active() {
+  local pid="$1" started="${2:-}" actual
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]] || return 1
+  actual="$(process_start "$pid")"
+  if [[ -n "$actual" ]]; then
+    # Legacy PID-only records remain conservative; all new owners include start time.
+    [[ -z "$started" || "$actual" == "$started" ]]; return
+  fi
+  kill -0 "$pid" 2>/dev/null
+}
+write_owner() { printf '%s\n%s\n' "$$" "$(process_start "$$")" > "$1/owner"; }
+owner_file_active() {
+  local pid started
+  [[ -f "$1/owner" ]] || return 1
+  { IFS= read -r pid; IFS= read -r started || true; } < "$1/owner"
+  owner_active "$pid" "${started:-}"
+}
+valid_restore_app() {
+  [[ -d "$1" && ! -L "$1" ]] &&
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null)" == ai.tatwo.tatwo2 ]] &&
+    codesign --verify --strict "$1" >/dev/null 2>&1
+}
 reconcile_transactions() {
-  local stage phase owner backup
+  local stage phase owner started backup next
   for stage in "$(dirname "$DEST")"/.tatwo-update.*.noindex; do
     [[ -f "$stage/transaction.json" && ! -L "$stage" ]] || continue
-    owner="$(plutil -extract owner raw -o - "$stage/transaction.json")" || return 1
-    [[ "$owner" =~ ^[0-9]+$ ]] || return 1
-    kill -0 "$owner" 2>/dev/null && continue
-    phase="$(plutil -extract phase raw -o - "$stage/transaction.json")" || return 1
+    if ! owner="$(plutil -extract owner raw -o - "$stage/transaction.json")" ||
+       ! phase="$(plutil -extract phase raw -o - "$stage/transaction.json")" ||
+       ! backup="$(plutil -extract backup raw -o - "$stage/transaction.json")" ||
+       [[ ! "$owner" =~ ^[0-9]+$ || "$owner" == 0 || "$backup" != "$DEST.old" ]]; then
+      printf '{"ok":false,"message":"invalid_transaction"}\n' > "$stage/result.json"
+      continue
+    fi
+    started="$(plutil -extract ownerStart raw -o - "$stage/transaction.json" 2>/dev/null || true)"
+    owner_active "$owner" "$started" && continue
     case "$phase" in committed|recovered|rolled_back) continue;; esac
-    backup="$(plutil -extract backup raw -o - "$stage/transaction.json")" || return 1
-    [[ "$backup" == "$DEST.old" && ! -L "$backup" && ! -L "$DEST" ]] || return 1
+    [[ ! -L "$backup" && ! -L "$DEST" ]] || { printf '{"ok":false,"message":"restore_refused"}\n' > "$stage/result.json"; continue; }
+    next="$(plutil -extract nextVersion raw -o - "$stage/transaction.json" 2>/dev/null || true)"
+    # A crash after the second rename must not roll back an installed, verified candidate.
+    if [[ "$phase" == replacing || "$phase" == replaced ]] && [[ ! -e "$DEST.new" && ! -L "$DEST.new" && -n "$next" ]] &&
+       valid_restore_app "$DEST" && [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist")" == "$next" ]]; then
+      plutil -replace phase -string committed "$stage/transaction.json"
+      printf '{"ok":true,"message":"interrupted_commit_completed"}\n' > "$stage/result.json"
+      sync; continue
+    fi
     if [[ -d "$backup" ]]; then
+      if ! valid_restore_app "$backup"; then
+        printf '{"ok":false,"message":"restore_refused"}\n' > "$stage/result.json"; continue
+      fi
       [[ ! -e "$DEST" ]] || mv "$DEST" "$stage/interrupted.app.disabled" || return 1
       mv "$backup" "$DEST" || return 1
       plutil -replace phase -string recovered "$stage/transaction.json"
@@ -75,27 +124,49 @@ reconcile_transactions() {
     if [[ -e "$DEST.new" && ! -L "$DEST.new" ]]; then mv "$DEST.new" "$stage/interrupted-new.app.disabled" || return 1; fi
   done
 }
+claim_directory() {
+  local path="$1" temporary="$1.tmp.$$"
+  mkdir "$temporary" 2>/dev/null || return 1
+  write_owner "$temporary"
+  # mv publishes owner with the directory. A competing directory may absorb our
+  # temporary directory; verify ownership before doing anything under the lock.
+  mv "$temporary" "$path" 2>/dev/null || return 1
+  [[ "$(cat "$path/owner" 2>/dev/null)" == "$(printf '%s\n%s' "$$" "$(process_start "$$")")" ]]
+}
 acquire_update_lock() {
-  local path="$(dirname "$DEST")/.tatwo-update.lock" owner
-  if ! mkdir "$path" 2>/dev/null; then
-    owner="$(cat "$path/owner" 2>/dev/null)" || fail "更新鎖缺少 owner，請人工檢查"
-    [[ "$owner" =~ ^[0-9]+$ ]] || fail "更新鎖無效"
-    kill -0 "$owner" 2>/dev/null && fail "另一個更新正在執行"
-    # Serialize stale-lock takeover; never move a newly acquired owner's lock.
-    mkdir "$path/reconcile" 2>/dev/null || fail "更新鎖復原正在進行"
-    [[ "$(cat "$path/owner")" == "$owner" ]] || fail "更新鎖已變更"
+  local path="$(dirname "$DEST")/.tatwo-update.lock" owner modified now guard
+  local admission="$(dirname "$DEST")/.tatwo-update.admission"
+  # Serialize stale-guard reclamation too. Kernel ownership disappears on SIGKILL;
+  # the stable admission inode is never deleted or interpreted as a live lock.
+  [[ ! -L "$admission" ]] || fail "更新鎖路徑無效"
+  exec 9>>"$admission"
+  /usr/bin/lockf -s -t 0 9 || fail "更新鎖復原正在進行"
+  if [[ -d "$path" ]]; then
+    [[ ! -L "$path" ]] || fail "更新鎖無效"
+    owner_file_active "$path" && fail "另一個更新正在執行"
+    owner="$(cat "$path/owner" 2>/dev/null || true)"
+    modified="$(stat -f %m "$path")"; now="$(date +%s)"
+    [[ -n "$owner" || $((now - modified)) -gt 600 ]] || fail "更新鎖缺少 owner，等待孤兒判定"
+    guard="$path/reconcile"
+    if [[ -d "$guard" ]]; then
+      modified="$(stat -f %m "$guard")"
+      [[ $((now - modified)) -gt 600 ]] && ! owner_file_active "$guard" || fail "更新鎖復原正在進行"
+      mv "$guard" "$path/reconcile-orphan.$(uuidgen)" || fail "無法保留孤兒復原鎖"
+    fi
+    claim_directory "$guard" || fail "更新鎖復原正在進行"
+    [[ "$(cat "$path/owner" 2>/dev/null || true)" == "$owner" ]] || fail "更新鎖已變更"
     mv "$path" "$(dirname "$DEST")/.tatwo-lock-retained.$(uuidgen)"
-    mkdir "$path" 2>/dev/null || fail "另一個更新已接手"
   fi
-  printf '%s\n' "$$" > "$path/owner"
+  claim_directory "$path" || fail "另一個更新已接手"
   LOCK="$path"
+  exec 9>&-
 }
 # TRANSACTION-END
 # TEMP-RETENTION-BEGIN
 archive_old_downloads() {
   local dir manifest="${TMPDIR:-/tmp}/tatwo-install-trash-$(uuidgen).md"
   while IFS= read -r -d '' dir; do
-    [[ ! -L "$dir" && -O "$dir" ]] || continue
+    [[ ! -L "$dir" && -O "$dir" && ! -f "$dir/transaction.json" ]] || continue
     if [[ -f "$dir/owner" ]]; then
       local owner; owner="$(cat "$dir/owner")"
       [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null && continue
@@ -103,7 +174,8 @@ archive_old_downloads() {
     command -v trash >/dev/null || { printf '缺少 trash，保留舊暫存：%s\n' "$dir" >&2; continue; }
     printf -- '- Source: `%s`; older than 24h, no live recorded owner. Restore from macOS Trash to original path. No permanent deletion authorized.\n' "$dir" >> "$manifest"
     trash "$dir" || printf '- Trash failed; source retained: `%s`.\n' "$dir" >> "$manifest"
-  done < <(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'tatwo-install.*' -mmin +1440 -print0)
+  done < <(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'tatwo-install.*' -mmin +1440 -print0
+    if [[ -n "${DEST:-}" ]]; then find "$(dirname "$DEST")" -maxdepth 1 -type d -name '.tatwo-update.*.noindex' -mmin +1440 -print0; fi)
 }
 # TEMP-RETENTION-END
 # INVISIBLE-PRIMITIVES-BEGIN
@@ -133,6 +205,7 @@ JXA
 }
 # INVISIBLE-PRIMITIVES-END
 # OFFLINE-RELEASE-BEGIN
+# App handoff revalidates the release and marker online before quitting.
 # Offline metadata is still checked against SHA, marker, version and signatures below.
 # A missing cache entry fails closed rather than downloading after the App quits.
 if [[ -n "${TATWO_OS_OFFLINE_RELEASE:-}" ]]; then
@@ -164,7 +237,7 @@ reconcile_transactions || fail "中斷更新復原失敗；保留交易與備份
 archive_old_downloads
 ENDPOINT="https://api.github.com/repos/$REPO/releases/latest"
 if [[ -n "${TATWO_OS_VERSION:-}" ]]; then
-  [[ "$TATWO_OS_VERSION" =~ ^v?[0-9]+[.][0-9]+([.][0-9]+){0,2}([-+][A-Za-z0-9.-]+)?$ ]] || fail "版本格式不正確"
+  [[ "$TATWO_OS_VERSION" =~ ^v?[0-9]+([.][0-9]+){1,3}$ ]] || fail "版本格式不正確"
   ENDPOINT="https://api.github.com/repos/$REPO/releases/tags/$TATWO_OS_VERSION"
   RETRY="curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | TATWO_OS_VERSION='$TATWO_OS_VERSION' bash"
 fi
@@ -200,7 +273,7 @@ done
 curl --proto '=https' --proto-redir '=https' -fsSL --max-time 60 -o "$TEMP/install-ready" "$READY_URL"
 # 2026-09-13 之前的公開版（v2.0.1–v2.0.5）marker 只有名字沒有 SHA；接受並改以 .sha256 綁定，不得讓既有公測者升不上來。
 LEGACY_READY=0
-grep -qE '^[[:xdigit:]]{64}  ' "$TEMP/install-ready" || { LEGACY_READY=1; printf 'install-ready 為舊格式（無 SHA），改以 .sha256 綁定候選版本。\n' >&2; }
+grep -qE '^[[:xdigit:]]{64}  ' "$TEMP/install-ready" || { [[ "$RELEASE_HAS_MANIFEST" == 0 ]] || fail "含 manifest 的版本必須有 hash-bound marker"; LEGACY_READY=1; printf 'install-ready 為舊格式（無 SHA），改以 .sha256 綁定候選版本。\n' >&2; }
 curl --proto '=https' --proto-redir '=https' -fsSL --retry 2 -o "$TEMP/TATWO-OS.zip.sha256" "$SHA_URL"
 # DOWNLOAD-RETRY-BEGIN
 retry_download() {
@@ -214,7 +287,7 @@ retry_download() {
 }
 ready_matches() {
   local name="$1" expected="$2" hash entry count=0
-  [[ "${LEGACY_READY:-0}" != 1 ]] || return 0
+  [[ "${LEGACY_READY:-0}" != 1 || "${RELEASE_HAS_MANIFEST:-0}" != 0 || "$name" != TATWO-OS.zip ]] || return 0
   while read -r hash entry || [[ -n "$hash$entry" ]]; do
     if [[ "$entry" == "$name" ]]; then
       [[ "$hash" == "$expected" ]] || return 1
@@ -388,8 +461,10 @@ JXA
   bash "$4.assemble.sh"
 )
 # DELTA-TREE-END
+soft_fail() { exit 1; }
 assemble_delta() (
   trap - EXIT ERR
+  fail() { soft_fail "$@"; }
   local manifest="$STAGE/manifest.json" from tag installed
   layer_download TATWO-OS.manifest.json "$TATWO_OS_PREFETCHED_MANIFEST" "$manifest" || exit 1
   from="$(plutil -extract fromTag raw -o - "$manifest")" || exit 1
@@ -405,6 +480,7 @@ assemble_delta() (
 )
 assemble_runtime() (
   trap - EXIT ERR
+  fail() { soft_fail "$@"; }
   local meta="$SOURCE/Contents/Resources/runtime-layer.json" sha old_sha path parent n=0 reuse=1
   local paths=()
   layer_download TATWO-OS-app.zip "${TATWO_OS_PREFETCHED_APP_ZIP:-}" "$TEMP/app.zip" || exit 1
@@ -432,6 +508,12 @@ assemble_runtime() (
   fi
   for path in "${paths[@]}"; do
     if [[ "$reuse" == 1 ]]; then
+      parent="$DEST/Contents/$path"
+      while [[ "$parent" != "$DEST" ]]; do
+        [[ ! -L "$parent" ]] || exit 1
+        parent="$(dirname "$parent")"
+      done
+      [[ ! -L "$DEST" ]] || exit 1
       parent="$DEST/Contents"
       clone_copy "$parent/$path" "$SOURCE/Contents/$path" || exit 1
     else
@@ -505,16 +587,16 @@ write_transaction replacing
 REPLACED=1
 if [[ -e "$DEST" ]]; then mv "$DEST" "$DEST.old"; fi
 mv "$DEST.new" "$DEST"
-write_transaction replaced
+write_transaction committed
+COMMITTED=1
 # Candidate was verified before same-volume renames; no bundle bytes changed.
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-"$LSREGISTER" -f "$DEST"
-open "$DEST"
+LAUNCH_MESSAGE=installed
+"$LSREGISTER" -f "$DEST" || { LAUNCH_MESSAGE=registration_failed; true; }
+open "$DEST" || { LAUNCH_MESSAGE=open_failed; true; }
 INSTALL_SECONDS=$(($(date +%s) - INSTALL_STARTED_AT))
-printf '{"ok":true,"installSeconds":%s}\n' "$INSTALL_SECONDS" > "$STAGE/result.json"
+printf '{"ok":true,"message":"%s","installSeconds":%s}\n' "$LAUNCH_MESSAGE" "$INSTALL_SECONDS" > "$STAGE/result.json"
 [[ -z "${TATWO_OS_TIMING_FILE:-}" ]] || printf '%s' "$INSTALL_SECONDS" > "$TATWO_OS_TIMING_FILE"
-COMMITTED=1
-write_transaction committed
 [[ ! -e "$DEST.old" ]] || mv "$DEST.old" "$STAGE/previous.app.disabled"
 mv "$LOCK" "$STAGE/lock.finished"; LOCK=""
 # Keep rollback material outside Applications and outside normal app discovery.

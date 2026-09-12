@@ -3,6 +3,23 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+# Read-only source completeness gate; no downloads, compiler, output or signing.
+if [[ "${1:-}" == "--check-inputs" ]]; then
+  inputs=(Package.swift scripts/tatwo-cef-bundle.sh scripts/stage-ipad-use-device.sh
+    scripts/bundle-engines.sh scripts/bundle-cli-runtime.sh scripts/runtime-sign.py
+    scripts/runtime-layer.sh scripts/runtime-layer.py scripts/runtime-layer.txt
+    Apps/TatwoUltraworkMac/CEF/cef-runtime-arm64.json
+    Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/Resources/BrowserBlocklists
+    App/Sources/Tatwo2/Resources/os-upstream.md)
+  for engine in claude codex grok; do inputs+=("Engines/$engine-sidecar/sidecar.mjs"); done
+  inputs+=(Engines/claude-sidecar/package.json Engines/browser-mcp/server.mjs Engines/os-mcp/server.mjs)
+  for input in "${inputs[@]}"; do
+    [[ -e "$ROOT/$input" ]] || { echo "missing build input: $input" >&2; exit 1; }
+  done
+  bash "$ROOT/scripts/stage-ipad-use-device.sh" "$ROOT/Device/iPadUseDevice" --check-inputs
+  echo "BUILD APP INPUTS PASS"
+  exit 0
+fi
 OUT="${1:-dist}"
 if [[ "$OUT" != /* ]]; then
   OUT="$ROOT/$OUT"

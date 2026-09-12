@@ -27,7 +27,7 @@ public enum TatwoPermissionPreset: String, CaseIterable, Identifiable, Codable, 
   public static func resolvedSidecarMode(user: Self?, bot: Self?, readOnly: Bool,
                                          legacyCodexAutoApprove: Bool) -> String? {
     if readOnly { return "readOnly" }
-    if let bot { return bot.sidecarPermissionMode }
+    if let mode = bot?.sidecarPermissionMode { return mode }
     if let user { return user.sidecarPermissionMode }
     return legacyCodexAutoApprove ? "acceptEdits" : nil
   }
@@ -53,8 +53,8 @@ public enum TatwoPermissionPreset: String, CaseIterable, Identifiable, Codable, 
   public var subtitle: String {
     switch self {
     case .askFirst: return "先停在安全邊界，外部寫入需人類決定"
-    case .approveForMe: return "允許工作區寫入，仍保留 OS receipts"
-    case .fullAccess: return "可存取網路與電腦檔案；僅限明確授權任務"
+    case .approveForMe: return "允許工作區寫入，仍保留 OS receipts（Grok CLI 不區分代核與全權）"
+    case .fullAccess: return "可存取網路與電腦檔案；僅限明確授權任務（Grok CLI 不區分代核與全權）"
     case .configFile: return "使用 config.toml 內定義的權限"
     }
   }

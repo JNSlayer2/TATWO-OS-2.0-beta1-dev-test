@@ -145,6 +145,9 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   public var kind: String?
   var prReview: PRPlanReview?
   var prMessage: String?
+  var prImplementationInterrupted: Bool?
+  var prContinuationThreadID: UUID?
+  static let prMovedMessage = "畫布已移到貢獻專案的新討論串，請到該串繼續。"
 
   public init(
     planID: UUID = UUID(),
@@ -212,6 +215,22 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     self.kind = try container.decodeIfPresent(String.self, forKey: .kind)
     self.prReview = try container.decodeIfPresent(PRPlanReview.self, forKey: .prReview)
     self.prMessage = try container.decodeIfPresent(String.self, forKey: .prMessage)
+    self.prImplementationInterrupted = try container.decodeIfPresent(Bool.self, forKey: .prImplementationInterrupted)
+    self.prContinuationThreadID = try container.decodeIfPresent(UUID.self, forKey: .prContinuationThreadID)
+  }
+
+  /// Recovery never starts a turn or submits; the next action belongs to the user.
+  @discardableResult
+  mutating func recoverInterruptedPR(hasActiveTurn: Bool) -> Bool {
+    guard kind == "pr", state == .confirmed, !hasActiveTurn,
+          prContinuationThreadID == nil,
+          // Older saved plans only have the transfer message, not a destination ID.
+          prMessage != Self.prMovedMessage else { return false }
+    state = .discussing
+    executionTurnID = nil
+    prImplementationInterrupted = true
+    prMessage = "上次實作中斷"
+    return true
   }
 
   public func canonicalJSONData() throws -> Data {
@@ -235,6 +254,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   public mutating func confirm(at: Date = Date()) {
     updatedAt = Self.storagePrecision(at)
     state = .confirmed
+    prImplementationInterrupted = nil
   }
 
   /// 2026-08-21 使用者需求：畫布可直接編輯計劃書（鉛筆→修改→儲存）。

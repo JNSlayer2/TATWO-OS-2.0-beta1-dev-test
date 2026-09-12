@@ -25,6 +25,7 @@ for relative in "${FILES[@]}"; do
     component="$(dirname "$component")"
   done
 done
+[[ "$DESTINATION" != "--check-inputs" ]] || { echo "IPAD DEVICE INPUTS PASS"; exit 0; }
 mkdir -p "$(dirname "$DESTINATION")"
 mkdir "$DESTINATION"
 for relative in "${FILES[@]}"; do

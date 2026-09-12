@@ -30,18 +30,18 @@ test('four normal outcomes and a non-throwing failure outcome exist', () => {
 
 test('marker protects unmarked and edited content; writes are atomic', () => {
   assert.match(refresh, /os-upstream\.installed\.sha256/);
-  assert.match(refresh, /guard let installed, current == installed else/);
-  assert.match(refresh, /guard digest != installed else \{ return \.unchanged \}/);
+  assert.match(refresh, /guard let installed, installed\.contains\(current\) else/);
+  assert.match(refresh, /if current == digest/);
   assert.match(refresh, /os-upstream\.update-available\.md/);
-  assert.match(refresh, /digest != current && digest != installed/);
-  assert.ok((refresh.match(/options: \.atomic/g) ?? []).length >= 5);
+  assert.match(refresh, /installed\?\.contains\(digest\)/);
+  assert.ok((refresh.match(/options: \.atomic/g) ?? []).length >= 4);
 });
 
 test('backup uses UTC sortable filename and is copied before replacement', () => {
   assert.match(refresh, /TimeZone\(secondsFromGMT: 0\)/);
   assert.match(refresh, /"yyyyMMdd'T'HHmmssSSS'Z'"/);
   assert.match(refresh, /"os-upstream\.md\.bak-\\\(formatter\.string\(from: now\)\)"/);
-  assert.match(refresh, /try fm\.copyItem\(at: runtime, to: backup\)[\s\S]*try content\.write\(to: runtime/);
+  assert.match(refresh, /try fm\.copyItem\(at: runtime, to: backup\)[\s\S]*try writeManaged\(content/);
 });
 
 test('App delegate refreshes once before services, logs once without a dialog', () => {

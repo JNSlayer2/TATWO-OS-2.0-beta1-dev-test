@@ -224,7 +224,7 @@ struct TatwoSettingsPage: View {
         case .github:
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    UpdateAvailableCard(model: model, onOpenCLI: onClose)
+                    UpdateAvailableCard()
                         .padding(.horizontal, 22)
                         .padding(.top, 22)
                     GitHubAccountsCard(model: model)

@@ -460,7 +460,8 @@ struct ChatPage: View {
                 },
                 onExecute: model.confirmActivePlan,
                 onFeedbackSubmitted: model.finishFeedbackPlan,
-                onPRSubmit: model.submitActivePRPlan)
+                onPRSubmit: model.submitActivePRPlan,
+                onPRDiscuss: model.returnActivePRToDiscussion)
                 .id(model.activePlanArtifact?.planID)
         }
         .inspector(isPresented: $browserInspectorPresented) {

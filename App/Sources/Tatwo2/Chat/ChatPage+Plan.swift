@@ -403,6 +403,7 @@ struct PlanTranscriptInspectorView: View {
     let onExecute: () -> Void
     var onFeedbackSubmitted: (UUID) -> Void = { _ in }
     var onPRSubmit: () -> Void = {}
+    var onPRDiscuss: () -> Void = {}
 
     @State private var isCollapsed = false
     @State private var copied = false
@@ -440,7 +441,7 @@ struct PlanTranscriptInspectorView: View {
                                     .padding(12)
                             } else if artifact.kind == "pr" {
                                 PRPlanActions(artifact: artifact, isDisabled: isEditing || isWriting,
-                                              onConfirm: onExecute, onSubmit: onPRSubmit)
+                                              onConfirm: onExecute, onSubmit: onPRSubmit, onReturnToDiscussion: onPRDiscuss)
                                     .id(artifact.planID).padding(12)
                             } else if showsUltraworkCanvas {
                                 VStack(alignment: .leading, spacing: 6) {

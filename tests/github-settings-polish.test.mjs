@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const read = path => readFileSync(new URL(`../App/Sources/Tatwo2/${path}`, import.meta.url), 'utf8');
 const card = read('New/UpdateAvailableCard.swift');
@@ -20,7 +23,7 @@ test('update card always shows installed bundle version/build and the available 
 
 test('latest is only claimed after a successful comparison; errors remain visible even after later', () => {
   assert.match(checker, /@Published private\(set\) var lastCheckedAt: Date\?/);
-  assert.match(checker, /guard !isChecking else \{ return \}[\s\S]*defer \{ lastCheckedAt = Date\(\); isChecking = false \}/);
+
   assert.match(card, /checker\.status == "目前沒有較新的正式版本", let checkedAt = checker\.lastCheckedAt/);
   assert.ok(card.includes('· 已是最新（上次檢查 \\(Self.checkTime.string(from: checkedAt))）'));
   assert.match(card, /formatter\.dateFormat = "HH:mm"/);
@@ -86,4 +89,69 @@ test('footer has the exact two requested secondary-text lines', () => {
   assert.ok(accounts.includes('OS 怎麼選帳號：網址裡有帳號名就用那個；沒有就看資料夾對映；都沒有就用預設帳號。'));
   assert.match(accounts, /Text\("這些都可以在 chat 直接請 AI 幫你設定。"\)\s*\}\s*\.font\(\.footnote\)\s*\.foregroundStyle\(\.secondary\)/);
   assert.doesNotMatch(accounts, /規則：網址帶帳號名|OS 不插手/);
+});
+
+// Compile the production check body; only transport/channel/updater are isolated doubles.
+test('check completion timestamps success and failure, clears busy, and deduplicates in-flight checks', () => {
+  const body = checker.slice(checker.indexOf('    func check() async {'), checker.lastIndexOf('\n}'));
+  const compare = checker.slice(checker.indexOf('enum ReleaseVersionCompare'), checker.indexOf('/// A credential stays'));
+  const releaseStart = checker.indexOf('    struct Release:');
+  const release = checker.slice(releaseStart, checker.indexOf('    static let shared', releaseStart));
+  const root = mkdtempSync(join(tmpdir(), 'w29b-checker-'));
+  writeFileSync(join(root, 'fixture.swift'), `import Foundation
+${compare}
+struct UpdateChannel {
+  let isPrivate = false, requestedPrivate = false
+  static func current() -> Self { Self() }
+  func authorize(_ request: inout URLRequest) {}
+}
+@MainActor final class InAppUpdater {
+  static let shared = InAppUpdater()
+  func invalidateCandidate() {}
+  func prefetch(to: String, repository: String) {}
+}
+final class UpdateRedirectDelegate: NSObject, URLSessionTaskDelegate { static let shared = UpdateRedirectDelegate() }
+@MainActor final class Transport {
+  var calls = 0, fail = false
+  func data(for request: URLRequest, delegate: URLSessionTaskDelegate? = nil) async throws -> (Data, URLResponse) {
+    calls += 1
+    try await Task.sleep(nanoseconds: 30_000_000)
+    if fail { throw URLError(.notConnectedToInternet) }
+    return (Data(#"{"tag_name":"v2.0.5","draft":false,"prerelease":false}"#.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+  }
+}
+@MainActor final class Checker {
+ ${release}
+ var isChecking = false, isPrivateChannel = false
+ var lastCheckedAt: Date?, availableRelease: Release?
+ var status = "", repository = "fixture/project", installedVersion = "2.0.5"
+ let session = Transport()
+ ${body}
+}
+@main struct Main {
+ @MainActor static func main() async {
+  let c = Checker()
+  let start = Date()
+  let task = Task { await c.check() }
+  while !c.isChecking { await Task.yield() }
+  precondition(c.lastCheckedAt == nil)
+  await c.check()
+  precondition(c.session.calls == 1)
+  await task.value
+  precondition(!c.isChecking && c.lastCheckedAt! >= start)
+  precondition(c.status == "目前沒有較新的正式版本")
+  let previous = c.lastCheckedAt!
+  c.session.fail = true
+  await c.check()
+  precondition(!c.isChecking && c.lastCheckedAt! > previous)
+  precondition(c.status == "更新檢查失敗，請確認網路後重試")
+  c.repository = "invalid"
+  await c.check()
+  precondition(!c.isChecking && c.status == "更新倉庫設定無效")
+ }
+}`);
+  const build = spawnSync('swiftc', ['-parse-as-library', join(root, 'fixture.swift'), '-o', join(root, 'fixture')], { encoding: 'utf8' });
+  assert.equal(build.status, 0, build.stderr);
+  const run = spawnSync(join(root, 'fixture'), [], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
 });

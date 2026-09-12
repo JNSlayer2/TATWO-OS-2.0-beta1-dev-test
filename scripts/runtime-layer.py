@@ -69,6 +69,7 @@ def archive(source, destination, parent=False):
                 entry.create_system = 3
                 entry.external_attr = (mode << 16) | (0x10 if directory else 0)
                 entry.compress_type = zipfile.ZIP_DEFLATED
+                entry._compresslevel = 9
                 if directory or p.is_symlink():
                     z.writestr(entry, b'' if directory else os.readlink(p).encode())
                 else:

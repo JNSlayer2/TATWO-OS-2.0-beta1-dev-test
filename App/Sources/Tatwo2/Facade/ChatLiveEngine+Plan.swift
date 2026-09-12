@@ -27,12 +27,15 @@ extension ChatLiveEngine {
             .appendingPathComponent("\(threadID.uuidString).json")
     }
 
-    func loadPlanArtifact(_ threadID: UUID) throws -> TatwoPlanArtifactV1? {
+    func loadPlanArtifact(_ threadID: UUID, recoverInterrupted: Bool = false) throws -> TatwoPlanArtifactV1? {
         let url = planURL(threadID)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let plan = try JSONDecoder.tatwoPlanArtifact.decode(TatwoPlanArtifactV1.self, from: Data(contentsOf: url))
+        var plan = try JSONDecoder.tatwoPlanArtifact.decode(TatwoPlanArtifactV1.self, from: Data(contentsOf: url))
         guard plan.threadID == threadID, plan.schema == TatwoPlanArtifactV1.schemaName else {
             throw CocoaError(.fileReadCorruptFile)
+        }
+        if recoverInterrupted, plan.recoverInterruptedPR(hasActiveTurn: isRunning(threadID) || onTurnComplete[threadID] != nil) {
+            try savePlanArtifact(plan)
         }
         return plan
     }

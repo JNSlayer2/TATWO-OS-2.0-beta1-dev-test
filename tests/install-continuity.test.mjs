@@ -245,7 +245,7 @@ test('W26 curl 18 re-invokes curl and resumes from existing bytes on second atte
 
 test('W26 install-ready requires one matching candidate hash; legacy name-only marker binds via .sha256 instead', () => {
   const dir = mkdtempSync(join(tmpdir(),'w26-ready-')), hash = 'a'.repeat(64);
-  for (const [content, ok] of [[`${hash}  file.zip\n`, true], ['ready', true], [`${'b'.repeat(64)}  file.zip`, false], [`${hash}  file.zip\n${hash}  file.zip`, false]]) {
+  for (const [content, ok] of [[`${hash}  file.zip\n`, true], ['ready', false], [`${'b'.repeat(64)}  file.zip`, false], [`${hash}  file.zip\n${hash}  file.zip`, false]]) {
     writeFileSync(join(dir,'install-ready'),content);
     const legacy = /^[0-9a-f]{64}  /m.test(content) ? '0' : '1';
     const r=spawnSync('bash',['-c',`${transport}\nLEGACY_READY=${legacy}\nready_matches file.zip ${hash}`],{env:{...process.env,TEMP:dir}});
@@ -259,7 +259,7 @@ test('W26 persisted transactions restore interrupted rename and leave live/commi
     const dir=mkdtempSync(join(tmpdir(),'w26-reconcile-')), dest=join(dir,'TATWO OS.app'), stage=join(dir,'.tatwo-update.fixture.noindex');
     mkdirSync(stage); mkdirSync(dest+'.old'); writeFileSync(join(dest+'.old','intact'),'old');
     writeFileSync(join(stage,'transaction.json'), JSON.stringify({phase,owner,backup:dest+'.old'}));
-    const r=spawnSync('bash',['-c',`set -eu\n${functions}\nreconcile_transactions`],{encoding:'utf8',env:{...process.env,DEST:dest}});
+    const r=spawnSync('bash',['-c',`set -eu\n${functions}\nvalid_restore_app() { [[ -d "$1" ]]; }\nreconcile_transactions`],{encoding:'utf8',env:{...process.env,DEST:dest}});
     assert.equal(r.status,0,r.stderr); assert.equal(existsSync(dest),restore);
     if(restore) {
       assert.equal(readFileSync(join(dest,'intact'),'utf8'),'old');
@@ -317,7 +317,7 @@ test('W26 SIGKILL inside production rename window is recovered by the next insta
   assert.equal(r.signal,'SIGKILL',r.stderr);
   assert.ok(!existsSync(dest)); assert.ok(existsSync(dest+'.old')); assert.ok(existsSync(dest+'.new'));
   assert.equal(JSON.parse(readFileSync(join(stage,'transaction.json'))).phase,'replacing');
-  r=spawnSync('bash',['-c',`set -eu\n${functions}\nreconcile_transactions`],{encoding:'utf8',env});
+  r=spawnSync('bash',['-c',`set -eu\n${functions}\nvalid_restore_app() { [[ -d "$1" ]]; }\nreconcile_transactions`],{encoding:'utf8',env});
   assert.equal(r.status,0,r.stderr); assert.equal(readFileSync(join(dest,'intact'),'utf8'),'old');
   assert.ok(!existsSync(dest+'.new')); assert.ok(existsSync(join(stage,'interrupted-new.app.disabled')));
 });
@@ -383,7 +383,7 @@ test('W24 no repeated candidate deep verify or repeated continuity after staging
   const continuity = install.slice(install.indexOf('verify_continuity()'), install.indexOf('# VERSION-BINDING-BEGIN'));
   assert.equal((continuity.match(/verify_signed_app/g) || []).length, 1, 'only old trust anchor needs deep verification here');
   assert.doesNotMatch(continuity, /--deep/);
-  assert.match(install, /open "\$DEST"\nINSTALL_SECONDS=/);
+  assert.match(install, /open "\$DEST" \|\| [^\n]+\nINSTALL_SECONDS=/);
   assert.match(install, /"installSeconds":%s/);
 });
 

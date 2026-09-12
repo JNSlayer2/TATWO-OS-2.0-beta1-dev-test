@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CryptoKit
 
 /// Release-train precedence; accepts 2–4 numeric components, padding missing components with zero.
 /// Invalid input fails closed. Numeric strings avoid integer overflow.
@@ -91,6 +92,41 @@ struct UpdateChannel {
     }
 }
 
+// UPDATE-TRANSPORT-BEGIN
+final class UpdateRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = UpdateRedirectDelegate()
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        var redirected = request
+        if response.url?.host?.lowercased() != request.url?.host?.lowercased()
+            || response.url?.scheme != request.url?.scheme || response.url?.port != request.url?.port {
+            redirected.setValue(nil, forHTTPHeaderField: "Authorization")
+        }
+        completionHandler(redirected)
+    }
+}
+
+enum UpdateReleaseRevalidation {
+    struct Asset: Decodable { let id: Int64?; let name: String; let browser_download_url: String }
+    private struct Release: Decodable { let tag_name: String; let draft: Bool; let prerelease: Bool; let assets: [Asset] }
+    static func verify(session: URLSession, request: URLRequest, tag: String, cachedMarker: Data,
+                       markerRequest: (Asset) throws -> URLRequest) async throws -> Data {
+        let (data, response) = try await session.data(for: request, delegate: UpdateRedirectDelegate.shared)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        let release = try JSONDecoder().decode(Release.self, from: data)
+        let markers = release.assets.filter { $0.name == "TATWO-OS.install-ready" }
+        guard release.tag_name == tag, !release.draft, !release.prerelease, markers.count == 1 else {
+            throw URLError(.resourceUnavailable)
+        }
+        let (marker, markerResponse) = try await session.data(for: markerRequest(markers[0]), delegate: UpdateRedirectDelegate.shared)
+        guard (markerResponse as? HTTPURLResponse)?.statusCode == 200,
+              SHA256.hash(data: marker) == SHA256.hash(data: cachedMarker) else { throw URLError(.resourceUnavailable) }
+        return data
+    }
+}
+// UPDATE-TRANSPORT-END
+
 @MainActor
 final class GitHubReleaseUpdateChecker: ObservableObject {
     struct Release: Decodable, Equatable {
@@ -106,9 +142,11 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
     static let defaultRepository = "tatwo214/TATWO-OS-2.0-beta1-dev-test"
     static let installCommand = "curl -fsSL https://raw.githubusercontent.com/tatwo214/TATWO-OS-2.0-beta1-dev-test/main/install.sh | bash"
     var terminalInstallCommand: String {
-        isPrivateChannel
-            ? "gh api 'repos/\(UpdateChannel.privateRepository)/contents/scripts/install-private.sh?ref=beta1/integration' -H 'Accept: application/vnd.github.raw+json' | bash"
-            : Self.installCommand
+        guard let tag = availableRelease?.tag_name,
+              tag.range(of: #"^v?[0-9]+([.][0-9]+){1,3}$"#, options: .regularExpression) != nil else { return "" }
+        return isPrivateChannel
+            ? "gh api 'repos/\(UpdateChannel.privateRepository)/contents/scripts/install-private.sh?ref=\(tag)' -H 'Accept: application/vnd.github.raw+json' | TATWO_OS_VERSION='\(tag)' bash"
+            : "curl -fsSL https://raw.githubusercontent.com/\(repository)/\(tag)/install.sh | TATWO_OS_VERSION='\(tag)' bash"
     }
     @Published private(set) var availableRelease: Release?
     @Published private(set) var isChecking = false
@@ -130,7 +168,7 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
          installedVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") {
         self.defaults = defaults
         // Isolated public requests: no stored cookies, credentials, or Authorization.
-        self.session = session ?? URLSession(configuration: .ephemeral)
+        self.session = session ?? URLSession(configuration: .ephemeral, delegate: UpdateRedirectDelegate.shared, delegateQueue: nil)
         self.installedVersion = installedVersion
     }
 
@@ -173,7 +211,7 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
         request.setValue("TATWO-OS-UpdateChecker", forHTTPHeaderField: "User-Agent")
         channel.authorize(&request)
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request, delegate: UpdateRedirectDelegate.shared)
             guard let response = response as? HTTPURLResponse else {
                 status = "更新檢查失敗：無效回應"; return
             }

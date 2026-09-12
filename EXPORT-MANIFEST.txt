@@ -1,6 +1,6 @@
-Source commit: 7da7bb667f7baa0a1e0b2d01a5805f16168a85fd
+Source commit: 1bc311fbb74e25bc783a634949cab488b5bb0bac
 Source worktree: clean
-Files: 1429
+Files: 1438
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -628,6 +628,12 @@ Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/WebMCPOriginParsingTests.swi
 Apps/TatwoUltraworkMac/Tests/TatwoUltraworkMacTests/WindowChromeMetricsTests.swift
 Apps/TatwoUltraworkMac/_archived/ChatPage-coworkSidebar-wave1-20260728.swift.txt
 Apps/TatwoUltraworkMac/_archived/WorkingPage-wave1-20260728.swift.txt
+Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/project.pbxproj
+Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+Device/iPadUseDevice/TatwoIPadDevice.xcodeproj/xcshareddata/xcschemes/TatwoIPadDevice.xcscheme
+Device/iPadUseDevice/TatwoIPadDeviceTests/Info.plist
+Device/iPadUseDevice/TatwoIPadDeviceTests/TatwoIPadDeviceTests.swift
+Device/iPadUseDevice/project.yml
 EXPORT-MANIFEST.txt
 Engines/PROTOCOL.md
 Engines/browser-mcp/caller-test.mjs
@@ -1430,3 +1436,6 @@ tests/tatwo2-readonly-dispatch.test.mjs
 tests/tatwo2-scroll-follow.test.mjs
 tests/tatwo2-sidebar-regression.test.mjs
 tests/update-channels.test.mjs
+tests/w28-audit.test.mjs
+tests/w29a-update-fixes.test.mjs
+tests/w29b-ux-fixes.test.mjs

@@ -1,0 +1,35 @@
+name: TatwoIPadDevice
+options:
+  bundleIdPrefix: ai.tatwo
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    SDKROOT: iphoneos
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "2"
+targets:
+  TatwoIPadDevice:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - TatwoIPadDeviceTests
+    info:
+      path: TatwoIPadDeviceTests/Info.plist
+    settings:
+      base:
+        DEVELOPMENT_TEAM: ""
+        TARGETED_DEVICE_FAMILY: "2"
+        GENERATE_INFOPLIST_FILE: NO
+        PRODUCT_BUNDLE_IDENTIFIER: ai.tatwo.ipaduse.device
+        PRODUCT_NAME: TatwoIPadDevice
+schemes:
+  TatwoIPadDevice:
+    build:
+      targets:
+        TatwoIPadDevice: all
+    test:
+      targets:
+        - TatwoIPadDevice

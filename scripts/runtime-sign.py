@@ -132,6 +132,8 @@ def main():
             code = macho(p) or bundle(p)
             valid = code and run('codesign', '--verify', '--deep', '--strict', p, check=False).returncode == 0
             expected = selected if own else signer(p, work) if valid else b'adhoc'
+            if valid and not own and bundle(p):
+                assert expected and expected != b'adhoc', 'vendor bundle requires a persistent signing identity'
             if code and old is not None and old.exists() and not old.is_symlink() and expected:
                 ancestors = old.relative_to(baseline).parents
                 safe = not any((baseline / a).is_symlink() for a in ancestors)

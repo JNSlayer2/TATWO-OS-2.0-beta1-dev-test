@@ -56,7 +56,7 @@ enum PeerUpdateSource {
         ["-e", (["/usr/bin/ssh"] + options(offer.device)).joined(separator: " "),
          "\(offer.device.user)@\(offer.host):\(quote(path))", destination.path]
     }
-    // Every command, including local repacking, goes through the existing owned capture-only fixture gate.
+    // Every command, including local fixture commands, goes through the existing owned capture-only fixture gate.
     static func run(_ argv: [String], seconds: Double) async throws -> Data {
         let environment = ProcessInfo.processInfo.environment
         #if DEBUG
@@ -119,9 +119,14 @@ enum PeerUpdateSource {
         }
     }
     static func cachePath(_ path: String, tag: String, name: String) -> Bool {
-        path.hasPrefix("/Users/") && path.hasSuffix("/\(relativeRoot)/download/\(tag)/\(name)") &&
-        !path.split(separator: "/", omittingEmptySubsequences: false).dropFirst().contains(where: { $0 == ".." || $0 == "." || $0.isEmpty }) &&
-        !path.contains("\n") && !path.contains("\r")
+        let prefix = "/\(relativeRoot)/download/"
+        guard path.hasPrefix("/Users/"), let range = path.range(of: prefix),
+              !path.split(separator: "/", omittingEmptySubsequences: false).dropFirst().contains(where: { $0 == ".." || $0 == "." || $0.isEmpty }),
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return false }
+        let parts = path[range.upperBound...].split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 4 && parts[2] == tag && parts[3] == name && parts.prefix(2).allSatisfy {
+            $0.range(of: #"^[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil
+        }
     }
     // Candidate bytes are never authoritative: the caller must hash before publishing or handing off.
     static func pull(_ offer: Offer, tag: String, name: String, folder: URL) async throws -> URL? {
@@ -135,15 +140,6 @@ enum PeerUpdateSource {
         let output = stage.appendingPathComponent(name)
         if let path = entry.files[name] ?? (runtime ? entry.runtime : entry.app), cachePath(path, tag: tag, name: name) {
             _ = try await run(rsync(offer, path: path, destination: output), seconds: 86_400)
-        } else if runtime, entry.installedApp == "/Applications/TATWO OS.app",
-                  let sha = entry.runtimeSha, safe(sha, pattern: "^[0-9a-f]{64}$"),
-                  name == "TATWO-OS-runtime-\(sha.prefix(12)).zip" {
-            let contents = stage.appendingPathComponent("runtime", isDirectory: true)
-            try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
-            for path in runtimePaths {
-                _ = try await run(rsync(offer, path: "/Applications/TATWO OS.app/Contents/./\(path)", destination: contents, relative: true), seconds: 86_400)
-            }
-            _ = try await run(["/usr/bin/ditto", "-c", "-k", "--norsrc", contents.path, output.path], seconds: 30)
         } else { return nil }
         let attributes = try FileManager.default.attributesOfItem(atPath: output.path)
         guard attributes[.type] as? FileAttributeType == .typeRegular else { return nil }

@@ -3,12 +3,8 @@ import AppKit
 
 /// W2: mount at the top of the GitHub settings page when integration authorizes its call site.
 struct UpdateAvailableCard: View {
-    @ObservedObject var model: ChatPageModel
-    let onOpenCLI: () -> Void
     @ObservedObject private var checker = GitHubReleaseUpdateChecker.shared
     @ObservedObject private var updater = InAppUpdater.shared
-    @State private var executionError: String?
-    @State private var isExecuting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -60,22 +56,20 @@ struct UpdateAvailableCard: View {
                     Text(reason).font(.footnote).foregroundStyle(.red)
                 }
                 DisclosureGroup("進階：用終端機更新") {
+                    Text("退出 TATWO OS 後在終端機貼上")
                     Text(checker.terminalInstallCommand)
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
-                        Button("複製") {
+                        Button("複製指令") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(checker.terminalInstallCommand, forType: .string)
                         }
-                        Button("在 CLI 分頁執行") { executeInCLI() }
-                            .disabled(isExecuting)
                     }
                 }
                 .font(.footnote)
             }
-            if let executionError { Text(executionError).font(.footnote).foregroundStyle(.red) }
         }
         .padding(16)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
@@ -97,26 +91,7 @@ struct UpdateAvailableCard: View {
 
     private var updateButtonTitle: String { "重新啟動以更新（約 10 秒）" }
 
-    private func executeInCLI() {
-        executionError = nil
-        guard let id = model.openCLITab(engine: .generic, workdir: NSHomeDirectory()),
-              let session = model.cliTabPTYSession(for: id) else {
-            executionError = "請先選取本機對話並等待 CLI 就緒，再試一次。"
-            return
-        }
-        model.renameCLITab(id, title: "TATWO OS 更新")
-        model.selectCLITab(id)
-        isExecuting = true
-        Task {
-            defer { isExecuting = false }
-            do {
-                try await session.sendLineAwaited(checker.terminalInstallCommand)
-                model.mode = .cli
-                onOpenCLI()
-            }
-            catch { executionError = "無法送出安裝指令；請複製到終端機執行。" }
-        }
-    }
+
 }
 
 struct SidebarUpdateShortcut: View {

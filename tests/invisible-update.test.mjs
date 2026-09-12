@@ -59,7 +59,7 @@ test('W24 offline restart caches tag-pinned script and hash-bound metadata, name
 
 test('W24 production Swift state methods: metered override, space gate, candidate cancellation, ready-only handoff', () => {
   const dir = mkdtempSync(join(tmpdir(), 'w24-state-'));
-  const methods = updater.slice(updater.indexOf('    private func checkSpace()'), updater.indexOf('    private let fileManager:'));
+  const methods = updater.slice(updater.indexOf('    private func checkSpace()'), updater.indexOf('    private func revalidate('));
   const cancel = updater.slice(updater.indexOf('    func cancelUpdate()'), updater.indexOf('    func resumableBytes'));
   const swift = `import Foundation
 struct UpdateArchives {}
@@ -68,6 +68,8 @@ struct Checker { let repository = "fixture/repo" }
 final class Space {
  var free: Int64 = 10_000_000_000
  func createDirectory(at: URL, withIntermediateDirectories: Bool) throws {}
+ var removed = 0
+ func removeItem(at: URL) throws { removed += 1 }
  func attributesOfFileSystem(forPath: String) throws -> [FileAttributeKey:Any] { [.systemFreeSize:NSNumber(value:free)] }
 }
 @MainActor final class Probe {
@@ -79,6 +81,8 @@ final class Space {
  var prepared: (tag:String, repository:String, archives:UpdateArchives)?
  var preparationReason = ""
  var download: Task<Void,Never>?
+ var downloadID = UUID(), rejectValidation = false
+ func revalidate(tag: String, repository: String, folder: URL) async throws { if rejectValidation { throw URLError(.resourceUnavailable) } }
  let fileManager = Space(), directory = URL(fileURLWithPath:"/fixture/cache")
  var started = 0, handoffs = 0
  func beginPrefetch(to: String, repository: String) { started += 1; phase = .starting }
@@ -87,7 +91,7 @@ ${methods}
 ${cancel}
 }
 @main struct Main {
- @MainActor static func main() throws {
+ @MainActor static func main() async throws {
   let p = Probe(), repo = "fixture/repo"
   p.prefetch(to:"v2.0.6", repository:repo)
   precondition(p.started == 0 && p.preparationReason.contains("Wi‑Fi"))
@@ -108,7 +112,11 @@ ${cancel}
   p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives()); p.candidateBytes = 1
   p.update(to:"v2.0.6"); precondition(p.handoffs == 0)
   p.update(to:"v2.0.7",repository:"other/repo"); precondition(p.handoffs == 0)
-  p.update(to:"v2.0.7"); precondition(p.handoffs == 1)
+  p.update(to:"v2.0.7"); precondition(p.handoffs == 0 && p.phase == .starting)
+  await p.download?.value; precondition(p.handoffs == 1)
+  p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives()); p.rejectValidation = true
+  p.update(to:"v2.0.7"); await p.download?.value
+  precondition(p.handoffs == 1 && p.prepared == nil && p.fileManager.removed == 1 && p.phase == .failed("版本已撤回或無法確認"))
   p.phase = .ready; p.invalidateCandidate(); precondition(p.phase == .idle && p.prepared == nil)
   print("state gates PASS")
  }

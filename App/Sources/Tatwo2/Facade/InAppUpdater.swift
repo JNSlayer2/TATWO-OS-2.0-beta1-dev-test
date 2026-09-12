@@ -258,7 +258,52 @@ final class InAppUpdater: ObservableObject {
         guard phase == .ready, let prepared, prepared.tag == tag,
               prepared.repository == (repository ?? GitHubReleaseUpdateChecker.shared.repository) else { return }
         do { try checkSpace() } catch { self.prepared = nil; phase = .failed(error.localizedDescription); return }
-        handOff(tag: tag, repository: prepared.repository, zip: prepared.archives)
+        phase = .starting
+        let validationID = UUID(); downloadID = validationID
+        download = Task {
+            defer { if downloadID == validationID { download = nil } }
+            let folder = directory.appendingPathComponent("download/\(prepared.repository)/\(tag)")
+            do {
+                try await revalidate(tag: tag, repository: prepared.repository, folder: folder)
+                try Task.checkCancellation()
+                guard downloadID == validationID, self.prepared?.tag == tag,
+                      self.prepared?.repository == prepared.repository else { return }
+                try checkSpace()
+                handOff(tag: tag, repository: prepared.repository, zip: prepared.archives)
+            } catch {
+                // Only cached metadata is removed; verified archives remain reusable after a fresh check.
+                try? fileManager.removeItem(at: folder.appendingPathComponent("release.json"))
+                self.prepared = nil; pendingCandidate = nil
+                phase = .failed("版本已撤回或無法確認")
+            }
+        }
+    }
+
+    private func revalidate(tag: String, repository: String, folder: URL) async throws {
+        let channel = UpdateChannel.current()
+        if repository == UpdateChannel.privateRepository && !channel.isPrivate { throw URLError(.userAuthenticationRequired) }
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/releases/tags/\(tag)")!,
+                                 cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        channel.authorize(&request)
+        let cachedMarker = try Data(contentsOf: folder.appendingPathComponent("TATWO-OS.install-ready"))
+        let data = try await UpdateReleaseRevalidation.verify(session: GitHubReleaseUpdateChecker.shared.session,
+            request: request, tag: tag, cachedMarker: cachedMarker) { asset in
+                guard let publicURL = URL(string: asset.browser_download_url), publicURL.scheme == "https",
+                      publicURL.host == "github.com",
+                      publicURL.path == "/\(repository)/releases/download/\(tag)/TATWO-OS.install-ready" else { throw URLError(.badURL) }
+                var url = publicURL
+                if repository == UpdateChannel.privateRepository {
+                    guard let id = asset.id, id > 0 else { throw URLError(.badURL) }
+                    url = URL(string: "https://api.github.com/repos/\(repository)/releases/assets/\(id)")!
+                }
+                var marker = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+                marker.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+                channel.authorize(&marker)
+                return marker
+            }
+        try Task.checkCancellation()
+        try data.write(to: folder.appendingPathComponent("release.json"), options: .atomic)
     }
     private let fileManager: FileManager
     private let directory: URL
@@ -295,40 +340,121 @@ final class InAppUpdater: ObservableObject {
         let fm = FileManager.default, dest = URL(fileURLWithPath: destination)
         var backupDirectory: ObjCBool = false
         guard fm.fileExists(atPath: destination + ".old", isDirectory: &backupDirectory), backupDirectory.boolValue else { return }
+        func output(_ executable: String, _ arguments: [String]) -> String? {
+            let process = Process(), pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
+            process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+            var environment = ProcessInfo.processInfo.environment; environment["LC_ALL"] = "C"; process.environment = environment
+            do { try process.run() } catch { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+            return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) : nil
+        }
+        func active(_ text: String) -> Bool {
+            let fields = text.split(separator: "\n", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard let first = fields.first, let pid = Int32(first), pid > 0 else { return false }
+            if let start = output("/bin/ps", ["-p", String(pid), "-o", "lstart="]), !start.isEmpty {
+                return fields.count == 1 || start == fields[1]
+            }
+            return kill(pid, 0) == 0 || errno != ESRCH
+        }
+        func validApp(_ app: URL) -> Bool {
+            guard (try? app.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
+                  let data = try? Data(contentsOf: app.appendingPathComponent("Contents/Info.plist")),
+                  let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  info["CFBundleIdentifier"] as? String == "ai.tatwo.tatwo2" else { return false }
+            return output("/usr/bin/codesign", ["--verify", "--strict", app.path]) != nil
+        }
+        func version(_ app: URL) -> String? {
+            guard let data = try? Data(contentsOf: app.appendingPathComponent("Contents/Info.plist")),
+                  let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
+            return info["CFBundleShortVersionString"] as? String
+        }
         let parent = dest.deletingLastPathComponent(), lock = parent.appendingPathComponent(".tatwo-update.lock")
-        let owned = mkdir(lock.path, 0o700) == 0
-        if owned { try? Data("\(getpid())".utf8).write(to: lock.appendingPathComponent("owner"), options: .atomic) }
-        else {
-            guard let text = try? String(contentsOf: lock.appendingPathComponent("owner"), encoding: .utf8),
-                  let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0,
-                  kill(pid, 0) != 0, errno == ESRCH else { return }
+        let admission = open(parent.appendingPathComponent(".tatwo-update.admission").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        guard admission >= 0 else { return }
+        defer { close(admission) }
+        guard flock(admission, LOCK_EX | LOCK_NB) == 0 else { return }
+        defer { flock(admission, LOCK_UN) }
+        guard let start = output("/bin/ps", ["-p", String(getpid()), "-o", "lstart="]), !start.isEmpty else { return }
+        let identity = "\(getpid())\n\(start)\n"
+        func claim(_ path: URL) -> Bool {
+            let temporary = path.appendingPathExtension("tmp.\(UUID().uuidString)")
+            defer {
+                // Only metadata created by this failed claim; no retained transaction is removed.
+                if fm.fileExists(atPath: temporary.path) {
+                    try? fm.removeItem(at: temporary.appendingPathComponent("owner")); rmdir(temporary.path)
+                }
+            }
+            do {
+                try fm.createDirectory(at: temporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                try Data(identity.utf8).write(to: temporary.appendingPathComponent("owner"), options: .atomic)
+                // macOS exclusive rename never nests into or replaces a competing lock.
+                return renamex_np(temporary.path, path.path, UInt32(RENAME_EXCL)) == 0
+            } catch { return false }
         }
-        let guardPath = lock.appendingPathComponent("reconcile")
-        guard mkdir(guardPath.path, 0o700) == 0 else { return }
+        func owner(_ path: URL) -> String { (try? String(contentsOf: path.appendingPathComponent("owner"), encoding: .utf8)) ?? "" }
+        func oldEnough(_ path: URL) -> Bool {
+            let date = try? path.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            return date.map { Date().timeIntervalSince($0) > 600 } ?? false
+        }
+        let owned = claim(lock)
+        if !owned {
+            guard (try? lock.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
+                  !active(owner(lock)), !owner(lock).isEmpty || oldEnough(lock) else { return }
+        }
+        let snapshot = owner(lock), guardPath = lock.appendingPathComponent("reconcile")
+        var guarded = false
         defer {
-            rmdir(guardPath.path)
-            if owned { try? fm.moveItem(at: lock, to: parent.appendingPathComponent(".tatwo-lock-retained.\(UUID().uuidString)")) }
+            if guarded {
+                try? fm.removeItem(at: guardPath.appendingPathComponent("owner")); rmdir(guardPath.path)
+            }
+            if owned {
+                try? fm.removeItem(at: lock.appendingPathComponent("owner")); rmdir(lock.path)
+            } else if guarded {
+                try? fm.moveItem(at: lock, to: parent.appendingPathComponent(".tatwo-lock-retained.\(UUID().uuidString)"))
+            }
         }
+        if fm.fileExists(atPath: guardPath.path) {
+            guard oldEnough(guardPath), !active(owner(guardPath)) else { return }
+            do { try fm.moveItem(at: guardPath, to: lock.appendingPathComponent("reconcile-orphan.\(UUID().uuidString)")) }
+            catch { return }
+        }
+        guard claim(guardPath) else { return }
+        guarded = true
+        guard owner(lock) == snapshot else { return }
         for stage in (try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? []
             where stage.lastPathComponent.hasPrefix(".tatwo-update.") && stage.pathExtension == "noindex" {
-            let file = stage.appendingPathComponent("transaction.json")
+            let file = stage.appendingPathComponent("transaction.json"), result = stage.appendingPathComponent("result.json")
+            guard (try? stage.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
+                  fm.fileExists(atPath: file.path) else { continue }
+            func receipt(_ message: String, ok: Bool = false) {
+                try? JSONSerialization.data(withJSONObject: ["ok": ok, "message": message]).write(to: result, options: .atomic)
+            }
             guard let data = try? Data(contentsOf: file),
                   var record = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                  let phase = record["phase"], !["committed", "recovered", "rolled_back"].contains(phase),
-                  let owner = record["owner"].flatMap(Int32.init), owner > 0, kill(owner, 0) != 0, errno == ESRCH,
-                  record["backup"] == destination + ".old" else { continue }
-            let backup = URL(fileURLWithPath: destination + ".old")
+                  let phase = record["phase"], let pid = record["owner"].flatMap(Int32.init), pid > 0,
+                  record["backup"] == destination + ".old" else { receipt("invalid_transaction"); continue }
+            guard !["committed", "recovered", "rolled_back"].contains(phase),
+                  !active("\(pid)\n\(record["ownerStart"] ?? "")") else { continue }
+            let backup = URL(fileURLWithPath: destination + ".old"), new = URL(fileURLWithPath: destination + ".new")
             do {
                 guard (try? backup.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
-                      (try? stage.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false else { continue }
+                      (try? dest.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { receipt("restore_refused"); continue }
+                if ["replacing", "replaced"].contains(phase), !fm.fileExists(atPath: new.path),
+                   (try? new.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+                   let next = record["nextVersion"], version(dest) == next, validApp(dest) {
+                    record["phase"] = "committed"
+                    try JSONSerialization.data(withJSONObject: record).write(to: file, options: .atomic)
+                    receipt("interrupted_commit_completed", ok: true); continue
+                }
+                guard validApp(backup) else { receipt("restore_refused"); continue }
                 if fm.fileExists(atPath: destination) {
                     try fm.moveItem(at: dest, to: stage.appendingPathComponent("interrupted.app.disabled"))
                 }
                 try fm.moveItem(at: backup, to: dest)
                 record["phase"] = "recovered"
                 try JSONSerialization.data(withJSONObject: record).write(to: file, options: .atomic)
-                try Data(#"{"ok":false,"message":"interrupted_restored_on_launch"}"#.utf8)
-                    .write(to: stage.appendingPathComponent("result.json"), options: .atomic)
+                receipt("interrupted_restored_on_launch")
             } catch { fputs("tatwo_update_reconcile=failed\n", stderr) }
         }
     }
@@ -481,7 +607,7 @@ final class InAppUpdater: ObservableObject {
         request.setValue("TATWO-OS-UpdateChecker", forHTTPHeaderField: "User-Agent")
         channel.authorize(&request)
         let (data, _) = try await retryDownload {
-            let result = try await session.data(for: request); try check(result.1); return result
+            let result = try await session.data(for: request, delegate: UpdateRedirectDelegate.shared); try check(result.1); return result
         }
         let release = try JSONDecoder().decode(Release.self, from: data)
         guard release.tag_name == tag, !release.draft, !release.prerelease,
@@ -527,7 +653,7 @@ final class InAppUpdater: ObservableObject {
         try Data(repository.utf8).write(to: folder.appendingPathComponent("repository"), options: .atomic)
         try data.write(to: folder.appendingPathComponent("release.json"), options: .atomic)
         for name in ["TATWO-OS.install-ready", "TATWO-OS.manifest.json", "TATWO-OS.manifest.json.sha256", "TATWO-OS.zip.sha256"] {
-            let (bytes, response) = try await session.data(for: try assetRequest(asset(name)))
+            let (bytes, response) = try await session.data(for: try assetRequest(asset(name)), delegate: UpdateRedirectDelegate.shared)
             try check(response); try bytes.write(to: folder.appendingPathComponent(name), options: .atomic)
         }
         let manifestURL = folder.appendingPathComponent("TATWO-OS.manifest.json")
@@ -545,7 +671,7 @@ final class InAppUpdater: ObservableObject {
         let marker = try String(contentsOf: folder.appendingPathComponent("TATWO-OS.install-ready"), encoding: .utf8)
         let bindings = marker.split(separator: "\n").map { $0.split(whereSeparator: { $0.isWhitespace }).map(String.init) }
         func markerMatches(_ name: String, _ hash: String) -> Bool {
-            guard bindings.contains(where: { $0.first?.count == 64 }) else { return true } // W26 legacy marker.
+            guard bindings.contains(where: { $0.first?.count == 64 }) else { return false } // App preparation requires a hash-bound manifest.
             let entries = bindings.filter { $0.count == 2 && $0[1] == name }
             return entries.count == 1 && entries[0][0].lowercased() == hash.lowercased()
         }
@@ -558,7 +684,7 @@ final class InAppUpdater: ObservableObject {
         for archive in archives {
             let checksum = try asset(archive.name + ".sha256")
             let (sha, _) = try await retryDownload {
-                let result = try await session.data(for: try assetRequest(checksum))
+                let result = try await session.data(for: try assetRequest(checksum), delegate: UpdateRedirectDelegate.shared)
                 try check(result.1); return result
             }
             let expected = String(decoding: sha, as: UTF8.self).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
@@ -571,6 +697,7 @@ final class InAppUpdater: ObservableObject {
         let offers = await PeerUpdateSource.discover(DeviceRegistry().list())
         try Task.checkCancellation()
         func fetch(_ archive: Asset, offset: Int64) async throws -> URL {
+            defer { Self.removeInvalidDownloads(in: folder) }
             let expected = expectedHashes[archive.name]!
             let zip = folder.appendingPathComponent(archive.name)
             if fileManager.fileExists(atPath: zip.path) {
@@ -593,7 +720,7 @@ final class InAppUpdater: ObservableObject {
                     try Task.checkCancellation()
                     try fileManager.moveItem(at: candidate, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
                 }
-                // Interrupted candidates stay in peer-key; corrupt files stay quarantined, never handed off.
+                // Interrupted candidates stay in peer-key; checksum-rejected downloads are removed on exit.
             }
             try Task.checkCancellation()
             downloadSource = deltaProgress + "從 GitHub 下載…"
@@ -639,7 +766,7 @@ final class InAppUpdater: ObservableObject {
         var scriptRequest = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/contents/install.sh?ref=\(tag)")!)
         scriptRequest.setValue("application/vnd.github.raw+json", forHTTPHeaderField: "Accept")
         channel.authorize(&scriptRequest)
-        let (script, response) = try await session.data(for: scriptRequest)
+        let (script, response) = try await session.data(for: scriptRequest, delegate: UpdateRedirectDelegate.shared)
         try check(response)
         let local = folder.appendingPathComponent("install.sh")
         guard String(decoding: script, as: UTF8.self).contains("# OFFLINE-RELEASE-BEGIN") else {
@@ -649,6 +776,16 @@ final class InAppUpdater: ObservableObject {
         result.privateInstaller = local
         downloadProgress = 1
         return result
+    }
+
+    private static func removeInvalidDownloads(in folder: URL) {
+        let fm = FileManager.default
+        for file in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])) ?? []
+            where file.lastPathComponent.hasPrefix("invalid-") && file.pathExtension == "zip" {
+            guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+            try? fm.removeItem(at: file) // Our own checksum-rejected download, never user work.
+        }
     }
 
     private func recordDownloadProgress(_ written: Int64, total: Int64,
@@ -802,7 +939,12 @@ final class InAppUpdater: ObservableObject {
         WAIT=$((\(helperWaitSeconds) * 5))
         export PATH=/usr/bin:/bin:/usr/sbin:/sbin
         write_result() {
-          printf '{"ok":%s,"tag":"%s","message":"%s","runID":"%s","installSeconds":%s}\\n' "$1" "$TAG" "$2" "$RUN_ID" "$(if [ -f "${TATWO_OS_TIMING_FILE:-}" ]; then cat "$TATWO_OS_TIMING_FILE"; else echo "$((SECONDS - START_SECONDS))"; fi)" > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
+          local install_seconds
+          install_seconds="$(if [ -f "${TATWO_OS_TIMING_FILE:-}" ]; then cat "$TATWO_OS_TIMING_FILE"; else echo "$((SECONDS - START_SECONDS))"; fi)"
+          [[ "$install_seconds" =~ ^[0-9]+$ ]] || install_seconds=0
+          # Canonicalize leading zeroes without arithmetic overflow; JSON numbers cannot start with 00.
+          install_seconds="$(printf '%s' "$install_seconds" | sed 's/^0*//')"; install_seconds="${install_seconds:-0}"
+          printf '{"ok":%s,"tag":"%s","message":"%s","runID":"%s","installSeconds":%s}\\n' "$1" "$TAG" "$2" "$RUN_ID" "$install_seconds" > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
         }
         abnormal_exit() {
           trap - EXIT INT TERM
