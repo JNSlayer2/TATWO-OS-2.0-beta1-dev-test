@@ -81,6 +81,7 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
     @Published private(set) var availableRelease: Release?
     @Published private(set) var isChecking = false
     @Published private(set) var status = ""
+    @Published private(set) var lastCheckedAt: Date?
     @Published private(set) var dismissed = false
     private var schedule: Task<Void, Never>?
     private let defaults: UserDefaults
@@ -119,7 +120,7 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
     func check() async {
         guard !isChecking else { return }
         isChecking = true
-        defer { isChecking = false }
+        defer { lastCheckedAt = Date(); isChecking = false }
         let repository = self.repository
         guard repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil,
               let url = URL(string: "https://api.github.com/repos/\(repository)/releases/latest")

@@ -20,12 +20,23 @@ struct UpdateAvailableCard: View {
                 }
                 .disabled(checker.isChecking)
             }
+            Text("目前版本 v\(currentVersion)（build \(currentBuild)）")
+                .font(.footnote).foregroundStyle(.secondary)
+            if let release = checker.availableRelease {
+                Text("目前 v\(currentVersion) → 可更新到 \(release.tag_name.hasPrefix("v") ? release.tag_name : "v" + release.tag_name)")
+                    .font(.headline)
+            }
+            if checker.status == "目前沒有較新的正式版本", let checkedAt = checker.lastCheckedAt {
+                Text("目前 v\(currentVersion) · 已是最新（上次檢查 \(Self.checkTime.string(from: checkedAt))）")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else if !checker.status.isEmpty && checker.status != "有新版" {
+                Text(checker.status).font(.footnote).foregroundStyle(.secondary)
+            }
             if let lastResult = updater.lastResult {
                 Text(lastResult).font(.footnote).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let release = checker.availableRelease, !checker.dismissed {
-                Text("有新版 · \(release.tag_name)").font(.headline)
                 if let title = release.name, !title.isEmpty { Text(title) }
                 // 2026-09-12 使用者：要像 Codex 一樣按一下就更新，不碰終端機。
                 HStack {
@@ -68,14 +79,26 @@ struct UpdateAvailableCard: View {
                     }
                 }
                 .font(.footnote)
-            } else if !checker.status.isEmpty && !checker.dismissed {
-                Text(checker.status).font(.footnote).foregroundStyle(.secondary)
             }
             if let executionError { Text(executionError).font(.footnote).foregroundStyle(.red) }
         }
         .padding(16)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
     }
+
+    private var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
+    }
+
+    private var currentBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
+    }
+
+    private static let checkTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
 
     private var updateButtonTitle: String {
         switch updater.phase {

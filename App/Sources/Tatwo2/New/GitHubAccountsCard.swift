@@ -5,7 +5,7 @@ import AppKit
 
 struct GitHubAccountsCard: View {
     @ObservedObject var model: ChatPageModel
-    @AppStorage(FeedbackSettings.repositoryKey) private var feedbackRepository = FeedbackSettings.defaultRepository
+    @State private var pendingRemoval: String?
     @State private var tokenField = ""
     @State private var loginInput = ""
     @State private var mappingPath: [String: String] = [:]
@@ -15,21 +15,18 @@ struct GitHubAccountsCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("GitHub")
                     .font(.title3.bold())
-                Text("把你的 GitHub 帳號登進 OS。之後 git、各家引擎、終端機要推拉程式碼時，OS 依「網址上的帳號名」或「資料夾對映」自動給對的帳號，不用再切來切去。")
+                Text("登入 GitHub 後，AI 和終端機會依網址或資料夾選對帳號，幫你下載或上傳程式碼，不用手動切換。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("回報倉庫").font(.headline)
-                TextField("owner/repo", text: $feedbackRepository)
-                    .textFieldStyle(.roundedBorder)
+                Text(FeedbackSettings.defaultRepository)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel("回報倉庫")
-                Text("格式 owner/repo").font(.footnote).foregroundStyle(.secondary)
-                if !FeedbackSettings.isValidRepository(feedbackRepository.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                    Text("格式無效，目前使用預設倉庫：\(FeedbackSettings.defaultRepository)")
-                        .font(.footnote).foregroundStyle(.red)
-                }
+                Text("問題回報與更新檢查都走這個公開倉庫。").font(.footnote).foregroundStyle(.secondary)
             }
             // 接管 git
             HStack(spacing: 10) {
@@ -69,55 +66,71 @@ struct GitHubAccountsCard: View {
                                 Text("預設")
                                     .font(.caption2.weight(.semibold))
                                     .padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                    .background(LiquidGlassTokens.brandAccent.opacity(0.15), in: Capsule())
                             }
-                            Text(account.scopes.isEmpty ? "加入 \(Self.stamp(account.addedAt))" : "權限 \(account.scopes.joined(separator: "、"))")
+                            Text(Self.permissions(account.scopes))
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                             Spacer()
-                            Toggle(isOn: Binding(get: { account.mcpAlwaysOn },
-                                                 set: { _ in model.toggleGitHubMCPAlwaysOn(account.username) })) {
-                                Text("常駐 MCP")
-                                    .font(.footnote.weight(.semibold))
+                            Menu {
+                                Button("檢查連線") { model.verifyGitHubAccount(account.username) }
+                                Button(account.mcpAlwaysOn ? "常駐 MCP（開）" : "常駐 MCP（關）") {
+                                    model.toggleGitHubMCPAlwaysOn(account.username)
+                                }
+                                .help("讓 AI 在每條對話都能直接用這個帳號查 GitHub")
+                                if !account.isDefault {
+                                    Button("設為預設") { model.setDefaultGitHubAccount(account.username) }
+                                }
+                                Divider()
+                                Button("移除帳號…", role: .destructive) { pendingRemoval = account.username }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .frame(width: 28, height: 28)
                             }
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                            .help("開：所有對話預設都能用這個帳號的 GitHub 工具（看 issue、開 PR、搜程式碼…）。關：資訊卡的 MCP 清單還是有它，要用時手動勾。")
-                            if !account.isDefault {
-                                Button("設為預設") { model.setDefaultGitHubAccount(account.username) }
-                                    .buttonStyle(.bordered).controlSize(.small)
-                            }
-                            Button("檢查") { model.verifyGitHubAccount(account.username) }
-                                .buttonStyle(.bordered).controlSize(.small)
-                            Button("移除") { model.removeGitHubAccount(account.username) }
-                                .buttonStyle(.bordered).controlSize(.small)
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .fixedSize()
+                            .accessibilityLabel("\(account.username) 的帳號選項")
                         }
+                        Text(account.mcpAlwaysOn ? "常駐 MCP 已開：AI 在每條對話都能直接用這個帳號查 GitHub" : "常駐 MCP 未開：開啟後 AI 在每條對話都能直接用這個帳號查 GitHub")
+                            .font(.footnote).foregroundStyle(.secondary)
                         // 資料夾對映
-                        VStack(alignment: .leading, spacing: 3) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("哪些資料夾用這個帳號").font(.footnote.weight(.medium))
                             ForEach(account.folderMappings, id: \.self) { path in
                                 HStack {
                                     Text(path).font(.footnote.monospaced()).lineLimit(1)
+                                        .truncationMode(.middle).help(path).textSelection(.enabled)
                                     Spacer()
-                                    Button("拿掉") { model.removeGitHubFolderMapping(account: account.username, path: path) }
+                                    Button("移除") { model.removeGitHubFolderMapping(account: account.username, path: path) }
                                         .buttonStyle(.borderless).controlSize(.small)
+                                        .accessibilityLabel("移除資料夾 \(path)")
                                 }
                             }
                             HStack {
-                                TextField("這個路徑底下的 repo 都用這個帳號（例：~/Projects/example）",
+                                TextField("拖入或輸入資料夾路徑，例如 ~/Projects/example",
                                           text: Binding(get: { mappingPath[account.username] ?? "" },
                                                         set: { mappingPath[account.username] = $0 }))
                                     .textFieldStyle(.roundedBorder)
                                     .font(.footnote)
-                                Button("加入對映") {
+                                    .dropDestination(for: URL.self) { urls, _ in
+                                        guard urls.count == 1, let url = urls.first, url.isFileURL,
+                                              (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                                        else { return false }
+                                        mappingPath[account.username] = url.path
+                                        return true
+                                    }
+                                Button("加入") {
                                     let p = (mappingPath[account.username] ?? "").trimmingCharacters(in: .whitespaces)
                                     guard !p.isEmpty else { return }
                                     model.addGitHubFolderMapping(account: account.username, path: p)
                                     mappingPath[account.username] = ""
                                 }
                                 .buttonStyle(.bordered).controlSize(.small)
+                                .disabled((mappingPath[account.username] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
                             }
                         }
-                        .padding(.leading, 4)
                     }
                     .padding(.vertical, 4)
                     Divider().opacity(0.4)
@@ -165,13 +178,29 @@ struct GitHubAccountsCard: View {
                 }
             }
 
-            Text("規則：網址帶帳號名（tatwo214@github.com/…）就用那個；沒帶就看 repo 在哪個資料夾對映；都沒有用預設帳號。不是 github.com 的網址 OS 不插手。")
-                .font(.footnote)
-                .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("OS 怎麼選帳號：網址裡有帳號名就用那個；沒有就看資料夾對映；都沒有就用預設帳號。")
+                Text("這些都可以在 chat 直接請 AI 幫你設定。")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
         }
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { model.refreshGitHubAccounts() }
+        .alert("移除帳號 \(pendingRemoval ?? "")？", isPresented: Binding(
+            get: { pendingRemoval != nil },
+            set: { if !$0 { pendingRemoval = nil } }
+        )) {
+            Button("取消", role: .cancel) { pendingRemoval = nil }
+            Button("移除", role: .destructive) {
+                guard let username = pendingRemoval else { return }
+                model.removeGitHubAccount(username)
+                pendingRemoval = nil
+            }
+        } message: {
+            Text("會移除 OS 儲存的登入資料與資料夾設定，不會刪除 GitHub 上的帳號或倉庫。")
+        }
     }
 
     // 沿用 EngineLoginCard.loginProgress；W3 的代碼、網址與 stdin 控制。
@@ -219,7 +248,9 @@ struct GitHubAccountsCard: View {
         loginInput = ""
     }
 
-    private static func stamp(_ date: Date) -> String {
-        let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"; return f.string(from: date)
+    private static func permissions(_ scopes: [String]) -> String {
+        guard !scopes.isEmpty else { return "權限尚未確認" }
+        let labels = ["repo": "讀寫 repo", "read:org": "讀組織", "gist": "gist", "workflow": "workflow"]
+        return "可" + scopes.map { labels[$0] ?? $0 }.joined(separator: "、")
     }
 }

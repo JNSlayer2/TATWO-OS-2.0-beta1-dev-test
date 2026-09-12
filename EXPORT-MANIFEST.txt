@@ -1,6 +1,6 @@
-Source commit: 5fc7901af75e8dd05461e4071a354f8e923d60a1
+Source commit: 7868572416b5eea40016f80fd90616323eb7d01a
 Source worktree: clean
-Files: 1413
+Files: 1414
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -1325,6 +1325,7 @@ tests/full-access-permission.test.mjs
 tests/g2c-realistic-corpus-source-contract.test.mjs
 tests/gen3-death-inventory-source-contract.test.mjs
 tests/gen3-governance-adapter-source-contract.test.mjs
+tests/github-settings-polish.test.mjs
 tests/grok-sidecar-attachments.test.mjs
 tests/in-app-update.test.mjs
 tests/install-continuity.test.mjs
