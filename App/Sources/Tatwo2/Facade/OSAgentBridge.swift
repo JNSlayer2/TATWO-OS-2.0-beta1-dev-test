@@ -696,7 +696,7 @@ final class OSAgentBridge: @unchecked Sendable {
             return try awaitBot {
                 try await model.performComputerTool(method, params: params, caller: caller, requestIsConnected: computerConnection)
             }
-        case "ipad_status", "ipad_screenshot", "ipad_open_app", "ipad_touch", "ipad_stop":
+        case "ipad_prepare", "ipad_status", "ipad_screenshot", "ipad_open_app", "ipad_touch", "ipad_stop":
             guard let raw = params["callerThreadID"] as? String, let caller = UUID(uuidString: raw),
                   onMain({ [weak self] in self?.model?.live?.threadRecord(caller) != nil }) else { throw BridgeError.invalidParams }
             return try awaitBot {

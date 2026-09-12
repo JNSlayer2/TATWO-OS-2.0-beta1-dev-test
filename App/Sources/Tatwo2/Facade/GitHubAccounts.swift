@@ -138,7 +138,7 @@ final class GitHubAccountsStore: ObservableObject, @unchecked Sendable {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) {
-        self.environment = environment
+        self.environment = Self.commandEnvironment(environment)
         self.fileManager = fileManager
         self.keychainService = environment["TATWO2_GITHUB_KEYCHAIN_SERVICE"] ?? "tatwo2-github"
 
@@ -153,6 +153,17 @@ final class GitHubAccountsStore: ObservableObject, @unchecked Sendable {
         self.helperDestinationURL = environment["TATWO2_GITHUB_HELPER_PATH"]
             .map { URL(fileURLWithPath: $0) }
             ?? tatwoRoot.appendingPathComponent("bin/tatwo2-git-credential")
+    }
+
+    /// Finder 啟動的 App 不會讀 shell profile；保留呼叫者 PATH，補上常見 CLI 安裝位置。
+    static func commandEnvironment(_ environment: [String: String]) -> [String: String] {
+        var result = environment
+        var paths = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        for path in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+            if !paths.contains(path) { paths.append(path) }
+        }
+        result["PATH"] = paths.joined(separator: ":")
+        return result
     }
 
     func loadAccounts() throws -> [GitHubAccountRecord] {

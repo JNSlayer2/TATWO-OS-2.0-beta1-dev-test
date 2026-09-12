@@ -36,7 +36,7 @@ test('chat plus menu connects through existing controller without a settings rou
   assert.match(adapter, /IPadUseController.shared/);
   assert.match(adapter, /owner == threadID/);
   assert.match(adapter, /shownDevice.id == id, shownOwner == owner/);
-  assert.match(adapter, /connectAndAuthorize\(device, threadID: owner\)/);
+  assert.match(adapter, /setupAndAuthorize\(device, threadID: owner\)/);
   assert.doesNotMatch(adapter, /Timer|while |UserDefaults|URLSession|Process\(/);
 });
 
@@ -70,7 +70,7 @@ test('pressure capability does not advertise touch synthesis as Pencil support',
 
 test('one-confirmation authorization binds the consent thread', () => {
   assert.match(source, /連接並授權/);
-  assert.match(source, /controller\.connectAndAuthorize\(quickDevice, threadID: consentThreadID\)/);
+  assert.match(source, /controller\.setupAndAuthorize\(quickDevice, threadID: consentThreadID\)/);
   assert.match(source, /consentThreadID == threadID/);
   assert.doesNotMatch(source, /Toggle\(/);
   assert.match(source, /立即停止/);
@@ -82,9 +82,9 @@ test('one-confirmation authorization binds the consent thread', () => {
 });
 
 test('simplified pairing and cloud screenshot disclosure are present', () => {
-  assert.match(source, /1 · 連接與信任/);
-  assert.match(source, /2 · TATWO iPad use/);
-  assert.match(source, /一次完成連接與目前討論串授權/);
+  assert.match(source, /連接 iPad/);
+  assert.match(source, /自動準備/);
+  assert.match(source, /一次完成必要的元件建置、安裝、連接與目前討論串授權/);
   assert.match(source, /使用雲端 AI 時/);
   assert.match(source, /TATWO 不接收帳號密碼/);
 });

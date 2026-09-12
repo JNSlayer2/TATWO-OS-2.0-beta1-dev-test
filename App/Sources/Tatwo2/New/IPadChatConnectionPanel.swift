@@ -92,7 +92,7 @@ struct IPadChatConnectionPanel: View {
             } else {
                 if case let .consent(device, _) = phase {
                     Text(device.name).font(.subheadline.bold())
-                    Text("允許目前討論串的 AI 選擇 App、擷取畫面及觸控，直到停止或斷線。雲端模型會接收截圖，觸控可能修改 iPad 內容。")
+                    Text("允許自動建置並安裝必要的連線元件，以及目前討論串的 AI 選擇 App、擷取畫面及觸控，直到停止或斷線。雲端模型會接收截圖，觸控可能修改 iPad 內容。")
                         .font(.callout).fixedSize(horizontal: false, vertical: true)
                     if !canConfirmConsent {
                         Text("討論串或設備已變更，請返回重新選擇。")

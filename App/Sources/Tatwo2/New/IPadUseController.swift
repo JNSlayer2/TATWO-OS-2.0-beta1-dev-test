@@ -8,19 +8,34 @@ struct IPadUseDevice: Identifiable, Equatable {
     let name: String
     let address: String
 
-    static func decode(_ data: Data) throws -> [Self] {
+    private static func pairedWiredRows(_ data: Data) throws -> [[String: Any]] {
         let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let result = root?["result"] as? [String: Any]
-        return (result?["devices"] as? [[String: Any]] ?? []).compactMap { row in
+        return (result?["devices"] as? [[String: Any]] ?? []).filter { row in
             guard let hardware = row["hardwareProperties"] as? [String: Any],
-                  let properties = row["deviceProperties"] as? [String: Any],
+                  row["deviceProperties"] is [String: Any],
                   let connection = row["connectionProperties"] as? [String: Any],
                   hardware["deviceType"] as? String == "iPad",
                   connection["transportType"] as? String == "wired",
                   connection["pairingState"] as? String == "paired",
+                  let identifier = row["identifier"] as? String,
+                  UUID(uuidString: identifier) != nil else { return false }
+            return true
+        }
+    }
+
+    static func pendingTunnelIdentifiers(_ data: Data) throws -> [String] {
+        let ready = Set(try decode(data).map(\.id))
+        return Array(Set(try pairedWiredRows(data).compactMap { $0["identifier"] as? String }))
+            .filter { !ready.contains($0) }.sorted()
+    }
+
+    static func decode(_ data: Data) throws -> [Self] {
+        try pairedWiredRows(data).compactMap { row in
+            guard let properties = row["deviceProperties"] as? [String: Any],
+                  let connection = row["connectionProperties"] as? [String: Any],
                   connection["tunnelState"] as? String == "connected",
                   let identifier = row["identifier"] as? String,
-                  UUID(uuidString: identifier) != nil,
                   let address = connection["tunnelIPAddress"] as? String,
                   validAddress(address) else { return nil }
             return Self(id: identifier, name: properties["name"] as? String ?? "iPad", address: address)
@@ -48,6 +63,27 @@ final class IPadUseTransport: NSObject, URLSessionTaskDelegate, @unchecked Senda
     }
 }
 
+/// Serializes cancellation with process launch so Stop cannot race a queued build.
+final class IPadUseBuildProcess: @unchecked Sendable {
+    let process = Process()
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func start() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { throw CancellationError() }
+        try process.run()
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelled = true
+        if process.isRunning { process.terminate() }
+    }
+}
+
 @MainActor
 final class IPadUseController: ObservableObject {
     static let shared = IPadUseController()
@@ -66,6 +102,7 @@ final class IPadUseController: ObservableObject {
     var activeDeviceID: String? { device?.id }
     private var device: IPadUseDevice?
     private var runner: Process?
+    private var buildProcess: IPadUseBuildProcess?
     private var runnerLog: FileHandle?
     private var sessionID: String?
     private var owner: UUID?
@@ -73,6 +110,9 @@ final class IPadUseController: ObservableObject {
     private var runtimeTestBundle: URL?
     private var touchAuthorized = false
     private var generation = UUID()
+    @Published private(set) var setupInProgress = false
+    @Published private(set) var setupBlocker: String?
+    private var setupAttempt: UUID?
     private var operationInFlight = false
     private var stopping = false
     private var terminationObserver: NSObjectProtocol?
@@ -122,23 +162,112 @@ final class IPadUseController: ObservableObject {
     func discover() async {
         guard !busy, !connected else { return }
         busy = true
+        setupBlocker = nil
         defer { busy = false }
         do {
+            do {
+                _ = try await Self.run(arguments: ["--find", "devicectl"], capture: true)
+            } catch {
+                setupBlocker = "xcode_tools_required"
+                throw IPadUseError(description: "Mac 尚未提供可用的 iPad 裝置工具；需要安裝或選取完整 Xcode。")
+            }
             devices = try await Self.discoverDevices()
             state = devices.isEmpty ? "未找到已信任且 USB 連接的 iPad；請解鎖並確認信任。" : "找到 \(devices.count) 台 USB iPad"
-        } catch { state = error.localizedDescription }
+        } catch {
+            devices = []
+            if setupBlocker == nil { setupBlocker = "device_discovery_failed" }
+            state = error.localizedDescription
+        }
+    }
+
+    /// OS preparation is diagnostic until a person confirms the device scope in UI.
+    /// Never infer device consent from a model-supplied permission field.
+    func prepare(caller: UUID) async -> [String: Any] {
+        if !busy, !connected, !setupInProgress, !stopping, !stopUnconfirmed {
+            await discover()
+        }
+        var result = status(caller: caller)
+        result["devices"] = devices.map { ["id": $0.id, "name": $0.name] }
+        result["setupRequired"] = testBundle == nil
+        result["nextAction"] = Self.setupNextAction(
+            authorized: result["authorizedForCaller"] as? Bool == true,
+            busy: busy || setupInProgress || operationInFlight || buildProcess != nil,
+            stopPending: stopping || stopUnconfirmed,
+            ownedElsewhere: authorized && owner != caller,
+            deviceCount: devices.count, hasBundle: testBundle != nil)
+        if let setupBlocker, !connected, !busy, !setupInProgress {
+            result["nextAction"] = setupBlocker
+        }
+        result["settingsLocation"] = "OS → 設備 → iPad USE"
+        return result
+    }
+
+    static func setupNextAction(authorized: Bool, busy: Bool, stopPending: Bool,
+                               ownedElsewhere: Bool, deviceCount: Int, hasBundle: Bool) -> String {
+        if stopPending { return "confirm_device_stopped" }
+        if busy { return "wait" }
+        if ownedElsewhere { return "device_owned_by_another_thread" }
+        if authorized { return "operate" }
+        if deviceCount == 0 { return "connect_unlock_and_trust" }
+        if deviceCount > 1 { return "select_device" }
+        return hasBundle ? "confirm_device_control" : "confirm_setup_and_control"
+    }
+
+    /// Called only by the device consent UI. One confirmation covers preparation,
+    /// connection and the existing thread-bound control grant.
+    func setupAndAuthorize(_ selected: IPadUseDevice, threadID: UUID) async {
+        guard !setupInProgress, !busy, buildProcess == nil, !stopping, !stopUnconfirmed,
+              !authorized || owner == threadID else { return }
+        let attempt = UUID()
+        setupAttempt = attempt
+        setupInProgress = true
+        defer {
+            if setupAttempt == attempt {
+                setupAttempt = nil
+                setupInProgress = false
+            }
+        }
+        if !connected {
+            if testBundle.map({ !Self.isTatwoTestBundle($0) }) ?? true {
+                await buildDevice(selected)
+            }
+            guard setupAttempt == attempt, !Task.isCancelled,
+                  testBundle.map({ Self.isTatwoTestBundle($0) }) == true else { return }
+        }
+        guard setupAttempt == attempt, !Task.isCancelled else { return }
+        await connectAndAuthorize(selected, threadID: threadID)
+        guard setupAttempt == attempt, !Task.isCancelled,
+              status(caller: threadID)["authorizedForCaller"] as? Bool == true else { return }
+        do {
+            _ = try await perform("ipad_screenshot", params: [:], caller: threadID)
+            if setupAttempt == attempt { state = "iPad 已可操作" }
+        } catch {
+            if setupAttempt == attempt { state = error.localizedDescription }
+        }
     }
 
     func buildDevice(_ selected: IPadUseDevice) async {
-        guard !busy, !connected else { return }
+        guard !busy, !connected, buildProcess == nil else { return }
         busy = true
+        let buildAttempt = generation
+        setupBlocker = nil
         state = "正在以本機 Xcode 建立 TATWO iPad use…"
-        defer { busy = false }
+        defer {
+            buildProcess = nil
+            if generation == buildAttempt { busy = false }
+        }
         do {
             guard let fresh = try await Self.discoverDevices().first(where: { $0.id == selected.id }) else {
                 throw IPadUseError(description: "USB iPad 已中斷或信任狀態改變。")
             }
-            let teams = try await Self.signingTeams()
+            try checkGeneration(buildAttempt)
+            let teams: [String]
+            do { teams = try await Self.signingTeams() }
+            catch {
+                setupBlocker = "apple_signing_setup_required"
+                throw error
+            }
+            try checkGeneration(buildAttempt)
             let project = try Self.deviceProjectURL()
             let derived = Self.runtimeDirectory.appendingPathComponent("device-build", isDirectory: true)
             let logURL = Self.runtimeDirectory.appendingPathComponent("device-build.log")
@@ -148,12 +277,15 @@ final class IPadUseController: ObservableObject {
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
             var built = false
             for team in teams {
+                try checkGeneration(buildAttempt)
                 do {
+                    let process = IPadUseBuildProcess()
+                    buildProcess = process
                     try await Self.run(arguments: ["xcodebuild", "build-for-testing", "-project", project.path,
                                                    "-scheme", "TatwoIPadDevice", "-destination", "id=\(fresh.id)",
                                                    "-derivedDataPath", derived.path, "DEVELOPMENT_TEAM=\(team)",
                                                    "-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration",
-                                                   "-jobs", "2"], logURL: logURL)
+                                                   "-jobs", "2"], logURL: logURL, process: process)
                     built = true
                     break
                 } catch { continue }
@@ -161,7 +293,9 @@ final class IPadUseController: ObservableObject {
             guard built else {
                 throw IPadUseError(description: "Xcode 無法使用現有帳號簽署；請在 Xcode → Settings → Accounts 登入後重試。")
             }
+            try checkGeneration(buildAttempt)
             try await Self.brandRunner(in: derived)
+            try checkGeneration(buildAttempt)
             try Self.verifyRunnerIdentity(in: derived)
             guard let bundle = Self.findTestBundle(in: derived) else {
                 throw IPadUseError(description: "建置完成但找不到 TATWO 設備檔案。")
@@ -170,7 +304,7 @@ final class IPadUseController: ObservableObject {
             UserDefaults.standard.set(bundle.path, forKey: "ipadUse.testBundle")
             devices = [fresh]
             state = "TATWO iPad use 已建立；首次使用請在 iPad 親自信任開發者 App。"
-        } catch { state = error.localizedDescription }
+        } catch { if generation == buildAttempt { state = error.localizedDescription } }
     }
 
     static func discoverDevices() async throws -> [IPadUseDevice] {
@@ -179,8 +313,36 @@ final class IPadUseController: ObservableObject {
                                                attributes: [.posixPermissions: 0o700])
         let output = directory.appendingPathComponent("devices.json")
         defer { try? FileManager.default.removeItem(at: directory) }
-        try await run(arguments: ["devicectl", "list", "devices", "--timeout", "10", "--json-output", output.path])
-        return try IPadUseDevice.decode(Data(contentsOf: output))
+        func snapshot() async throws -> Data {
+            try await run(arguments: ["devicectl", "list", "devices", "--timeout", "10", "--json-output", output.path])
+            return try Data(contentsOf: output)
+        }
+        return try await resolveDiscovery(snapshot(), prepare: { identifier in
+            // CoreDevice lists a paired USB device before its tunnel is active.
+            // A normal information query establishes it; no pairing or consent changes.
+            _ = try await run(arguments: ["devicectl", "device", "info", "details", "--device", identifier,
+                                      "--timeout", "20", "--json-output",
+                                      directory.appendingPathComponent("details.json").path])
+        }, refresh: { try await snapshot() })
+    }
+
+    static func resolveDiscovery(_ initial: Data,
+                                 prepare: (String) async throws -> Void,
+                                 refresh: () async throws -> Data) async throws -> [IPadUseDevice] {
+        let pending = try IPadUseDevice.pendingTunnelIdentifiers(initial)
+        guard !pending.isEmpty else { return try IPadUseDevice.decode(initial) }
+        for identifier in pending {
+            // A failed device must not hide other usable iPads. Re-read the live
+            // list even after failure; never reuse a cached address or ready row.
+            do { try await prepare(identifier) } catch is CancellationError { throw CancellationError() }
+            catch { continue }
+        }
+        let current = try await refresh()
+        let ready = try IPadUseDevice.decode(current)
+        if ready.isEmpty, !(try IPadUseDevice.pendingTunnelIdentifiers(current)).isEmpty {
+            throw IPadUseError(description: "已找到已信任的 USB iPad，但 Xcode 尚未建立裝置通訊。請在 Xcode → Window → Devices and Simulators 查看裝置準備狀態或錯誤，再重新尋找。")
+        }
+        return ready
     }
 
     func connect(_ selected: IPadUseDevice) async {
@@ -312,6 +474,9 @@ final class IPadUseController: ObservableObject {
     }
 
     func stop(message: String = "已停止；裝置信任未撤銷。") {
+        setupAttempt = nil
+        setupInProgress = false
+        buildProcess?.cancel()
         guard !stopping else { return }
         let previousDevice = device
         let previousToken = token
@@ -386,12 +551,14 @@ final class IPadUseController: ObservableObject {
          "pencilPressure": "unsupported",
          "touchAuthorizedForCaller": active && owner == caller && touchAuthorized,
          "authorizationExpired": false,
-         "busy": operationInFlight || busy, "deviceStopPending": stopping,
+         "setupBlocker": setupBlocker ?? "", "setupInProgress": setupInProgress,
+         "busy": operationInFlight || busy || setupInProgress || buildProcess != nil, "deviceStopPending": stopping,
          "deviceStopUnconfirmed": stopUnconfirmed, "state": state]
     }
 
     func perform(_ method: String, params: [String: Any], caller: UUID) async throws -> [String: Any] {
         if method == "ipad_status" { return status(caller: caller) }
+        if method == "ipad_prepare" { return await prepare(caller: caller) }
         guard connected, authorized, owner == caller, sessionID != nil, !stopping else {
             throw IPadUseError(description: "ipad_ui_consent_required_for_this_thread")
         }
@@ -728,7 +895,7 @@ final class IPadUseController: ObservableObject {
             }
         }
         guard !teams.isEmpty else {
-            throw IPadUseError(description: "找不到可用的 Xcode Team；請先在 Xcode 登入自己的 Apple Account。")
+            throw IPadUseError(description: "缺少有效的 Apple 開發簽署憑證；請在 Xcode → Settings → Accounts 確認帳號及開發憑證。")
         }
         return teams
     }
@@ -797,10 +964,10 @@ final class IPadUseController: ObservableObject {
 
     @discardableResult
     private static func run(arguments: [String], executable: String = "/usr/bin/xcrun",
-                            logURL: URL? = nil, capture: Bool = false) async throws -> Data {
+                            logURL: URL? = nil, capture: Bool = false, process suppliedProcess: IPadUseBuildProcess? = nil) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             Task.detached {
-                let process = Process()
+                let process = suppliedProcess?.process ?? Process()
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
                 let pipe = Pipe()
@@ -809,7 +976,8 @@ final class IPadUseController: ObservableObject {
                 process.standardError = capture ? pipe : (log ?? FileHandle.nullDevice)
                 process.standardInput = FileHandle.nullDevice
                 do {
-                    try process.run()
+                    if let suppliedProcess { try suppliedProcess.start() }
+                    else { try process.run() }
                     process.waitUntilExit()
                     let data = capture ? pipe.fileHandleForReading.readDataToEndOfFile() : Data()
                     try? log?.close()

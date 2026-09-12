@@ -48,8 +48,11 @@ test('iPad MCP caller binding, image response and consent error propagation', { 
     }
     const listing = await request('tools/list');
     const tools = listing.result.tools.filter(tool => tool.name.startsWith('ipad_'));
-    assert.deepEqual(tools.map(tool => tool.name), ['ipad_status', 'ipad_screenshot', 'ipad_open_app', 'ipad_touch', 'ipad_stop']);
+    assert.deepEqual(tools.map(tool => tool.name), ['ipad_prepare', 'ipad_status', 'ipad_screenshot', 'ipad_open_app', 'ipad_touch', 'ipad_stop']);
     assert.equal(tools.find(tool => tool.name === 'ipad_touch').inputSchema.properties.points.maxItems, 2);
+    await request('tools/call', { name: 'ipad_prepare', arguments: { callerThreadID: 'spoofed' } });
+    assert.equal(calls.at(-1).method, 'ipad_prepare');
+    assert.equal(calls.at(-1).params.callerThreadID, owner);
     await request('tools/call', { name: 'ipad_status', arguments: { callerThreadID: 'spoofed' } });
     assert.equal(calls.at(-1).params.callerThreadID, owner);
     const screenshot = await request('tools/call', { name: 'ipad_screenshot', arguments: {} });

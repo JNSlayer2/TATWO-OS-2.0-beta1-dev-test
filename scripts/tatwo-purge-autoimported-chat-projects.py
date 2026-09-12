@@ -177,8 +177,8 @@ def run_selftest() -> int:
             },
             {
                 "id": "drop-auto",
-                "name": "example-user",
-                "workdir": "/Users/example-user",
+                "name": "chenyawei",
+                "workdir": "/Users/chenyawei",
                 "threads": [
                     {
                         "id": imported_id,

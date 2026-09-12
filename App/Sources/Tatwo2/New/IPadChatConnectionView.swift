@@ -42,10 +42,6 @@ struct IPadChatConnectionView: View {
                       let device = controller.devices.first(where: { $0.id == id }),
                       !controller.busy, !controller.authorized,
                       !controller.stopUnconfirmed else { return }
-                guard controller.testBundle != nil else {
-                    localError = "首次使用請先在設備設定建立 iPad 連線元件。"
-                    return
-                }
                 localError = nil
                 consent = .consent(
                     device: .init(id: device.id, name: device.name), threadID: owner)
@@ -61,7 +57,7 @@ struct IPadChatConnectionView: View {
                 Task {
                     // Authorization belongs to the explicitly confirmed owner,
                     // never whichever thread is selected after this await.
-                    await controller.connectAndAuthorize(device, threadID: owner)
+                    await controller.setupAndAuthorize(device, threadID: owner)
                     if controller.status(caller: owner)["authorizedForCaller"] as? Bool != true {
                         localError = controller.state
                     }

@@ -55,7 +55,7 @@ struct DevicesCard: View {
                 Text("把這台加到另一台主機（這台當遙控器）")
                     .font(.headline)
                 HStack(spacing: 8) {
-                    TextField("主機位址（例：192.0.2.10 或 primary.example.invalid）", text: $hostField)
+                    TextField("主機位址（例：192.168.0.10 或 ssh-mac-mini.tatwo214.com）", text: $hostField)
                         .textFieldStyle(.roundedBorder)
                     TextField("配對埠", text: $portField)
                         .textFieldStyle(.roundedBorder)

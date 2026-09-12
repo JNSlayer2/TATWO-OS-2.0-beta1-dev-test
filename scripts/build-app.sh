@@ -1,13 +1,8 @@
 #!/bin/bash
-# Build with an explicitly selected persistent signing identity; never fall back to ad-hoc.
+# 打包含 CEF 的 tatwo2.app（ad-hoc 簽名）。用法：scripts/build-app.sh [dist 目錄]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
-SIGN_IDENTITY="${TATWO2_SIGN_IDENTITY:-}"
-[[ -n "$SIGN_IDENTITY" && "$SIGN_IDENTITY" != - ]] || {
-  echo 'Set TATWO2_SIGN_IDENTITY to the existing persistent signing identity; ad-hoc is not supported.' >&2
-  exit 1
-}
 OUT="${1:-dist}"
 if [[ "$OUT" != /* ]]; then
   OUT="$ROOT/$OUT"
@@ -97,9 +92,22 @@ bash "$ROOT/scripts/bundle-cli-runtime.sh" "$APP"
   || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string TATWO OS" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName TATWO OS" "$APP/Contents/Info.plist" 2>/dev/null || true
 
-# Keep the same identity and designated requirement across builds.
-tatwo_cef_sign_nested_artifacts "$APP" "$SIGN_IDENTITY" developer
-codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
+# 簽章身份：固定用 Keychain 裡的開發憑證，TCC（「取用可卸除式卷宗」允許框）才會記得同一個 App；
+# 找不到憑證才退回 ad-hoc（每次打包 cdhash 都變，TCC 會重問）。可用 TATWO2_SIGN_IDENTITY 覆寫。
+# Beta: TATWO2_SIGN_IDENTITY="TATWO OS Beta"; reuse the same certificate/key and bundle ID so the generated designated requirement stays stable.
+SIGN_IDENTITY="${TATWO2_SIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+  SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -oE '"Apple Development: [^"]+"' | head -1 | tr -d '"')"
+fi
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  echo "sign: $SIGN_IDENTITY"
+  tatwo_cef_sign_nested_artifacts "$APP" "$SIGN_IDENTITY" developer
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
+else
+  echo "sign: ad-hoc（找不到開發憑證）"
+  tatwo_cef_sign_nested_artifacts "$APP" - adhoc
+  codesign --force --sign - "$APP"
+fi
 codesign --verify --deep --strict "$APP"
 codesign -dr - "$APP" 2>&1 | grep designated | cut -c1-160
 echo "built: $APP"

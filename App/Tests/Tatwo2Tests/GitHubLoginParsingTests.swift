@@ -2,6 +2,48 @@ import XCTest
 @testable import Tatwo2
 
 final class GitHubLoginParsingTests: XCTestCase {
+    func testFinderEnvironmentIncludesHomebrew() {
+        let environment = GitHubAccountsStore.commandEnvironment(["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"])
+        XCTAssertTrue(environment["PATH"]!.components(separatedBy: ":").contains("/opt/homebrew/bin"))
+        XCTAssertTrue(environment["PATH"]!.components(separatedBy: ":").contains("/usr/local/bin"))
+    }
+
+    func testCallerGHExecutableWinsOverFallbacks() throws {
+        let fixtureRoot = ProcessInfo.processInfo.environment["TATWO_GITHUB_TEST_ROOT"]
+            ?? FileManager.default.currentDirectoryPath + "/evidence/github-login-tests"
+        let directory = URL(fileURLWithPath: fixtureRoot).appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("gh")
+        try Data("#!/bin/sh\necho fixture-gh\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["gh", "--version"]
+        process.environment = GitHubAccountsStore.commandEnvironment(["PATH": directory.path])
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "fixture-gh\n")
+    }
+
+    func testCommandEnvironmentPreservesCallerPriorityAndOtherValues() {
+        let original = ["PATH": "/fixture/bin:/usr/local/bin:/usr/bin", "GH_CONFIG_DIR": "/fixture/config"]
+        let environment = GitHubAccountsStore.commandEnvironment(original)
+        XCTAssertTrue(environment["PATH"]!.hasPrefix(original["PATH"]! + ":"))
+        XCTAssertEqual(environment["GH_CONFIG_DIR"], original["GH_CONFIG_DIR"])
+        XCTAssertEqual(environment["PATH"]!.components(separatedBy: ":").filter { $0 == "/usr/local/bin" }.count, 1)
+        XCTAssertEqual(GitHubAccountsStore.commandEnvironment(environment), environment)
+    }
+
+    func testMissingPATHReceivesCLISearchDirectories() {
+        let environment = GitHubAccountsStore.commandEnvironment([:])
+        XCTAssertTrue(environment["PATH"]!.components(separatedBy: ":").contains("/usr/bin"))
+        XCTAssertFalse(environment["PATH"]!.hasPrefix(":"))
+    }
+
     func testGHDeviceLoginSampleWithoutTrailingNewline() {
         let output = """
         ! First copy your one-time code: 1234-ABCD

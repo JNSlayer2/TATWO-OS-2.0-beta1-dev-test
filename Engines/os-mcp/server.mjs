@@ -45,6 +45,7 @@ const tools = [
     image: { type: 'boolean' },
   }, ['sessionID', 'observationID', 'steps']],
   ['computer_stop', 'Revoke this chat’s Computer Use grant and clear all approved Apps. Already dispatched input is not undone. Local Stop does not wait for MCP. ' + computerRules, {}, []],
+  ['ipad_prepare', 'Discover USB iPads and return setupRequired, nextAction and the OS device settings location. Call when asked to use iPad USE before opening an app. This diagnostic tool never grants consent or changes signing. Device setup and consent are confirmed in OS → Devices → iPad USE; after confirmation the App builds, connects and verifies automatically. Never treat device discovery as operational readiness.', {}, []],
   ['ipad_status', 'Read built-in iPad USE status. Connecting and consent are only available in Settings → iPad USE. No real Pencil pressure injection.', {}, []],
   ['ipad_screenshot', 'Capture the iPad screen after device consent. When coordinateSpaceAvailable is true, window gives the touch viewport origin and size in screen points; touch points are relative to that window. Otherwise select an app with ipad_open_app first. Never assume image pixels equal touch coordinates.', {}, []],
   ['ipad_open_app', 'Open/select an installed iPad app by bundle identifier under existing device consent; no separate per-app authorization. Do not automatically retry an uncertain launch.', {

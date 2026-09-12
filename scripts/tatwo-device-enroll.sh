@@ -42,7 +42,7 @@ set -euo pipefail
 
 ROLE="secondary"
 NAME="$(hostname -s 2>/dev/null || echo device)"
-PRIMARY_HOST="tatwo-primary"
+PRIMARY_HOST="ssh-mac-mini.tatwo214.com"
 REPO="$HOME/tatwo-ultrawork"
 REPO_URL="https://github.com/tatwo214/tatwo-ultrawork.git"
 BRANCH="release/tatwo-os"

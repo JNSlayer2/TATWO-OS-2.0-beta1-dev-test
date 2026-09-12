@@ -88,6 +88,56 @@ struct IPadUseChecks {
         for replaced in [wire.replacingOccurrences(of: "wired", with: "network"), wire.replacingOccurrences(of: "paired", with: "unpaired"), wire.replacingOccurrences(of: "connected", with: "unavailable")] {
             check(try IPadUseDevice.decode(Data(replaced.utf8)).isEmpty, "reject disconnected or untrusted transport")
         }
+        let readyData = Data(wire.utf8)
+        let dormantData = Data(wire.replacingOccurrences(of: "connected", with: "disconnected").utf8)
+        let readyID = try IPadUseDevice.decode(readyData)[0].id
+        check(try IPadUseDevice.pendingTunnelIdentifiers(dormantData) == [readyID], "paired USB iPad is discoverable before tunnel exists")
+        for replacement in [wire.replacingOccurrences(of: "wired", with: "localNetwork"),
+                            wire.replacingOccurrences(of: "paired", with: "unpaired"),
+                            wire.replacingOccurrences(of: "iPad", with: "iPhone"),
+                            wire.replacingOccurrences(of: readyID, with: "invalid-id")] {
+            let data = Data(replacement.replacingOccurrences(of: "connected", with: "disconnected").utf8)
+            check(try IPadUseDevice.pendingTunnelIdentifiers(data).isEmpty, "do not prepare ineligible device")
+        }
+        var preparedDevices: [String] = []
+        var refreshes = 0
+        let recovered = try await IPadUseController.resolveDiscovery(dormantData, prepare: { preparedDevices.append($0) }, refresh: {
+            refreshes += 1
+            return readyData
+        })
+        check(recovered.count == 1 && preparedDevices == [readyID] && refreshes == 1, "lazy tunnel is prepared once and confirmed by fresh inventory")
+        let alreadyReady = try await IPadUseController.resolveDiscovery(readyData, prepare: { _ in fatalError("unnecessary prepare") }, refresh: {
+            fatalError("unnecessary refresh")
+        })
+        check(alreadyReady.count == 1, "ready inventory avoids extra device requests")
+        for prepareFails in [false, true] {
+            do {
+                _ = try await IPadUseController.resolveDiscovery(dormantData, prepare: { _ in
+                    if prepareFails { throw IPadUseError(description: "fixture failure") }
+                }, refresh: { dormantData })
+                fatalError("unavailable tunnel was accepted")
+            } catch {
+                check(String(describing: error).contains("Xcode 尚未建立裝置通訊"), "persistent tunnel failure reports the actual connection stage")
+            }
+        }
+        let gone = try await IPadUseController.resolveDiscovery(dormantData, prepare: { _ in }, refresh: { Data("{\"result\":{\"devices\":[]}}".utf8) })
+        check(gone.isEmpty, "unplugged device is not returned from stale inventory")
+        let wireless = try await IPadUseController.resolveDiscovery(dormantData, prepare: { _ in }, refresh: {
+            Data(wire.replacingOccurrences(of: "wired", with: "localNetwork").utf8)
+        })
+        check(wireless.isEmpty, "post-query wireless transport is rejected")
+        do {
+            _ = try await IPadUseController.resolveDiscovery(dormantData, prepare: { _ in }, refresh: {
+                Data(wire.replacingOccurrences(of: "fd00::1", with: "2001:db8::1").utf8)
+            })
+            fatalError("nonlocal tunnel address accepted")
+        } catch { check(true, "post-query endpoint still requires a local IPv6 address") }
+        do {
+            _ = try await IPadUseController.resolveDiscovery(dormantData, prepare: { _ in throw CancellationError() }, refresh: {
+                fatalError("cancelled query refreshed inventory")
+            })
+            fatalError("cancelled discovery continued")
+        } catch { check(error is CancellationError, "cancelled discovery stops preparation") }
         let controller = IPadUseController()
         let caller = UUID()
         let status = controller.status(caller: caller)
@@ -182,6 +232,30 @@ struct IPadUseChecks {
         try? FileManager.default.removeItem(at: source)
         try? FileManager.default.removeItem(at: foreign)
         try? FileManager.default.removeItem(at: prepared)
+        let setupCases: [(Bool, Bool, Bool, Bool, Int, Bool, String)] = [
+            (true, false, false, false, 1, true, "operate"),
+            (true, false, true, false, 1, true, "confirm_device_stopped"),
+            (false, true, false, false, 1, true, "wait"),
+            (false, false, false, true, 1, true, "device_owned_by_another_thread"),
+            (false, false, false, false, 0, false, "connect_unlock_and_trust"),
+            (false, false, false, false, 2, false, "select_device"),
+            (false, false, false, false, 1, false, "confirm_setup_and_control"),
+            (false, false, false, false, 1, true, "confirm_device_control")
+        ]
+        for row in setupCases {
+            precondition(IPadUseController.setupNextAction(authorized: row.0, busy: row.1,
+                stopPending: row.2, ownedElsewhere: row.3, deviceCount: row.4,
+                hasBundle: row.5) == row.6)
+            passed += 1
+        }
+        let cancelledBuild = IPadUseBuildProcess()
+        cancelledBuild.process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        cancelledBuild.cancel()
+        do {
+            try cancelledBuild.start()
+            fatalError("Cancelled build started")
+        } catch is CancellationError { passed += 1 }
+
         print("RESULT tests=\(passed) failed=0 skipped=0")
     }
 }

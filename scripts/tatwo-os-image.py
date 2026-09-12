@@ -344,10 +344,7 @@ def kickstart_gateway() -> None:
     if os.environ.get("TATWO_OS_IMAGE_SKIP_HEALTHZ") == "1":
         return
     uid = os.getuid()
-    service = os.environ.get("TATWO_GATEWAY_LAUNCH_AGENT_LABEL")
-    if not service:
-        return
-    label = f"gui/{uid}/{service}"
+    label = f"gui/{uid}/com.chenyawei.codex-model-gateway"
     subprocess.call(
         ["launchctl", "kickstart", "-k", label],
         stdout=subprocess.DEVNULL,

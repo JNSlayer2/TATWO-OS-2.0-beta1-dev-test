@@ -45,7 +45,7 @@ set -euo pipefail
 # ---- 設定（env 可覆寫） ----
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_BRANCH="${TATWO_RELEASE_BRANCH:-release/tatwo-os}"
-PRIMARY_SSH_HOST="${TATWO_PRIMARY_SSH_HOST:-tatwo-primary}"
+PRIMARY_SSH_HOST="${TATWO_PRIMARY_SSH_HOST:-ssh-mac-mini.tatwo214.com}"
 APP_SUPPORT="${TATWO_APP_SUPPORT:-$HOME/Library/Application Support/Tatwo Ultrawork}"
 REMOTE_APP_SUPPORT="${TATWO_REMOTE_APP_SUPPORT:-$APP_SUPPORT}"
 DEVICE_NAME="${TATWO_DEVICE_NAME:-$(hostname -s 2>/dev/null || echo device)}"

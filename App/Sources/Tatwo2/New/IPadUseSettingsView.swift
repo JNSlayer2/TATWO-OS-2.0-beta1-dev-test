@@ -86,10 +86,10 @@ struct IPadUseSettingsView: View {
         .confirmationDialog("連接並授權這台 iPad？", isPresented: $showQuickConsent) {
             Button("同意並連接") {
                 guard let quickDevice, let consentThreadID, consentThreadID == threadID else { return }
-                Task { await controller.connectAndAuthorize(quickDevice, threadID: consentThreadID) }
+                Task { await controller.setupAndAuthorize(quickDevice, threadID: consentThreadID) }
             }
         } message: {
-            Text("一次完成連接與目前討論串授權，直到停止或連線中斷。AI 可選擇 App、擷取 iPad 畫面並執行觸控；雲端模型會接收截圖，觸控可能修改裝置上的內容。")
+            Text("一次完成必要的元件建置、安裝、連接與目前討論串授權，直到停止或連線中斷。AI 可選擇 App、擷取 iPad 畫面並執行觸控；雲端模型會接收截圖，觸控可能修改裝置上的內容。")
         }
         .confirmationDialog("授權目前討論串？", isPresented: $showAuthorization) {
             Button("同意授權") {
@@ -110,30 +110,32 @@ struct IPadUseSettingsView: View {
 
     private var setup: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("1 · 連接與信任").font(.subheadline.bold())
+            Text("連接 iPad").font(.subheadline.bold())
             Text("以 USB 連接、解鎖 iPad，親自確認信任並啟用開發者模式；Mac 需要完整 Xcode。")
                 .font(.caption).foregroundStyle(.secondary)
             Button("重新尋找 USB iPad") { Task { await controller.discover() } }
                 .disabled(controller.busy)
-            Text("2 · TATWO iPad use").font(.subheadline.bold())
-            Text("由 App 內建的 TATWO 裝置專案建立；Apple 登入與私鑰只由 Xcode 和鑰匙圈管理。")
+            Text("自動準備").font(.subheadline.bold())
+            Text("確認後會自動準備元件、連線並檢查畫面；需要你操作時會顯示原因。")
                 .font(.caption).foregroundStyle(.secondary)
             ForEach(controller.devices) { device in
                 HStack {
                     Label(device.name, systemImage: "ipad")
                     Spacer()
-                    Button("建立／更新設備") {
-                        deviceToBuild = device
-                        showBuildConsent = true
-                    }.disabled(controller.busy)
-                    Button("連接並授權") {
+                    Button("設定並開始使用") {
                         quickDevice = device
                         consentThreadID = threadID
                         showQuickConsent = true
-                    }.disabled(controller.busy || controller.testBundle == nil || threadID == nil)
+                    }.disabled(controller.busy || controller.setupInProgress || threadID == nil)
                 }
             }
-            DisclosureGroup("進階：使用自行建置的設備檔案") {
+            DisclosureGroup("進階：設備元件與診斷") {
+                ForEach(controller.devices) { device in
+                    Button("重新建立元件：\(device.name)") {
+                        deviceToBuild = device
+                        showBuildConsent = true
+                    }.disabled(controller.busy || controller.setupInProgress)
+                }
                 HStack {
                     Button("選擇設備檔案") { controller.chooseTestBundle() }
                         .disabled(controller.busy)
@@ -141,7 +143,7 @@ struct IPadUseSettingsView: View {
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
-            Text("按一次「連接並授權」即可由目前討論串使用；不限定 App，工作與等待不因五分鐘限制中斷，可隨時按「立即停止」。")
+            Text("首次確認涵蓋元件建置、安裝及本次控制。可隨時按「立即停止」。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

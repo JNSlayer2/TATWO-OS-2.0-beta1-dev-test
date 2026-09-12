@@ -36,7 +36,7 @@ nice -n 10 swiftc -swift-version 5 -parse-as-library -num-threads 2 "$1" -o "$2"
     const run = spawnSync(binary, [], { encoding: 'utf8', timeout: longSession ? 330_000 : 15_000 });
     process.stdout.write(run.stdout);
     assert.equal(run.status, 0, run.stderr || String(run.error));
-    assert.match(run.stdout, /RESULT tests=71 failed=0 skipped=0/);
+    assert.match(run.stdout, /RESULT tests=93 failed=0 skipped=0/);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

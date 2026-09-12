@@ -22,6 +22,10 @@ struct DevicesPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            GroupBox {
+                IPadUseSettingsView(threadID: chatModel.selectedThreadID)
+                    .frame(minHeight: 360, idealHeight: 480, maxHeight: 600)
+            }
             DeviceCrossSyncCard(
                 chatModel: chatModel,
                 deviceSnapshotProvider: deviceSnapshotProvider

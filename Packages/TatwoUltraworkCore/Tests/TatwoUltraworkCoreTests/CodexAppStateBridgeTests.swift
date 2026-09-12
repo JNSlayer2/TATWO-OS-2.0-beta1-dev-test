@@ -601,8 +601,8 @@ struct CodexAppStateBridgeTests {
       threads: [],
       projects: [
         TatwoNativeChatProject(
-          name: "example-user",
-          workdir: "/Users/example-user",
+          name: "chenyawei",
+          workdir: "/Users/chenyawei",
           threads: [
             TatwoNativeChatThread(
               id: overlayProjectThreadID,
