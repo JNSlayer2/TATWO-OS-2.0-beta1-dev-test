@@ -16,4 +16,4 @@ curl -fsSL https://raw.githubusercontent.com/tatwo214/TATWO-OS-2.0-beta1-dev-tes
 在 App 使用 `/feedback` 回報問題（附重現步驟與版本，先移除個人資訊），使用 `/pr` 啟動貢獻流程。公開提交不得包含金鑰、帳號資料或私人紀錄。
 
 ## 授權與注意事項
-本版採原始碼可閱覽的 beta 授權，並非無限制的開源授權；條款以根目錄 `LICENSE` 為準，安全問題請參閱 `SECURITY.md`。測試 App 使用 ad-hoc 簽名，不代表已通過 Apple 公證；macOS 可能要求你自行在系統設定允許開啟。請確認來源、保留備份，勿用測試版處理唯一副本的重要資料。
+本版採原始碼可閱覽的 beta 授權，並非無限制的開源授權；條款以根目錄 `LICENSE` 為準，安全問題請參閱 `SECURITY.md`。歷史測試產物可能使用 ad-hoc 簽名；目前建置與更新流程禁止 ad-hoc，並要求更新前後簽章身分相容。固定 Beta 簽章不代表 Apple 公證；首次自動安裝必須通過 macOS 安全檢查。詳見 [簽章與更新政策](docs/update-signing.md)。請確認來源、保留備份，勿用測試版處理唯一副本的重要資料。

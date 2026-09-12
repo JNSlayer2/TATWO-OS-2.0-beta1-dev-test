@@ -684,18 +684,18 @@ final class ChatPageModel: ObservableObject {
             && environment["TATWO2_SELFTEST"] != "1"
         // 匯出（金樣）模式給兩台假設備，讓設定頁「設備」卡看得到清單的長相
         let fixtureDevices: [DeviceRecord] = [
-            DeviceRecord(id: "fixture-macbook", name: "MacBook（出門用）", host: "192.168.0.225", user: "chenyawei", sshPort: 22,
+            DeviceRecord(id: "fixture-macbook", name: "MacBook（出門用）", host: "192.0.2.10", user: "example-user", sshPort: 22,
                          publicKeyFingerprint: "SHA256:qJ3v9nQb1xKfP2wYzR8tL4mH7cD0eA5sV6uB9nC1xYz", addedAt: Date(timeIntervalSinceReferenceDate: 799_000_000),
                          lastSeenAt: Date(timeIntervalSinceReferenceDate: 800_000_000), workdirMap: [:]),
-            DeviceRecord(id: "fixture-studio", name: "工作室 Studio", host: "ssh-studio.tatwo214.com", user: "layer2", sshPort: 22,
+            DeviceRecord(id: "fixture-studio", name: "工作室 Studio", host: "studio.example.invalid", user: "demo", sshPort: 22,
                          publicKeyFingerprint: "SHA256:aB8cD3eF6gH9iJ2kL5mN8oP1qR4sT7uV0wX3yZ6aB9c", addedAt: Date(timeIntervalSinceReferenceDate: 798_500_000),
                          lastSeenAt: Date(timeIntervalSinceReferenceDate: 799_900_000), workdirMap: [:]),
         ]
         if liveMode { self.devices = deviceRegistry.list() } else { self.devices = fixtureDevices }
         if !liveMode {
             self.gitHubAccounts = [
-                GitHubAccountRecord(username: "tatwo214", displayName: "tatwo214（刺青與 OS）", addedAt: Date(timeIntervalSinceReferenceDate: 799_000_000), scopes: ["repo", "workflow"], isDefault: true, folderMappings: [], mcpAlwaysOn: true),
-                GitHubAccountRecord(username: "JNSlayer2", displayName: "JNSlayer2（幼兒園研發部）", addedAt: Date(timeIntervalSinceReferenceDate: 799_500_000), scopes: ["repo"], isDefault: false, folderMappings: ["\(NSHomeDirectory())/Library/Application Support/tatwo2/repos/jns"], mcpAlwaysOn: false),
+                GitHubAccountRecord(username: "demo-personal", displayName: "Demo Personal", addedAt: Date(timeIntervalSinceReferenceDate: 799_000_000), scopes: ["repo", "workflow"], isDefault: true, folderMappings: [], mcpAlwaysOn: true),
+                GitHubAccountRecord(username: "demo-team", displayName: "Demo Team", addedAt: Date(timeIntervalSinceReferenceDate: 799_500_000), scopes: ["repo"], isDefault: false, folderMappings: ["\(NSHomeDirectory())/Library/Application Support/tatwo2/repos/demo-team"], mcpAlwaysOn: false),
             ]
             self.gitHubHelperInstalled = true
         }

@@ -4,6 +4,31 @@ set -euo pipefail
 RETRY='curl -fsSL https://raw.githubusercontent.com/tatwo214/TATWO-OS-2.0-beta1-dev-test/main/install.sh | bash'
 REPO=tatwo214/TATWO-OS-2.0-beta1-dev-test
 TEMP=""
+DEST="/Applications/TATWO OS.app"
+STAGE=""
+PREVIOUS=""
+LOCK=""
+REPLACED=0
+COMMITTED=0
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ "$COMMITTED" == 0 ]]; then
+    # Infer rename completion as well, covering a signal immediately after mv.
+    if [[ -n "$STAGE" && ! -e "$STAGE/TATWO OS.app" && -e "$DEST" && "$REPLACED" == 1 ]]; then
+      mv "$DEST" "$STAGE/failed.app.disabled" || exit 1
+    fi
+    if [[ -n "$PREVIOUS" && -e "$PREVIOUS" && ! -e "$DEST" && ! -L "$DEST" ]]; then
+      mv "$PREVIOUS" "$DEST" || exit 1
+      printf '已恢復舊版 App。\n' >&2
+    fi
+  fi
+  [[ -z "$LOCK" ]] || rmdir "$LOCK" || true
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 fail() { printf '安裝失敗：%s\n重試：%s\n' "$1" "$RETRY" >&2; exit 1; }
 trap 'fail "指令失敗（第 $LINENO 行）；暫存與備份保留，不會刪除原有資料。"' ERR
 ENDPOINT="https://api.github.com/repos/$REPO/releases/latest"
@@ -46,17 +71,76 @@ done < <(unzip -Z1 "$TEMP/TATWO-OS.zip")
 unzip -q "$TEMP/TATWO-OS.zip" -d "$TEMP/unpacked"
 SOURCE="$TEMP/unpacked/TATWO OS.app"
 [[ -d "$SOURCE" && ! -L "$SOURCE" && -f "$SOURCE/Contents/Info.plist" ]] || fail "附件內沒有有效的 TATWO OS.app"
-printf '正在移除下載隔離標記（公測版未經 Apple 公證）…\n'
-xattr -dr com.apple.quarantine "$SOURCE"
-DEST="/Applications/TATWO OS.app"
+# SHA-256 checks transport integrity; a valid persistent signature checks app identity.
+verify_signed_app() {
+  local app="$1" details
+  [[ -d "$app" && ! -L "$app" ]] || fail "App 路徑無效"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == ai.tatwo.tatwo2 ]] || fail "App 識別碼不符"
+  codesign --verify --deep --strict "$app" || fail "App 簽章驗證失敗"
+  details="$(codesign -dv "$app" 2>&1)" || fail "無法讀取簽章"
+  [[ "$details" != *Signature=adhoc* ]] || fail "ad-hoc 版本需先完成一次簽章身分遷移；未變更既有 App"
+}
+verify_continuity() {
+  local requirement
+  verify_signed_app "$1"
+  verify_signed_app "$2"
+  requirement="$(codesign -dr - "$1" 2>&1 | sed -n 's/^designated => //p')"
+  [[ -n "$requirement" ]] || fail "無法讀取既有簽章身分"
+  codesign --verify --deep --strict -R "$requirement" "$2" || fail "新版簽章身分不相容"
+  requirement="$(codesign -dr - "$2" 2>&1 | sed -n 's/^designated => //p')"
+  [[ -n "$requirement" ]] || fail "無法讀取新版簽章身分"
+  codesign --verify --deep --strict -R "$requirement" "$1" || fail "新版簽章要求不相容"
+}
+verify_signed_app "$SOURCE"
 [[ -w /Applications ]] || fail "沒有 /Applications 寫入權限，請使用具權限的帳號"
-if [[ -e "$DEST" || -L "$DEST" ]]; then
-  [[ ! -e "$DEST.previous" && ! -L "$DEST.previous" ]] || fail "已存在 TATWO OS.app.previous；請先自行移到安全位置再重試，不會覆蓋備份"
-  printf '正在保留舊版為 TATWO OS.app.previous…\n'
-  mv "$DEST" "$DEST.previous"
+# Serialize installers before inspecting the installed baseline.
+if mkdir /Applications/.tatwo-update.lock 2>/dev/null; then
+  LOCK=/Applications/.tatwo-update.lock
+else
+  fail "另一個更新正在執行，或先前更新中斷；請確認後再處理更新鎖"
 fi
-printf '正在安裝至 Applications…\n'
-ditto "$SOURCE" "$DEST"
-printf '安裝完成，正在開啟 TATWO OS；若舊版仍在執行，請退出後重新開啟。\n'
+# Do not silently move development copies or reset their TCC grants.
+for OTHER in /Applications/tatwo2.app "$HOME/Applications/tatwo2.app" "$HOME/Applications/TATWO OS.app"; do
+  if [[ -e "$OTHER" || -L "$OTHER" ]]; then
+    ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$OTHER/Contents/Info.plist" 2>/dev/null || true)"
+    [[ "$ID" != ai.tatwo.tatwo2 ]] || fail "發現舊安裝位置：$OTHER；請先封存並完成一次安裝位置遷移"
+  fi
+done
+[[ ! -L "$DEST" ]] || fail "安裝目標是符號連結；未變更 App"
+if [[ -e "$DEST" ]]; then
+  verify_continuity "$DEST" "$SOURCE"
+else
+  # First installation has no local trust anchor. Require Apple's distribution assessment.
+  spctl --assess --type execute "$SOURCE" || fail "首次安裝未通過 macOS 安全檢查；不會移除隔離標記"
+fi
+pgrep -x tatwo2 >/dev/null && fail "請先儲存工作並退出 TATWO OS，再執行更新"
+STAGE="$(mktemp -d /Applications/.tatwo-update.XXXXXX)"
+mv "$STAGE" "$STAGE.noindex"
+STAGE="$STAGE.noindex"
+ditto "$SOURCE" "$STAGE/TATWO OS.app"
+verify_signed_app "$STAGE/TATWO OS.app"
+if [[ -e "$DEST" ]]; then
+  verify_continuity "$DEST" "$STAGE/TATWO OS.app"
+fi
+pgrep -x tatwo2 >/dev/null && fail "TATWO OS 已重新啟動；請退出後重試"
+# Staging and destination share a filesystem; rename only after full validation.
+if [[ -e "$DEST" ]]; then
+  PREVIOUS="$STAGE/previous.app.disabled"
+  mv "$DEST" "$PREVIOUS"
+fi
+REPLACED=1
+mv "$STAGE/TATWO OS.app" "$DEST"
+verify_signed_app "$DEST"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -f "$DEST"
 open "$DEST"
-printf '下載暫存保留於：%s\n' "$TEMP"
+COMMITTED=1
+# Keep rollback material outside Applications and outside normal app discovery.
+# If archival fails, the unique .noindex staging directory still preserves it.
+ARCHIVES="$HOME/Library/Application Support/TATWO OS/UpdateArchives"
+ARCHIVE="$ARCHIVES/$(basename "$STAGE")"
+if ! mkdir -p "$ARCHIVES" || ! mv "$STAGE" "$ARCHIVE"; then
+  ARCHIVE="$STAGE"
+  printf '新版已啟動，備份仍保留在暫存位置。\n' >&2
+fi
+printf '更新完成。備份保留於：%s\n下載暫存保留於：%s\n' "$ARCHIVE" "$TEMP"

@@ -1,0 +1,29 @@
+name: Update policy
+on:
+  pull_request:
+  push:
+    branches: [main, 'fix/stable-signing-updates']
+permissions:
+  contents: read
+jobs:
+  policy:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer and signing policy fixtures
+        run: python3 tests/update-signing.test.py
+      - name: Sanitized data fixtures
+        run: |
+          python3 scripts/tatwo-data-sync.py selftest-merge
+          python3 scripts/tatwo-purge-autoimported-chat-projects.py --selftest
+      - name: Shell and Swift syntax
+        run: |
+          bash -n install.sh
+          bash -n public/install.sh
+          bash -n scripts/build-app.sh
+          bash -n scripts/package-release.sh
+          bash -n scripts/verify-update-identity.sh
+          bash -n scripts/tatwo-device-sync.sh
+          bash -n scripts/tatwo-device-enroll.sh
+          swiftc -frontend -parse App/Sources/Tatwo2/New/ComputerUseController.swift App/Sources/Tatwo2/New/DevicesCard.swift App/Sources/Tatwo2/Facade/ChatPageModel.swift
+      - run: git diff --check

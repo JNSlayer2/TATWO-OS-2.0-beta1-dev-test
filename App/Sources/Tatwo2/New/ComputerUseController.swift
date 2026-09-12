@@ -437,8 +437,11 @@ final class ComputerUseController {
         if ComputerUseConsentPrompt.shared.hostAvailable {
             guard granted == nil, pendingConsent == nil else { throw ComputerUseFailure("computer_busy_or_no_chat_window") }
             guard nativeCall.pendingID == nil else { throw ComputerUseFailure("computer_native_operation_still_pending") }
-            guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {
-                throw ComputerUseFailure("computer_system_permissions_required:enable_TATWO_Accessibility_and_Screen_Recording")
+            guard AXIsProcessTrusted() else {
+                throw ComputerUseFailure("computer_system_permissions_required:enable_TATWO_Accessibility")
+            }
+            guard CGPreflightScreenCaptureAccess() else {
+                throw ComputerUseFailure("computer_system_permissions_required:enable_TATWO_Screen_Recording")
             }
             let epoch = session.currentEpoch
             let token = ComputerUseConsentPrompt.shared
@@ -469,10 +472,13 @@ final class ComputerUseController {
         // Fallback when there is no Island: the sheet on the chat window, without activating TATWO.
         parent.orderFront(nil)
         guard nativeCall.pendingID == nil else { throw ComputerUseFailure("computer_native_operation_still_pending") }
-        guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {
+        guard AXIsProcessTrusted() else {
             // Granting system permissions remains a real macOS user operation.
             // This service neither writes TCC nor borrows another App's grant.
-            throw ComputerUseFailure("computer_system_permissions_required:enable_TATWO_Accessibility_and_Screen_Recording")
+            throw ComputerUseFailure("computer_system_permissions_required:enable_TATWO_Accessibility")
+        }
+        guard CGPreflightScreenCaptureAccess() else {
+            throw ComputerUseFailure("computer_system_permissions_required:enable_TATWO_Screen_Recording")
         }
         let epoch = session.currentEpoch
         let alert = NSAlert()

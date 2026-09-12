@@ -633,8 +633,8 @@ def selftest_merge() -> int:
             "projects": [
                 {
                     "id": "proj-auto-codex",
-                    "name": "chenyawei",
-                    "workdir": "/Users/chenyawei",
+                    "name": "example-user",
+                    "workdir": "/Users/example-user",
                     "threads": [
                         {
                             "id": imported_id,
