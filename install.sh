@@ -43,14 +43,16 @@ STATUS="$(curl --proto '=https' --tlsv1.2 -sSL --connect-timeout 15 --max-time 6
   -H 'Accept: application/vnd.github+json' -o "$TEMP/release.json" -w '%{http_code}' "$ENDPOINT")"
 [[ "$STATUS" != 404 ]] || fail "尚無可用版本（或指定版本不存在）"
 [[ "$STATUS" == 200 ]] || fail "GitHub 回應 HTTP ${STATUS}，請稍後重試"
-ZIP_URL="" SHA_URL="" INDEX=0
+ZIP_URL="" SHA_URL="" INSTALL_READY=0 INDEX=0
 while NAME="$(plutil -extract "assets.$INDEX.name" raw -o - "$TEMP/release.json" 2>/dev/null)"; do
   case "$NAME" in
+    TATWO-OS.install-ready) INSTALL_READY=1 ;;
     TATWO-OS.zip) ZIP_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
     TATWO-OS.zip.sha256) SHA_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
   esac
   INDEX=$((INDEX + 1))
 done
+[[ "$INSTALL_READY" == 1 ]] || fail "此 Release 尚未完成新版安裝流程驗收；未下載 App、未變更既有安裝。請等待附有 install-ready 標記的新 Release。"
 [[ -n "$ZIP_URL" && -n "$SHA_URL" ]] || fail "版本缺少 TATWO-OS.zip 或校驗檔"
 for URL in "$ZIP_URL" "$SHA_URL"; do
   [[ "$URL" == "https://github.com/$REPO/releases/download/"* ]] || fail "附件下載網址不符合公開倉庫"

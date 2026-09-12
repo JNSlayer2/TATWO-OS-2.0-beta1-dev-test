@@ -52,6 +52,9 @@ for ((i=1;i<=$#;i++)); do
   if [[ "${!i}" == -o ]]; then j=$((i+1)); out="${!j}"; fi
 done
 case "$out" in
+  *.zip|*.sha256) [[ "${NO_ARCHIVE_DOWNLOAD:-0}" != 1 ]] || { echo forbidden-archive-download >&2; exit 1; } ;;
+esac
+case "$out" in
   */release.json) cp "$FIXTURE/release.json" "$out"; printf 200 ;;
   *.sha256) cp "$FIXTURE/archive.sha256" "$out" ;;
   *.zip) cp "$FIXTURE/archive.zip" "$out" ;;
@@ -60,6 +63,7 @@ esac
         self.stub('plutil', '''case "$2" in
 assets.0.name) echo TATWO-OS.zip ;;
 assets.1.name) echo TATWO-OS.zip.sha256 ;;
+assets.2.name) [[ "${LEGACY_RELEASE:-0}" != 1 ]] || exit 1; echo TATWO-OS.install-ready ;;
 assets.0.browser_download_url) echo https://github.com/tatwo214/TATWO-OS-2.0-beta1-dev-test/releases/download/v1/TATWO-OS.zip ;;
 assets.1.browser_download_url) echo https://github.com/tatwo214/TATWO-OS-2.0-beta1-dev-test/releases/download/v1/TATWO-OS.zip.sha256 ;;
 *) exit 1 ;;
@@ -109,6 +113,14 @@ esac
         backups = list(self.home.rglob('previous.app.disabled'))
         self.assertEqual(len(backups), 2)
         self.assertEqual({(p / 'version').read_text() for p in backups}, {'old', 'new'})
+
+    def test_legacy_release_stops_before_archive_download(self):
+        self.env['LEGACY_RELEASE'] = '1'
+        self.env['NO_ARCHIVE_DOWNLOAD'] = '1'
+        result = self.install(False)
+        self.assertIn('install-ready', result.stderr)
+        self.assertNotIn('forbidden-archive-download', result.stderr)
+        self.assert_old()
 
     def test_changed_identity_rejected(self):
         (self.app / 'identity').write_text('different')
@@ -189,6 +201,51 @@ esac
             (self.app / 'identity').write_text(identity)
             result = subprocess.run(['bash', str(path), str(self.dest), str(self.app)], env=self.env, capture_output=True)
             self.assertEqual(result.returncode == 0, expected == 0, identity)
+
+    def package(self, success, bootstrap=False):
+        scripts = self.root / 'release-tools/scripts'
+        scripts.mkdir(parents=True)
+        for name in ['package-release.sh', 'verify-update-identity.sh']:
+            text = (ROOT / 'scripts' / name).read_text().replace('/usr/libexec/PlistBuddy', str(self.bin / 'plistbuddy'))
+            (scripts / name).write_text(text)
+        self.stub('plistbuddy', '\n'.join([
+            'if [[ "$2" == *CFBundleShortVersionString* ]]; then',
+            '  echo "${FIXTURE_VERSION:-2.0.1}"',
+            'else',
+            '  head -1 "${@: -1}"',
+            'fi']))
+        self.stub('xcrun', '[[ "${DENY_STAPLE:-0}" != 1 ]]')
+        self.stub('ditto', 'if [[ "$1" == -c ]]; then touch "${@: -1}"; else cp -R "$1" "$2"; fi')
+        output = self.root / 'release-output'
+        env = dict(self.env, TATWO_OS_VERSION='v2.0.1', TATWO2_RELEASE_APP=str(self.app),
+                   TATWO2_RELEASE_BASELINE='' if bootstrap else str(self.dest),
+                   TATWO2_RELEASE_BOOTSTRAP='1' if bootstrap else '0')
+        result = subprocess.run(['bash', str(scripts / 'package-release.sh'), str(output)],
+                                env=env, capture_output=True, text=True, errors='backslashreplace')
+        self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+        self.assertEqual((output / 'TATWO-OS.install-ready').exists(), success)
+
+    def test_package_verified_update(self):
+        self.package(True)
+
+    def test_package_verified_bootstrap(self):
+        self.package(True, bootstrap=True)
+
+    def test_package_rejects_unnotarized_app(self):
+        self.env['DENY_STAPLE'] = '1'
+        self.package(False)
+
+    def test_package_rejects_gatekeeper_failure(self):
+        self.env['DENY_FIRST'] = '1'
+        self.package(False, bootstrap=True)
+
+    def test_package_rejects_version_mismatch(self):
+        self.env['FIXTURE_VERSION'] = '2.0.0'
+        self.package(False)
+
+    def test_package_rejects_identity_change(self):
+        (self.app / 'identity').write_text('different')
+        self.package(False)
 
     def test_public_entrypoints_match(self):
         self.assertEqual((ROOT / 'install.sh').read_bytes(), (ROOT / 'public/install.sh').read_bytes())

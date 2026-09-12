@@ -2,11 +2,14 @@
 
 Builds require an explicit `TATWO2_SIGN_IDENTITY`. There is no automatic certificate selection or ad-hoc fallback. Reuse the existing signing identity and bundle identifier `ai.tatwo.tatwo2`. Never create a fresh certificate for each update.
 
-Release packaging also requires `TATWO2_RELEASE_BASELINE`, pointing to a trusted, previously distributed app. Both apps must have valid non-ad-hoc signatures, the expected bundle identifier, and mutually compatible designated requirements. A certificate name or unchanged CDHash is not an identity policy. Normal code changes change the CDHash.
+Release packaging takes an already signed, notarized and stapled app via `TATWO2_RELEASE_APP`, with an app version matching `TATWO_OS_VERSION`. It does not rebuild or re-sign after notarization. Normal upgrades also require `TATWO2_RELEASE_BASELINE`, pointing to a trusted, previously distributed app. Both apps must have valid non-ad-hoc signatures, the expected bundle identifier, and mutually compatible designated requirements. A certificate name or unchanged CDHash is not an identity policy. Normal code changes change the CDHash.
 
-A new signing lineage needs a separately reviewed bootstrap or migration; the packaging gate intentionally does not bootstrap from an untrusted new artifact. Official direct distribution should use Developer ID Application and notarization. This patch does not create certificates, access private keys, notarize, or publish a binary release. Existing published binaries are unchanged.
+A new signing lineage needs a separately reviewed bootstrap or migration, explicitly selected with `TATWO2_RELEASE_BOOTSTRAP=1`. The bootstrap still requires a valid persistent signature, Gatekeeper assessment and a valid stapled ticket; it never bootstraps from an ad-hoc artifact. Official direct distribution should use Developer ID Application and notarization. This patch does not create certificates, access private keys, notarize, or publish a binary release. Existing published binaries are unchanged.
 
 ## Public installer
+
+An auto-installable Release must include `TATWO-OS.install-ready`. Releases without this marker stop before the archive download. The marker is a publishing coordination signal, not a cryptographic trust anchor; all app signature and Gatekeeper checks still apply. Packaging emits it only after signature continuity, Gatekeeper assessment, and stapled-ticket validation. The publisher must also complete the real upgrade acceptance below before publishing the marker. A source merge or passing fixture CI alone must never be advertised as a new binary release.
+
 
 `install.sh` and `public/install.sh` must remain byte-identical. The installer checks archive integrity, signature integrity, bundle identity, and compatibility with the installed app. First installation requires Gatekeeper assessment because there is no existing local baseline. Beta signatures alone do not satisfy that first-install policy. Quarantine is preserved.
 

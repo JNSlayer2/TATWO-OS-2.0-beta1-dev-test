@@ -4,7 +4,9 @@
 TATWO OS 是 macOS 上的 AI 工作介面，整合對話、模型引擎與工作流程。這是 beta1 開發測試版，功能與相容性仍在驗證中。
 
 ## 一行安裝
-打開「終端機」，貼上這一行按 Enter（會下載最新 Release、驗證 SHA-256、放進 Applications 並開啟）：
+**目前暫停自動安裝：已發布的 `v2.0.0` 尚未具備新安裝流程的發行驗收標記。原始碼更新不等於新版 App 已發行。** 下列指令會在下載 App 前清楚停止；待新的簽署安裝包驗收並發布後，才會恢復安裝。
+
+打開「終端機」，貼上這一行按 Enter（新版 Release 通過發行驗收後，會下載、驗證、安裝並開啟）：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tatwo214/TATWO-OS-2.0-beta1-dev-test/main/install.sh | bash
