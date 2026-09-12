@@ -54,3 +54,4 @@ scripts/tatwo-macbook-bootstrap.sh | email address | Lead-reviewed 2026-09-12: p
 scripts/tatwo-model-collab-presets.mjs | provider token | Lead-reviewed 2026-09-12: credential-rejection regex plus an obviously synthetic selftest key value; no real key.
 App/Sources/Tatwo2/Facade/PullRequestService.swift | email address | Lead-reviewed 2026-09-12: GitHub SSH URL prefix handling, not a mailbox.
 App/Tests/Tatwo2Tests/PullRequestServiceTests.swift | email address | Lead-reviewed 2026-09-12: GitHub SSH URL fixtures and a fixture git identity on the invalid example domain.
+tests/peer-update-source.test.mjs | email address | Peer update fixture uses a synthetic ssh target (user "sample" on the reserved .local domain), not a real mailbox.
