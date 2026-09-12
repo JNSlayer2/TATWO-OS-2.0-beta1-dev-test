@@ -1,11 +1,20 @@
 import Foundation
 import AppKit
+import CryptoKit
+import SwiftUI
 
 /// TATWO2_SELFTEST=1 時無頭跑一輪：開討論串 → 送一句 → 等結果 → 印出訊息 → 退出。給腳本驗證 Swift↔sidecar 通路用。
 enum SelfTest {
     @MainActor private static var headlessHostModel: ChatPageModel?
 
     @MainActor static func runIfRequested() {
+        if ProcessInfo.processInfo.environment["TATWO2_OSUPSTREAMREFRESHTEST"] == "1" {
+            exit(runOSUpstreamRefreshTest() ? 0 : 1)
+        }
+        if ProcessInfo.processInfo.environment["TATWO2_PLANCANVASTEST"] == "1" {
+            do { exit(try planCanvasChecks() ? 0 : 1) }
+            catch { print("PLANCANVASTEST ERROR \(error)"); exit(1) }
+        }
         if ProcessInfo.processInfo.environment["TATWO2_NATIVEGOALTEST"] == "1" {
             setvbuf(stdout, nil, _IOLBF, 0)
             Task { @MainActor in
@@ -170,6 +179,216 @@ enum SelfTest {
             }
         }
         NSApplication.shared.run()
+    }
+
+    @MainActor private static func planCanvasChecks() throws -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        guard let path = environment["TATWO2_PLAN_TEST_ROOT"], environment["TATWO2_LIVE_ROOT"] == path,
+              NativeStagingIsolation.isEnabled(environment), NativeStagingIsolation.validationError(environment) == nil else {
+            print("PLANCANVASTEST FAIL isolated root required"); return false
+        }
+        var failures = 0
+        func check(_ name: String, _ ok: Bool) {
+            if !ok { failures += 1 }
+            print("PLANCANVASTEST \(ok ? "PASS" : "FAIL") \(name)")
+        }
+        let titles = ["做什麼", "動哪些檔", "怎麼驗", "風險與問題"]
+        let sections = titles.map { TatwoPlanArtifactV1.Section(title: $0, body: "內容") }
+        let body = sections.map { "## \($0.title)\n\($0.body)" }.joined(separator: "\n\n")
+        let reply = "先討論。\n```tatwo-plan\n\(body)\n```\n"
+        check("fenced reply", TatwoPlanArtifactV1.parseSections(fromReply: reply) == sections)
+        check("no fence", TatwoPlanArtifactV1.parseSections(fromReply: body) == nil)
+        let missing = "```tatwo-plan\n" + sections.dropLast().map { "## \($0.title)\n\($0.body)" }.joined(separator: "\n") + "\n```"
+        check("missing heading keeps only three sections", TatwoPlanArtifactV1.parseSections(fromReply: missing) == Array(sections.dropLast()))
+        check("unfinished fence", TatwoPlanArtifactV1.parseSections(fromReply: "```tatwo-plan\n" + body) == nil)
+        check("CRLF", TatwoPlanArtifactV1.parseSections(fromReply: reply.replacingOccurrences(of: "\n", with: "\r\n")) == sections)
+        check("empty section retained", TatwoPlanArtifactV1.parseSections(fromReply: "```tatwo-plan\n## 做什麼\n```") == [.init(title: "做什麼", body: "")])
+        let nested = "```tatwo-plan\n## 怎麼驗\n```sh\n## not a heading\ntrue\n```\n## 風險與問題\n無\n```"
+        check("nested code headings stay in body", TatwoPlanArtifactV1.parseSections(fromReply: nested)?.map(\.title) == ["怎麼驗", "風險與問題"])
+        check("example fence is not a plan", TatwoPlanArtifactV1.parseSections(fromReply: "````markdown\n\(reply)````") == nil)
+
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        let engine = ChatLiveEngine(store: ChatLiveStore(root: root), environment: environment)
+        let id = engine.doc.selectedThreadID!
+        var plan = TatwoPlanArtifactV1(threadID: id, objective: "測試計畫", sections: sections)
+        try engine.savePlanArtifact(plan)
+        check("JSON round trip", try engine.loadPlanArtifact(id) == plan)
+        check("thread isolation", try engine.loadPlanArtifact(UUID()) == nil)
+        check("discussion every turn", engine.planContext(plan, userText: "再討論") == ChatLiveEngine.planDiscussionRules)
+        plan.confirm()
+        try engine.savePlanArtifact(plan)
+        check("confirmation does not execute", engine.sidecarProcessID(threadID: id) == nil && !engine.isRunning(id))
+        check("confirmation still waits for start", engine.planContext(plan, userText: "再想一下")?.contains("不可執行") == true)
+        check("start includes edited plan", engine.planContext(plan, userText: "開始")?.contains(plan.editableText()) == true)
+        plan.executionTurnID = "fixture-start"
+        try engine.savePlanArtifact(plan)
+        let reopened = ChatLiveEngine(store: ChatLiveStore(root: root), environment: environment)
+        check("one-shot survives reload", reopened.planContext(try reopened.loadPlanArtifact(id), userText: "開始") == nil)
+        plan.applyEditedText("改過的標題\n\n" + body)
+        check("editing resets confirmation", plan.state == .discussing && plan.executionTurnID == nil && plan.objective == "改過的標題" && plan.sections == sections)
+        try engine.savePlanArtifact(plan)
+        engine.updatePlanFromReply(id, reply: ChatMessage(id: "fixture-reply", role: .assistant, text: missing))
+        let updated = try engine.loadPlanArtifact(id)
+        check("reply updates owning canvas", updated?.sections.count == 3 && updated?.sourceAssistantMessageID == "fixture-reply")
+        let model = ChatPageModel(environment: environment, botCoreFixture: (engine, BotStore(root: root)))
+        model.selectedThreadID = id
+        check("facade loads canvas", model.activePlanArtifact == updated && model.isPlanModeEnabled)
+        model.prompt = "/plan"
+        model.send()
+        check("empty command reopens canvas", model.planInspectorRequest != nil && model.prompt.isEmpty)
+        model.confirmActivePlan()
+        check("confirm facade", !model.isPlanModeEnabled && engine.transcript(for: id).last?.text == "計畫已確認；說「開始」即執行")
+        check("empty edit rejected", !model.saveEditedPlanCanvasText(" \n"))
+        check("editor uses shared parser", model.saveEditedPlanCanvasText("新標題\n\n" + body) && model.activePlanArtifact?.sections == sections)
+        model.selectedThreadID = nil
+        check("deselect clears canvas", model.activePlanArtifact == nil)
+        model.selectedThreadID = id
+        check("switch back restores canvas", model.activePlanArtifact?.objective == "新標題")
+        let issueTitles = ["標題", "環境", "重現步驟", "預期", "實際", "附註"]
+        let issueSections = issueTitles.map { TatwoPlanArtifactV1.Section(title: $0, body: "回報內容") }
+        let issueReply = "先釐清。\n```tatwo-issue\n" + issueSections.map { "## \($0.title)\n\($0.body)" }.joined(separator: "\n\n") + "\n```"
+        check("issue fence has six sections", TatwoPlanArtifactV1.parseSections(fromReply: issueReply, fenceName: "tatwo-issue") == issueSections)
+        check("issue fence cannot update plan", TatwoPlanArtifactV1.parseSections(fromReply: issueReply) == nil)
+        check("unfinished issue ignored", TatwoPlanArtifactV1.parseSections(fromReply: String(issueReply.dropLast(3)), fenceName: "tatwo-issue") == nil)
+        var legacy = try JSONSerialization.jsonObject(with: plan.canonicalJSONData()) as! [String: Any]
+        legacy.removeValue(forKey: "kind")
+        let decoded = try JSONDecoder.tatwoPlanArtifact.decode(TatwoPlanArtifactV1.self, from: JSONSerialization.data(withJSONObject: legacy))
+        check("legacy JSON without kind", decoded.kind == nil && decoded.sections == plan.sections)
+        var feedbackPlan = TatwoPlanArtifactV1(threadID: id, objective: "回報測試", sections: issueSections, kind: "feedback")
+        feedbackPlan.sections[1].body = "App environment fixture"
+        try engine.savePlanArtifact(feedbackPlan)
+        engine.updatePlanFromReply(id, reply: ChatMessage(id: "fixture-issue", role: .assistant, text: issueReply))
+        check("issue environment owned by app", try engine.loadPlanArtifact(id)?.sections == feedbackPlan.sections)
+        check("feedback start never executes", engine.planContext(feedbackPlan, userText: "開始")?.contains("不要替使用者提交") == true)
+        model.confirmActivePlan()
+        check("feedback cannot confirm plan", model.activePlanArtifact?.state == .discussing)
+        check("feedback edit keeps environment", model.saveEditedPlanCanvasText("回報修改\n\n## 環境\n假的") && model.activePlanArtifact?.sections.first?.body == "App environment fixture")
+        let prSections = PRPlanReview.titles.map { TatwoPlanArtifactV1.Section(title: $0, body: "摘要內容") }
+        let prReply = "```tatwo-pr\n" + prSections.map { "## \($0.title)\n\($0.body)" }.joined(separator: "\n") + "\n```"
+        check("pr fence has five sections", PRPlanReview.sections(prReply) == prSections)
+        check("unfinished pr ignored", PRPlanReview.sections(String(prReply.dropLast(3))) == nil)
+        check("incomplete pr ignored", PRPlanReview.sections("```tatwo-pr\n## 標題\n只有標題\n```") == nil)
+        check("pr fence cannot update plan", TatwoPlanArtifactV1.parseSections(fromReply: prReply) == nil)
+        let fakeDiff = "diff --git a/a.swift b/a.swift\n--- a/a.swift\n+++ b/a.swift\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.swift b/b.swift\n--- /dev/null\n+++ b/b.swift\n@@ -0,0 +1 @@\n+file\n"
+        let files = PRPlanReview.files(fakeDiff)
+        check("pr diff splits by file", files.map(\.path) == ["a.swift", "b.swift"] && files[0].added == 1 && files[0].removed == 1 && files[1].added == 1)
+        let large = PRPlanReview.files("diff --git a/large b/large\n@@ -0,0 +1,450 @@\n" + Array(repeating: "+line", count: 450).joined(separator: "\n"))
+        check("pr diff limits 400 lines", large[0].preview.components(separatedBy: "\n").count == 401 && large[0].preview.hasSuffix("…") && large[0].added == 450)
+        check("pr repeated file grouped", PRPlanReview.files(fakeDiff + fakeDiff).count == 2 && PRPlanReview.files(fakeDiff + fakeDiff)[0].added == 2)
+        var prPlan = TatwoPlanArtifactV1(threadID: id, objective: "貢獻測試", sections: prSections, state: .ready, kind: "pr")
+        prPlan.prReview = PRPlanReview(directory: root, repository: "fixture/public", account: "fixture",
+            snapshot: .init(head: "fixture", status: "M", diff: fakeDiff, stat: "2 files", origin: "fixture/public"))
+        let restoredPR = try JSONDecoder.tatwoPlanArtifact.decode(TatwoPlanArtifactV1.self, from: prPlan.canonicalJSONData())
+        check("pr ready survives reload", restoredPR == prPlan && restoredPR.state == .ready)
+        try engine.savePlanArtifact(prPlan)
+        check("pr ready edit rejected", !model.saveEditedPlanCanvasText("意外修改"))
+        prPlan.state = .discussing
+        check("pr start still discusses", engine.planContext(prPlan, userText: "開始")?.contains("文字「開始」不算確認") == true)
+        prPlan.confirm()
+        check("pr confirmed without callback never executes", engine.planContext(prPlan, userText: "開始")?.contains("不改檔") == true)
+        try engine.savePlanArtifact(plan)
+        if let snapshot = ProcessInfo.processInfo.environment["TATWO2_PLAN_SNAPSHOT"] {
+            if environment["TATWO2_FEEDBACK_SNAPSHOT"] == "1" { try engine.savePlanArtifact(feedbackPlan) }
+            if environment["TATWO2_PR_SNAPSHOT"] == "1" { prPlan.state = .ready; try engine.savePlanArtifact(prPlan) }
+            let view = PlanTranscriptInspectorView(artifact: model.activePlanArtifact, isPresented: .constant(true),
+                selection: nil, localActionPresentation: .idle, editableText: model.editablePlanTextForCanvas(),
+                onSelectionChange: { _ in }, onSaveEditedText: { _ in true }, ultraworkPanel: AnyView(EmptyView()),
+                ultraworkPrimaryModelID: "", ultraworkSecondaryModelID: nil, ultraworkAuxiliaryCount: 0,
+                onDismissUltrawork: {}, onExecute: {})
+            let host = NSHostingView(rootView: view.frame(width: 420, height: 760))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 760),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            host.layoutSubtreeIfNeeded()
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return false }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { return false }
+            try png.write(to: URL(fileURLWithPath: snapshot))
+            print("PLANCANVASTEST snapshot surface=PlanTranscriptInspectorView viewport=420x760")
+        }
+        let otherID = engine.newThread(in: nil, title: "empty-plan-fixture")
+        model.selectedThreadID = otherID
+        model.prompt = "/plan"
+        model.send()
+        check("empty command without canvas hints", model.activePlanArtifact == nil && model.composerHint != nil)
+        model.prompt = "/plan\t" + String(repeating: "字", count: 70)
+        model.send()
+        check("new slash plan enters discussion", model.isPlanModeEnabled && model.activePlanArtifact?.objective.count == 60)
+        check("rejected send retains draft", model.prompt.hasPrefix("/plan") && engine.sidecarProcessID(threadID: otherID) == nil)
+        model.prompt = "/feedback 視窗沒有回應"
+        model.send()
+        check("feedback command opens discussing canvas", model.activePlanArtifact?.kind == "feedback" && model.isPlanModeEnabled && model.planInspectorRequest != nil)
+        check("feedback command retains rejected draft", model.prompt == "/feedback 視窗沒有回應" && engine.sidecarProcessID(threadID: otherID) == nil)
+        model.prompt = "/pr 修正畫布"
+        model.send()
+        check("pr command discusses without executing", model.activePlanArtifact?.kind == "pr" && model.isPlanModeEnabled && engine.sidecarProcessID(threadID: otherID) == nil)
+        check("pr rejected send retains draft", model.prompt == "/pr 修正畫布")
+        print("PLANCANVASTEST RESULT failed=\(failures)")
+        return failures == 0
+    }
+}
+
+extension SelfTest {
+    static func runOSUpstreamRefreshTest() -> Bool {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("tatwo2-upstream-\(UUID().uuidString)")
+        let bundled = base.appendingPathComponent("bundle.md")
+        let runtime = base.appendingPathComponent("os/os-upstream.md")
+        let marker = runtime.deletingLastPathComponent().appendingPathComponent("os-upstream.installed.sha256")
+        let notice = runtime.deletingLastPathComponent().appendingPathComponent("os-upstream.update-available.md")
+        let old = Data("old rules\n".utf8), new = Data("new rules\n".utf8), edited = Data("my rules\n".utf8)
+        var failed = false
+        func check(_ item: String, _ passed: Bool) {
+            print("OSUPSTREAMREFRESHTEST \(passed ? "PASS" : "FAIL") \(item)")
+            if !passed { failed = true }
+        }
+        func apply(_ date: Date = Date(timeIntervalSince1970: 0)) -> OSUpstreamRefresh.Outcome {
+            OSUpstreamRefresh.applyOnLaunch(runtimePath: runtime.path, bundled: bundled, now: date)
+        }
+        do {
+            check("bundled resource lookup", OSUpstreamRefresh.bundledURL != nil)
+            try fm.createDirectory(at: base, withIntermediateDirectories: true)
+            try old.write(to: bundled)
+            check("missing installs", try apply() == .installed && Data(contentsOf: runtime) == old)
+            let oldMarker = try Data(contentsOf: marker)
+            let expected = SHA256.hash(data: old).map { String(format: "%02x", $0) }.joined() + "\n"
+            check("installed SHA256", oldMarker == Data(expected.utf8))
+            try new.write(to: bundled)
+            if case .updated(let backup) = apply() {
+                check("matching marker updates with UTC backup",
+                      try URL(fileURLWithPath: backup).lastPathComponent == "os-upstream.md.bak-19700101T000000000Z"
+                      && Data(contentsOf: URL(fileURLWithPath: backup)) == old
+                      && Data(contentsOf: runtime) == new)
+            } else { check("matching marker updates", false) }
+            let newMarker = try Data(contentsOf: marker)
+            let expectedNew = SHA256.hash(data: new).map { String(format: "%02x", $0) }.joined() + "\n"
+            check("updated SHA256", newMarker == Data(expectedNew.utf8))
+            let before = try fm.contentsOfDirectory(atPath: runtime.deletingLastPathComponent().path).sorted()
+            check("unchanged", try apply() == .unchanged && Data(contentsOf: marker) == newMarker && Data(contentsOf: runtime) == new
+                  && fm.contentsOfDirectory(atPath: runtime.deletingLastPathComponent().path).sorted() == before)
+            try edited.write(to: runtime)
+            check("user edited kept", try apply() == .keptUserEdited && Data(contentsOf: runtime) == edited
+                  && Data(contentsOf: marker) == newMarker && !fm.fileExists(atPath: notice.path))
+            try old.write(to: bundled)
+            check("changed bundle notice", try apply() == .keptUserEdited && Data(contentsOf: runtime) == edited)
+            let text = try String(contentsOf: notice, encoding: .utf8)
+            check("notice one line no personal path", text.split(separator: "\n").count == 1 && !text.contains(base.path))
+            let unmarked = base.appendingPathComponent("unmarked/os-upstream.md")
+            try fm.createDirectory(at: unmarked.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try edited.write(to: unmarked)
+            check("missing marker kept", try OSUpstreamRefresh.applyOnLaunch(runtimePath: unmarked.path, bundled: bundled) == .keptUserEdited
+                  && Data(contentsOf: unmarked) == edited)
+            check("unmarked notice without adopting ownership", try fm.contentsOfDirectory(atPath: unmarked.deletingLastPathComponent().path).sorted()
+                  == ["os-upstream.md", "os-upstream.update-available.md"])
+            try new.write(to: runtime)
+            if case .failed = apply() {
+                check("backup collision preserves files", try Data(contentsOf: runtime) == new && Data(contentsOf: marker) == newMarker)
+            } else { check("backup collision fails safely", false) }
+            check("missing bundle", OSUpstreamRefresh.applyOnLaunch(runtimePath: runtime.path, bundled: nil) == .failed("bundle_missing"))
+        } catch { check("filesystem scenarios", false) }
+        // Retain synthetic temporary fixtures for inspection; never delete user artifacts.
+        print(failed ? "OSUPSTREAMREFRESHTEST FAILED" : "OSUPSTREAMREFRESHTEST ALL PASS")
+        return !failed
     }
 }
 

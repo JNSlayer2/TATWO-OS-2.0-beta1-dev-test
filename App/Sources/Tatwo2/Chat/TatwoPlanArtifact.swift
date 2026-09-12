@@ -7,6 +7,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   public enum State: String, Codable, Sendable, Equatable {
     case discussing
     case confirmed
+    case ready
   }
 
   public struct Section: Codable, Sendable, Equatable {
@@ -140,6 +141,10 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   public var updatedAt: Date
   public var state: State
   public var planFlowSelection: PlanFlowSelectionV1?
+  public var executionTurnID: String?
+  public var kind: String?
+  var prReview: PRPlanReview?
+  var prMessage: String?
 
   public init(
     planID: UUID = UUID(),
@@ -150,7 +155,8 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     createdAt: Date = Date(),
     updatedAt: Date? = nil,
     state: State = .discussing,
-    planFlowSelection: PlanFlowSelectionV1? = nil
+    planFlowSelection: PlanFlowSelectionV1? = nil,
+    kind: String? = nil
   ) {
     self.schema = Self.schemaName
     self.planID = planID
@@ -167,6 +173,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     self.updatedAt = Self.storagePrecision(updatedAt ?? createdAt)
     self.state = state
     self.planFlowSelection = planFlowSelection
+    self.kind = kind
   }
 
   /// 與 JSON 往返後仍然相等的時間精度。
@@ -201,6 +208,10 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     self.planFlowSelection = try container.decodeIfPresent(
       PlanFlowSelectionV1.self,
       forKey: .planFlowSelection)
+    self.executionTurnID = try container.decodeIfPresent(String.self, forKey: .executionTurnID)
+    self.kind = try container.decodeIfPresent(String.self, forKey: .kind)
+    self.prReview = try container.decodeIfPresent(PRPlanReview.self, forKey: .prReview)
+    self.prMessage = try container.decodeIfPresent(String.self, forKey: .prMessage)
   }
 
   public func canonicalJSONData() throws -> Data {
@@ -216,6 +227,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     self.sections = sections
     updatedAt = Self.storagePrecision(at)
     state = .discussing
+    executionTurnID = nil
   }
 
   /// This API is intentionally separate from discussion updates so callers
@@ -247,7 +259,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     var newObjective = objective
     if let first = lines.first(where: {
       !$0.trimmingCharacters(in: .whitespaces).isEmpty
-    }), Self.planSectionHeading(in: first) == nil {
+    }), !first.hasPrefix("## ") {
       newObjective = first.trimmingCharacters(in: .whitespaces)
       if let index = lines.firstIndex(of: first) {
         lines.remove(at: index)
@@ -256,14 +268,14 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     let remainder = lines.joined(separator: "\n")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     let newSections = remainder.isEmpty
-      ? [] : Self.sections(fromModelResponse: remainder)
+      ? [] : Self.markdownSections(remainder)
     updateDiscussion(
       objective: newObjective, sections: newSections, at: at)
   }
 
   public func markdownExport() -> String {
     var blocks = [
-      "# Plan",
+      kind == "pr" ? (state == .ready ? "# PR" : "# PR · Plan") : (kind == "feedback" ? "# 回報問題" : "# Plan"),
       "## Objective\n\n\(objective)",
     ]
     blocks.append(
@@ -271,6 +283,60 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
         "## \(section.title)\n\n\(section.body)"
       })
     return blocks.joined(separator: "\n\n")
+  }
+
+  /// Only complete, explicitly labelled fences update a canvas. Missing
+  /// headings remain missing; never invent model output.
+  public static func parseSections(fromReply reply: String, fenceName: String = "tatwo-plan") -> [Section]? {
+    let lines = reply.replacingOccurrences(of: "\r\n", with: "\n")
+      .components(separatedBy: "\n")
+    var body: [String]? = nil
+    var nestedFence: String?
+    var outsideFence: String?
+    var result: [Section]?
+    for line in lines {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if body == nil {
+        if let fence = outsideFence {
+          if trimmed == fence { outsideFence = nil }
+        } else if trimmed == "```\(fenceName)" {
+          body = []
+        } else if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+          outsideFence = String(trimmed.prefix(while: { $0 == "`" || $0 == "~" }))
+        }
+      } else if let fence = nestedFence {
+        body?.append(line)
+        if trimmed == fence { nestedFence = nil }
+      } else if trimmed == "```" {
+        let sections = markdownSections(body!.joined(separator: "\n"))
+        if !sections.isEmpty { result = sections }
+        body = nil
+      } else {
+        if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+          nestedFence = String(trimmed.prefix(while: { $0 == "`" || $0 == "~" }))
+        }
+        body?.append(line)
+      }
+    }
+    return result
+  }
+
+  static func markdownSections(_ text: String) -> [Section] {
+    var result: [Section] = []
+    var fence: String?
+    for line in text.components(separatedBy: "\n") {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if let current = fence {
+        if trimmed == current { fence = nil }
+      } else if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+        fence = String(trimmed.prefix(while: { $0 == "`" || $0 == "~" }))
+      } else if line.hasPrefix("## ") {
+        result.append(Section(title: String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces), body: ""))
+        continue
+      }
+      if !result.isEmpty { result[result.count - 1].body += line + "\n" }
+    }
+    return result.map { Section(title: $0.title, body: $0.body.trimmingCharacters(in: .whitespacesAndNewlines)) }
   }
 
   /// Converts one completed model response into stable plan-canvas sections.

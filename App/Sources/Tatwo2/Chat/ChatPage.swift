@@ -431,10 +431,14 @@ struct ChatPage: View {
         .frame(maxWidth: .infinity, maxHeight: surface == .window ? .infinity : nil, alignment: .topLeading)
         .font(ChatTypography.body)
         .background(chatCanvasLegibilityLayer)
+        .onChange(of: model.planInspectorRequest) { _, request in
+            if request != nil { planInspectorPresented = true }
+        }
         .inspector(isPresented: $planInspectorPresented) {
             PlanTranscriptInspectorView(
                 artifact: model.activePlanArtifact,
                 isPresented: $planInspectorPresented,
+                isWriting: model.isRunning,
                 selection: model.planFlowSelectionProjection?.selection,
                 localActionPresentation:
                     model.planWorkOSLocalActionPresentation,
@@ -453,7 +457,10 @@ struct ChatPage: View {
                     showUltraworkPanel = false
                     ultraworkRolePickerTarget = nil
                 },
-                onExecute: model.confirmActivePlan)
+                onExecute: model.confirmActivePlan,
+                onFeedbackSubmitted: model.finishFeedbackPlan,
+                onPRSubmit: model.submitActivePRPlan)
+                .id(model.activePlanArtifact?.planID)
         }
         .inspector(isPresented: $browserInspectorPresented) {
             EmbeddedBrowserView(

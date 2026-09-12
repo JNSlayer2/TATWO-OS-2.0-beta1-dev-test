@@ -4,6 +4,13 @@ import AppKit
 @MainActor
 final class FeedbackCoordinator: ObservableObject {
     static let shared = FeedbackCoordinator()
+    private static var canvases: [UUID: FeedbackCoordinator] = [:]
+    static func forPlan(_ id: UUID) -> FeedbackCoordinator {
+        if let coordinator = canvases[id] { return coordinator }
+        let coordinator = FeedbackCoordinator(planID: id)
+        canvases[id] = coordinator
+        return coordinator
+    }
     @Published var isPresented = false
     @Published var title = "" { didSet { changed() } }
     @Published var content = "" { didSet { changed() } }
@@ -23,12 +30,13 @@ final class FeedbackCoordinator: ObservableObject {
     private var service: FeedbackService?
     private var loading = false
 
-    private init() {
+    init(planID: UUID? = nil) {
         let root = ProcessInfo.processInfo.environment["TATWO2_LIVE_ROOT"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("tatwo2/live", isDirectory: true)
         do {
-            service = try FeedbackService(draftURL: root.appendingPathComponent("feedback/draft.json"),
+            let filename = planID.map { $0.uuidString + ".json" } ?? "draft.json"
+            service = try FeedbackService(draftURL: root.appendingPathComponent("feedback/\(filename)"),
                                           reviewer: FeedbackNativeReview.review,
                                           http: FeedbackHTTPTransport.shared.perform)
             restore()
@@ -65,7 +73,7 @@ final class FeedbackCoordinator: ObservableObject {
 
     func close() { isPresented = false }
 
-    private func refreshAccount() {
+    func refreshAccount() {
         guard let service, !service.draft.deliveryPending, service.draft.issueNumber == nil else { return }
         let next = (try? accounts.loadAccounts())?.first?.username
         if next != account { account = next; phase = .draft; changed() }

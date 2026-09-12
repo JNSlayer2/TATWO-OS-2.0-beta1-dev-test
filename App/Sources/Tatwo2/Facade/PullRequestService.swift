@@ -6,7 +6,7 @@ struct PullRequestFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// Drafts and credentials stay in memory. Submit or an explicit /pr description authorizes git/GitHub writes.
+/// Credentials stay in memory. Only human Submit authorizes git/GitHub writes.
 struct PullRequestService {
     /// Session-only, thread-scoped reservation; consume only after submission settles.
     struct PendingPR {
@@ -23,9 +23,22 @@ struct PullRequestService {
         return (title, description)
     }
 
-    static let contributionInstruction = "這是要送回公開倉庫的貢獻。請在這個專案裡實作，跑相關測試，不要 commit、不要 push；做完用一段三到五行的中文說明收尾，第一行是適合當 PR 標題的一句話。"
+    static let contributionInstruction = """
+    這是要送回公開倉庫的貢獻。依已確認計畫在這個專案裡實作，跑相關測試，不要 commit、不要 push、不要開 PR。
+    收尾必須附完整 ```tatwo-pr 圍欄，包含以下五個標題：
+    ## 標題
+    一句話 PR 標題
+    ## 改了什麼
+    白話 3–8 行
+    ## 動到的檔
+    每檔一行說明
+    ## 怎麼驗的
+    指令＋結果；未跑的明說
+    ## 風險與回滾
+    風險與可執行的回滾方法
+    """
 
-    struct Snapshot: Equatable {
+    struct Snapshot: Codable, Equatable, Sendable {
         let head: String
         let status: String
         let diff: String
@@ -191,7 +204,9 @@ struct PullRequestService {
                 throw PullRequestFailure(message: "未追蹤二進位檔案無法進行文字秘密掃描，未送出。")
             }
             stat += "\n\(name) (new)"
-            diff += "\n+++ \(name)\n" + text
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false).dropLast(text.isEmpty || text.hasSuffix("\n") ? 1 : 0)
+            diff += "\ndiff --git a/\(name) b/\(name)\nnew file mode 100644\n--- /dev/null\n+++ b/\(name)\n@@ -0,0 +1,\(lines.count) @@\n"
+                + lines.map { "+" + $0 }.joined(separator: "\n") + "\n"
             guard diff.utf8.count <= 8_000_000 else { throw PullRequestFailure(message: "Diff 太大，請分批提交。") }
         }
         guard diff.utf8.count <= 8_000_000 else { throw PullRequestFailure(message: "Diff 太大，請分批提交。") }

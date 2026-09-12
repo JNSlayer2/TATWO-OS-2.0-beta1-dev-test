@@ -92,7 +92,10 @@ final class ChatPageModel: ObservableObject {
                 ComputerUseController.shared.stop(owner: oldValue)
                 BrowserAgentBridge.shared.revokeRequests()
             }
-            if selectedThreadID != oldValue { composerRevision &+= 1 }
+            if selectedThreadID != oldValue {
+                composerRevision &+= 1
+                loadActivePlanCanvas()
+            }
             guard isLive, let activeLive = activeConversationEngine,
                   let id = selectedThreadID, id != oldValue else { return }
             if let selectedRemote {
@@ -124,6 +127,7 @@ final class ChatPageModel: ObservableObject {
     /// 每條討論串自己的瀏覽器分頁組（key＝討論串 id 小寫）；見 BrowserLaneRegistry.swift
     @Published var browserLanesBySession: [String: BrowserLaneSnapshot] = [:]
     @Published var activePlanArtifact: TatwoPlanArtifactV1?
+    @Published var planInspectorRequest: UUID?
     /// 2026-09-11 使用者回饋：提醒遺留太久 → 顯示 4–10 秒（依字數）後自動收掉；換成新提醒就重新計時。
     @Published var composerHint: String? { didSet { scheduleComposerHintExpiry() } }
     private var composerHintExpiry: Task<Void, Never>?
@@ -193,6 +197,7 @@ final class ChatPageModel: ObservableObject {
             if selectedRemote?.deviceID != oldValue?.deviceID || selectedRemote?.threadID != oldValue?.threadID {
                 ComputerUseController.shared.stop()
                 BrowserAgentBridge.shared.revokeRequests()
+                loadActivePlanCanvas()
             }
         }
     }
@@ -344,7 +349,7 @@ final class ChatPageModel: ObservableObject {
     /// /issue 與 /討論串由本機處理；其餘語意交原生引擎。
     static let slashCommandItems: [SlashCommandItem] = [
         SlashCommandItem(id: "/pr", cmd: "/pr", title: "/pr — 提交程式碼",
-            subtitle: "描述要改什麼，AI 改完自動送 PR", icon: "arrow.triangle.branch"),
+            subtitle: "先討論計畫，確認實作後再送 PR", icon: "arrow.triangle.branch"),
         SlashCommandItem(id: "/feedback", cmd: "/feedback", title: "/feedback — 回報問題",
             subtitle: "檢查原文並確認後，提交至 \(FeedbackSettings.feedbackRepository)", icon: "bubble.left.and.exclamationmark.bubble.right"),
         SlashCommandItem(id: "/plg", cmd: "/plg", title: "/plg — 開工：討論好就派工",
@@ -524,8 +529,8 @@ final class ChatPageModel: ObservableObject {
         case .unavailable: "Codex 鏡射不可用"
         }
     }
-    var isActivePlanTurnWriting: Bool { false }
-    var isPlanModeEnabled: Bool { false }
+    var isActivePlanTurnWriting: Bool { isPlanModeEnabled && isRunning }
+    var isPlanModeEnabled: Bool { activePlanArtifact?.state == .discussing }
     var isSelectedThreadStandalone: Bool { selectedThreadProject == nil && selectedThread != nil }
     /// composer 尾端 `@` token 的搜尋字（nil＝沒有 @ token）。1.0 :358
     var issueAtMentionQuery: String? {
@@ -726,9 +731,11 @@ final class ChatPageModel: ObservableObject {
         if let (engine, store) = botCoreFixture {
             self.live = engine
             self.localLive = engine
+            connectPlanCanvas(to: engine)
             self.botStore = store
             self.document = engine.document
             self.selectedThreadID = engine.doc.selectedThreadID
+            loadActivePlanCanvas()
             self.isRunning = false
             restoreModelPreferences()
             return
@@ -814,12 +821,14 @@ final class ChatPageModel: ObservableObject {
             self.previousCLITabIDs = Set(self.cliSessionStore?.sessions.map(\.id) ?? [])
             self.cliStore = store
             self.localLive = engine
+            connectPlanCanvas(to: engine)
             self.live = engine
             engine.autoApprove = permissionPreset == .approveForMe
             engine.userPermissionPreset = permissionPreset
             self.botStore = BotStore(root: root)
             self.document = engine.document
             self.selectedThreadID = engine.doc.selectedThreadID
+            loadActivePlanCanvas()
             self.localSelectedThreadID = engine.doc.selectedThreadID
             self.isRunning = false
             restoreModelPreferences()
@@ -1323,15 +1332,78 @@ final class ChatPageModel: ObservableObject {
         }) else { return }
         setThreadPlugin(entry.id, enabled: true)
     }
-    func confirmActivePlan() {}
-    func editablePlanTextForCanvas() -> String? { nil }
+    private func connectPlanCanvas(to engine: ChatLiveEngine) {
+        engine.onPlanChange = { [weak self] plan in
+            guard let self, self.selectedRemote == nil, self.selectedThreadID == plan.threadID else { return }
+            self.activePlanArtifact = plan
+        }
+        loadActivePlanCanvas()
+    }
+    private func loadActivePlanCanvas() {
+        activePlanArtifact = nil
+        guard selectedRemote == nil, let id = selectedThreadID, let engine = localLive else { return }
+        do { activePlanArtifact = try engine.loadPlanArtifact(id) }
+        catch { flashComposerHint("計畫讀取失敗；原檔保留，請先修復資料") }
+    }
+    @discardableResult
+    private func persistPlanCanvas(_ plan: TatwoPlanArtifactV1) -> Bool {
+        guard let engine = localLive else { return false }
+        do {
+            try engine.savePlanArtifact(plan)
+            if selectedThreadID == plan.threadID { activePlanArtifact = plan }
+            return true
+        } catch {
+            flashComposerHint("計畫儲存失敗，未套用修改")
+            return false
+        }
+    }
+    func confirmActivePlan() {
+        guard selectedRemote == nil, var plan = activePlanArtifact, plan.kind != "feedback", plan.state == .discussing,
+              localLive?.isRunning(plan.threadID) == false, !preparingPR, !pendingPR.contains(plan.threadID) else { return }
+        if plan.kind == "pr" {
+            do { _ = try PullRequestCoordinator.shared.identity() }
+            catch { plan.prMessage = error.localizedDescription; _ = persistPlanCanvas(plan); return }
+        }
+        plan.prMessage = nil
+        plan.confirm()
+        if persistPlanCanvas(plan) {
+            if plan.kind == "pr" {
+                startPRContribution(description: plan.editableText(), threadID: plan.threadID)
+                return
+            }
+            localLive?.appendSystemMessage(threadID: plan.threadID, text: "計畫已確認；說「開始」即執行", status: "info|Plan")
+        }
+    }
+    func editablePlanTextForCanvas() -> String? { activePlanArtifact?.editableText() }
+    func finishFeedbackPlan(_ id: UUID) {
+        guard var plan = activePlanArtifact, plan.planID == id, plan.kind == "feedback", plan.state == .discussing else { return }
+        plan.confirm()
+        _ = persistPlanCanvas(plan)
+    }
     func ensureNativeTerminal(reset: Bool = false) {
         // Reset is deliberately not a command replay operation in the durable workbench.
         loadPersistedCLISessionBook()
         prepareCLITabs()
     }
     func handlePlanQuestionAnswerNotification(_ notification: Notification) {}
-    func saveEditedPlanCanvasText(_ text: String) {}
+    @discardableResult
+    func saveEditedPlanCanvasText(_ text: String) -> Bool {
+        guard selectedRemote == nil, var plan = activePlanArtifact, !pendingPR.contains(plan.threadID),
+              plan.kind != "pr" || plan.state == .discussing else { return false }
+        guard localLive?.isRunning(plan.threadID) == false else {
+            flashComposerHint("請等回覆完成再編輯計畫"); return false
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            flashComposerHint("計畫不可空白"); return false
+        }
+        let environment = plan.kind == "feedback" ? plan.sections.first { $0.title == "環境" } : nil
+        plan.applyEditedText(text)
+        if let environment {
+            plan.sections.removeAll { $0.title == "環境" }
+            plan.sections.insert(environment, at: min(1, plan.sections.count))
+        }
+        return persistPlanCanvas(plan)
+    }
     func shutdownForContainerClose() {
         ComputerUseController.shared.stop()
         BrowserAgentBridge.shared.revokeRequests()
@@ -1858,6 +1930,21 @@ final class ChatPageModel: ObservableObject {
     @discardableResult
     func handleFeedbackCommand() -> Bool {
         guard let argument = TatwoSlashCommandParser.feedbackArgument(in: prompt) else { return false }
+        if !argument.isEmpty {
+            guard !rejectRemoteWrite("/feedback"), let id = selectedThreadID, let engine = localLive else {
+                flashComposerHint("請先開啟本機討論串"); return true
+            }
+            guard !engine.isRunning(id), !pendingPR.contains(id) else {
+                flashComposerHint("請等目前回合結束再回報"); return true
+            }
+            let environment = FeedbackEnvironment.current(engine: routeChoice.engine.rawValue)
+            let body = "App: \(environment.appVersion) (\(environment.appBuild))\nmacOS: \(environment.macOS)\nEngine: \(environment.engine)"
+            let plan = TatwoPlanArtifactV1(threadID: id, objective: argument,
+                sections: [.init(title: "環境", body: body)], kind: "feedback")
+            guard persistPlanCanvas(plan) else { return true }
+            planInspectorRequest = UUID()
+            return false // Continue through the ordinary AI send path; keep the draft if rejected.
+        }
         if FeedbackCoordinator.shared.present(source: "Chat", initialText: argument) { prompt = "" }
         if (try? githubAccountsStore.loadAccounts())?.first == nil {
             flashComposerHint("請先登入github才能提交issue")
@@ -1866,9 +1953,37 @@ final class ChatPageModel: ObservableObject {
     }
 
     func send() {
+        if handleFeedbackCommand() { return }
+        let planCommand = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if planCommand.split(whereSeparator: \.isWhitespace).first == "/plan" {
+            guard !rejectRemoteWrite("/plan"), let id = selectedThreadID, let engine = localLive else {
+                flashComposerHint("請先開啟本機討論串"); return
+            }
+            let objective = String(planCommand.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if objective.isEmpty {
+                if activePlanArtifact != nil { planInspectorRequest = UUID(); prompt = "" }
+                else { flashComposerHint("/plan 後面接你想討論的計畫") }
+                return
+            }
+            guard !engine.isRunning(id), !pendingPR.contains(id) else {
+                flashComposerHint("請等目前回合結束再建立計畫"); return
+            }
+            let plan = TatwoPlanArtifactV1(threadID: id, objective: String(objective.prefix(60)))
+            guard persistPlanCanvas(plan) else { return }
+            planInspectorRequest = UUID()
+        }
+        if isPlanModeEnabled && isLocalNativeGoalCommand {
+            flashComposerHint("計畫討論中；確認計畫並說「開始」後再執行"); return
+        }
+        if activePlanArtifact != nil, let id = selectedThreadID, localLive?.isRunning(id) == true {
+            flashComposerHint("請等計畫回覆完成再送出"); return
+        }
+        if planCommand == "開始", isPlanModeEnabled, activePlanArtifact?.kind != "feedback", activePlanArtifact?.kind != "pr" {
+            confirmActivePlan()
+            guard !isPlanModeEnabled else { return }
+        }
         if isLocalPRCommand {
             let title = TatwoSlashCommandParser.prArgument(in: prompt) ?? ""
-            prompt = ""
             guard let id = selectedThreadID, let engine = activeConversationEngine else {
                 flashComposerHint("請先開啟本機專案討論串。")
                 return
@@ -1882,18 +1997,21 @@ final class ChatPageModel: ObservableObject {
                 return
             }
             if !title.isEmpty {
-                startPRContribution(description: title, threadID: id)
+                let plan = TatwoPlanArtifactV1(threadID: id, objective: title, kind: "pr")
+                guard persistPlanCanvas(plan) else { return }
+                planInspectorRequest = UUID()
+            } else {
+                prompt = ""
+                guard let project = selectedThreadProject else {
+                    engine.appendSystemMessage(threadID: id, text: "請先開啟本機專案討論串。", status: "info|PR")
+                    return
+                }
+                let cwd = engine.threadRecord(id)?.cwdOverride ?? project.workdir
+                PullRequestCoordinator.shared.present(directory: URL(fileURLWithPath: cwd), title: title) { text in
+                    engine.appendSystemMessage(threadID: id, text: text, status: "info|PR")
+                }
                 return
             }
-            guard let project = selectedThreadProject else {
-                engine.appendSystemMessage(threadID: id, text: "請先開啟本機專案討論串。", status: "info|PR")
-                return
-            }
-            let cwd = engine.threadRecord(id)?.cwdOverride ?? project.workdir
-            PullRequestCoordinator.shared.present(directory: URL(fileURLWithPath: cwd), title: title) { text in
-                engine.appendSystemMessage(threadID: id, text: text, status: "info|PR")
-            }
-            return
         }
         if isShowDiscussionTrayCommand {
             showDiscussionTray()
@@ -1901,7 +2019,6 @@ final class ChatPageModel: ObservableObject {
             flashComposerHint(dispatchRooms.isEmpty ? "目前沒有子討論串；可用 /討論串 主題 新增" : "已顯示討論串")
             return
         }
-        if handleFeedbackCommand() { return }
         guard isLive, let activeLive = activeConversationEngine,
               let id = selectedThreadID else { return }
         guard !pendingPR.contains(id) else {
@@ -2426,7 +2543,9 @@ final class ChatPageModel: ObservableObject {
     }
     /// Captures route and thread before asynchronous checkout; never sends to a newly selected room.
     private func startPRContribution(description: String, threadID: UUID) {
-        guard let engine = localLive, !engine.isRunning(threadID), pendingPR.begin(threadID) else { return }
+        guard let engine = localLive, !engine.isRunning(threadID),
+              let sourcePlan = try? engine.loadPlanArtifact(threadID), sourcePlan.kind == "pr", sourcePlan.state == .confirmed,
+              pendingPR.begin(threadID) else { return }
         let kind: ClaudeSidecar.Kind
         switch routeChoice.brandGroup {
         case .anthropic: kind = .claude
@@ -2438,7 +2557,7 @@ final class ChatPageModel: ObservableObject {
         replaceEngineLoginStatus(login)
         guard login.isLoggedIn else {
             pendingPR.finish(threadID)
-            engine.appendSystemMessage(threadID: threadID, text: "這句沒有送出：請先登入目前引擎。", status: "error|PR")
+            resetPRPlan(threadID, planID: sourcePlan.planID, message: "這句沒有送出：請先登入目前引擎。")
             return
         }
         let model: String?
@@ -2472,27 +2591,41 @@ final class ChatPageModel: ObservableObject {
                         text: "已取得 TATWO OS 原始碼，開始處理：" + description, status: "info|PR")
                 }
                 let id = targetID
+                if id != threadID {
+                    var moved = TatwoPlanArtifactV1(planID: sourcePlan.planID, threadID: id, objective: sourcePlan.objective,
+                        sections: sourcePlan.sections, createdAt: sourcePlan.createdAt, state: .confirmed, kind: "pr")
+                    moved.executionTurnID = sourcePlan.executionTurnID
+                    try engine.savePlanArtifact(moved)
+                    var original = sourcePlan
+                    original.prMessage = "畫布已移到貢獻專案的新討論串，請到該串繼續。"
+                    try engine.savePlanArtifact(original)
+                }
+                planInspectorRequest = UUID()
                 engine.onTurnComplete[id] = { [weak self, weak engine] succeeded, reply in
                     guard let self, let engine, self.pendingPR.contains(id) else { return }
                     guard succeeded else {
                         self.pendingPR.finish(id)
-                        engine.appendSystemMessage(threadID: id, text: "引擎回合失敗或已停止，未開 PR。", status: "error|PR")
+                        self.resetPRPlan(id, planID: sourcePlan.planID, message: "引擎回合失敗或已停止，未開 PR。請檢查已改動檔案後再確認。")
                         return
                     }
                     Task {
                         defer { self.pendingPR.finish(id) }
                         do {
                             guard !engine.isRunning(id) else { throw PullRequestFailure(message: "討論串仍在工作，未開 PR。") }
-                            if let url = try await PullRequestCoordinator.shared.submitContribution(
-                                directory: checkout.directory, repository: repository, identity: identity, reply: reply) {
-                                engine.appendSystemMessage(threadID: id, text: "已建立 PR：" + url.absoluteString, status: "info|PR")
-                                NSWorkspace.shared.open(url)
-                            } else {
-                                engine.appendSystemMessage(threadID: id, text: "引擎沒有改任何檔，未開 PR", status: "info|PR")
+                            guard var plan = try engine.loadPlanArtifact(id), plan.planID == sourcePlan.planID,
+                                  plan.state == .confirmed else { return }
+                            guard let sections = PRPlanReview.sections(reply) else {
+                                throw PullRequestFailure(message: "缺少完整 tatwo-pr 五段摘要；未送 PR，請補齊後再確認。")
                             }
+                            let snapshot = try await PullRequestService.snapshot(at: checkout.directory)
+                            plan.sections = sections; plan.state = .ready
+                            plan.updatedAt = TatwoPlanArtifactV1.storagePrecision(Date())
+                            plan.prReview = PRPlanReview(directory: checkout.directory, repository: repository,
+                                account: identity.username, snapshot: snapshot)
+                            plan.sourceAssistantMessageID = engine.transcript(for: id).last { $0.role == .assistant }?.id
+                            try engine.savePlanArtifact(plan)
                         } catch {
-                            engine.appendSystemMessage(threadID: id,
-                                text: error.localizedDescription + "\n未自動重送；請先確認本機分支與 GitHub 結果。", status: "error|PR")
+                            self.resetPRPlan(id, planID: sourcePlan.planID, message: error.localizedDescription)
                         }
                     }
                 }
@@ -2504,8 +2637,42 @@ final class ChatPageModel: ObservableObject {
                 }
             } catch {
                 pendingPR.finish(targetID)
-                engine.appendSystemMessage(threadID: targetID, text: error.localizedDescription, status: "error|PR")
+                resetPRPlan(targetID, planID: sourcePlan.planID, message: error.localizedDescription)
             }
+        }
+    }
+
+    private func resetPRPlan(_ id: UUID, planID: UUID, message: String) {
+        guard let engine = localLive, var plan = try? engine.loadPlanArtifact(id), plan.planID == planID else { return }
+        plan.state = .discussing; plan.executionTurnID = nil; plan.prMessage = message
+        _ = persistPlanCanvas(plan)
+        engine.appendSystemMessage(threadID: id, text: message, status: "error|PR")
+    }
+
+    func submitActivePRPlan() {
+        guard selectedRemote == nil, var plan = activePlanArtifact, plan.kind == "pr", plan.state == .ready,
+              var review = plan.prReview, !review.attempted, let engine = localLive,
+              !engine.isRunning(plan.threadID), pendingPR.begin(plan.threadID) else { return }
+        do {
+            let identity = try PullRequestCoordinator.shared.identity()
+            guard identity.username == review.account, PullRequestService.repository == review.repository else {
+                throw PullRequestFailure(message: "帳號或倉庫設定已變更，請切回卡片顯示的帳號與倉庫。")
+            }
+            let title = plan.sections.first { $0.title == "標題" }?.body ?? ""
+            let description = plan.sections.filter { $0.title != "標題" }.map { "## \($0.title)\n\($0.body)" }.joined(separator: "\n\n")
+            review.attempted = true; plan.prReview = review; plan.prMessage = "送出中…"
+            guard persistPlanCanvas(plan) else { pendingPR.finish(plan.threadID); return }
+            Task {
+                defer { pendingPR.finish(plan.threadID) }
+                do {
+                    let url = try await PullRequestCoordinator.shared.submitPlan(directory: review.directory, repository: review.repository,
+                        identity: identity, snapshot: review.snapshot, title: title, description: description)
+                    plan.prReview?.submittedURL = url; plan.prMessage = nil
+                } catch { plan.prMessage = error.localizedDescription + "\n未自動重送；請先確認本機分支與 GitHub 結果。" }
+                _ = persistPlanCanvas(plan)
+            }
+        } catch {
+            pendingPR.finish(plan.threadID); plan.prMessage = error.localizedDescription; _ = persistPlanCanvas(plan)
         }
     }
 

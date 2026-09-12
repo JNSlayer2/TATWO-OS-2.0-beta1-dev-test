@@ -53,9 +53,9 @@ final class PullRequestCoordinator: ObservableObject {
             } catch { report(error.localizedDescription) }
         }
     }
-    /// No panel, no retries: explicit /pr description is the submission request.
-    func submitContribution(directory: URL, repository: String, identity expected: FeedbackIdentity,
-                            reply: String) async throws -> URL? {
+    /// Shares the legacy panel's busy lock; only the canvas Submit button calls this.
+    func submitPlan(directory: URL, repository: String, identity expected: FeedbackIdentity,
+                    snapshot: PullRequestService.Snapshot, title: String, description: String) async throws -> URL {
         guard !busy, window?.isVisible != true else {
             throw PullRequestFailure(message: "PR 作業處理中，請先完成或關閉 PR 面板。")
         }
@@ -65,12 +65,8 @@ final class PullRequestCoordinator: ObservableObject {
         guard current.username == expected.username, PullRequestService.repository == repository else {
             throw PullRequestFailure(message: "帳號或倉庫設定已變更，未自動送出 PR。")
         }
-        let status = try await PullRequestService.git(["status", "--porcelain=v1", "--untracked-files=all"], at: directory)
-        guard !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        let draft = try PullRequestService.replyDraft(reply)
-        let snapshot = try await service.preflight(directory: directory, repository: repository, identity: current)
         return try await service.submit(directory: directory, repository: repository, identity: current,
-                                        snapshot: snapshot, title: draft.title, description: draft.description)
+                                        snapshot: snapshot, title: title, description: description)
     }
 
     func close() { guard !busy else { return }; window?.close(); window = nil }

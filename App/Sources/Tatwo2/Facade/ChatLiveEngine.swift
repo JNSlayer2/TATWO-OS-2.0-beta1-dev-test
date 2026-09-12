@@ -172,6 +172,7 @@ final class ChatLiveEngine: LiveEngineAPI {
 
     /// 每次資料變動都叫一次，讓 ChatPageModel 重新發佈 document / transcript。
     var onChange: (() -> Void)?
+    var onPlanChange: ((TatwoPlanArtifactV1) -> Void)?
     /// 權限詢問：回 true 允許。預設「代我核准」→ 直接允許；其他 → 跳 AppKit 確認框。
     var permissionDecider: ((_ tool: String, _ inputPretty: String) -> Bool)?
     /// 代我核准：Codex 以 acceptEdits 起 sidecar（MCP 工具直接放行，其餘詢問由 permissionDecider 自動允許）
@@ -675,6 +676,12 @@ final class ChatLiveEngine: LiveEngineAPI {
     @discardableResult func send(threadID: UUID, text: String, model: String?, engine: ClaudeSidecar.Kind = .claude, systemPrompt: String? = nil, attachments: [String] = [], reasoningEffort: String? = nil, serviceTier: String? = nil) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!t.isEmpty || !attachments.isEmpty), !runningThreads.contains(threadID) else { return false }
+        var plan: TatwoPlanArtifactV1?
+        do { plan = try loadPlanArtifact(threadID) }
+        catch {
+            appendSystemMessage(threadID: threadID, text: "計畫讀取失敗，這句未送出；請先修復畫布資料。", status: "error|Plan")
+            return false
+        }
         if EngineDisableStore.isDisabled(engine) {   // 使用者在模型登入頁禁用了這家：實質不送，不燒 API
             appendSystemMessage(threadID: threadID, text: "\(EngineDisableStore.displayName(engine)) 的 API 已被你禁用，這句沒有送出。要用請到設定 › 模型登入解除禁用。", status: "error|已禁用")
             return false
@@ -694,6 +701,15 @@ final class ChatLiveEngine: LiveEngineAPI {
         }
         guard let sidecar = ensureSidecar(threadID, model: model, engine: engine, systemPrompt: systemPrompt) else { return false }
         let turn = UUID().uuidString
+        let planBriefing = planContext(plan, userText: t)
+        if var confirmed = plan, confirmed.kind != "feedback", confirmed.state == .confirmed, confirmed.executionTurnID == nil, t == "開始" {
+            confirmed.executionTurnID = turn
+            do { try savePlanArtifact(confirmed) }
+            catch {
+                appendSystemMessage(threadID: threadID, text: "計畫執行狀態未能儲存，這句未送出。", status: "error|Plan")
+                return false
+            }
+        }
         turnID[threadID] = turn
         artifactClaims[threadID] = []
         artifactClaimsTruncated.remove(threadID)
@@ -713,6 +729,7 @@ final class ChatLiveEngine: LiveEngineAPI {
                 outgoing = "（這條討論串先前是用 \(prev) 引擎談的，以下是最近對話，請接續，不要重複回答舊問題）\n\(summary)\n\n（現在的訊息）\n\(t)"
             }
         }
+        if let planBriefing { outgoing += "\n\n" + planBriefing }
         sidecar.send(text: outgoing, uuid: turn, attachments: attachments, model: model,
                      reasoningEffort: effort, serviceTier: tier)
         persist()
@@ -1178,6 +1195,12 @@ final class ChatLiveEngine: LiveEngineAPI {
             indexTurnArtifacts(threadID)
             finishSteer(threadID, accepted: false, message: "回合已結束，請先確認插話是否送達", unknown: true)
             let succeeded = !cancelled && !failed && !stoppingThreads.contains(threadID)
+            if succeeded, runningThreads.contains(threadID),
+               let reply = messages[threadID]?.last(where: {
+                   $0.turnID == turnID[threadID] && $0.role == .assistant && $0.eventKind == .message
+               }) {
+                updatePlanFromReply(threadID, reply: reply)
+            }
             runningThreads.remove(threadID); stoppingThreads.remove(threadID); remoteHandles.remove(threadID); persist()
             notifyTurnComplete(threadID, succeeded: succeeded)
         default: break

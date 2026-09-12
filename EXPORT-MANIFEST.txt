@@ -1,6 +1,6 @@
-Source commit: c0d1e16df6476a494e59398c8a5fd895517d02b5
-Source worktree: dirty
-Files: 1402
+Source commit: e1e86aa75d3451c625b349abc59d563475c24c4a
+Source worktree: clean
+Files: 1411
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -71,8 +71,11 @@ App/Sources/Tatwo2/Chat/ChatTranscriptPresentation.swift
 App/Sources/Tatwo2/Chat/ChatTranscriptScrollFollowState.swift
 App/Sources/Tatwo2/Chat/ChatTranscriptScrollIntentObserver.swift
 App/Sources/Tatwo2/Chat/Fable5MothDecor.swift
+App/Sources/Tatwo2/Chat/FeedbackPlanActions.swift
 App/Sources/Tatwo2/Chat/HeaderQuotaStrip.swift
 App/Sources/Tatwo2/Chat/NativeTerminalCore.swift
+App/Sources/Tatwo2/Chat/PRPlanActions.swift
+App/Sources/Tatwo2/Chat/PRPlanReview.swift
 App/Sources/Tatwo2/Chat/PlanQuestion.swift
 App/Sources/Tatwo2/Chat/SlashCommandParser.swift
 App/Sources/Tatwo2/Chat/TatwoChatInteractionMode.swift
@@ -123,6 +126,7 @@ App/Sources/Tatwo2/Facade/CLIWorkbenchController.swift
 App/Sources/Tatwo2/Facade/CallerBinding.swift
 App/Sources/Tatwo2/Facade/CallerBindingAcceptance.swift
 App/Sources/Tatwo2/Facade/ChatAttachmentAcceptance.swift
+App/Sources/Tatwo2/Facade/ChatLiveEngine+Plan.swift
 App/Sources/Tatwo2/Facade/ChatLiveEngine.swift
 App/Sources/Tatwo2/Facade/ChatLiveStore.swift
 App/Sources/Tatwo2/Facade/ChatNativeGoal.swift
@@ -173,6 +177,7 @@ App/Sources/Tatwo2/Facade/OSBindingPreviewModel.swift
 App/Sources/Tatwo2/Facade/OSDocuments.swift
 App/Sources/Tatwo2/Facade/OSUpstream.swift
 App/Sources/Tatwo2/Facade/OSUpstreamBinding.swift
+App/Sources/Tatwo2/Facade/OSUpstreamRefresh.swift
 App/Sources/Tatwo2/Facade/PluginStubs.swift
 App/Sources/Tatwo2/Facade/PluginsSource.swift
 App/Sources/Tatwo2/Facade/PullRequestCoordinator.swift
@@ -1300,6 +1305,7 @@ tests/codex-sidecar-cancellation.test.mjs
 tests/codex-sidecar-turn-controls.test.mjs
 tests/dispatch-watchdog-pressure.test.mjs
 tests/dispatch-worktree-failures.test.mjs
+tests/feedback-plan.test.mjs
 tests/fixtures/attachment-preview-surface-checks.swift
 tests/fixtures/attachment-render-checks.swift
 tests/fixtures/browser-resource-block.mm.in
@@ -1327,6 +1333,9 @@ tests/ipad-use-controller.test.mjs
 tests/ipad-use-mcp.test.mjs
 tests/ipad-use-packaging.test.mjs
 tests/ipad-use-ui-source.test.mjs
+tests/os-upstream-refresh.test.mjs
+tests/plan-canvas.test.mjs
+tests/pr-plan.test.mjs
 tests/tatwo-agent-preset-controller.test.mjs
 tests/tatwo-app-server-same-thread-smoke.test.mjs
 tests/tatwo-cli-entrypoint-portability.test.mjs

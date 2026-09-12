@@ -167,7 +167,7 @@ struct PlanTranscriptSummaryView: View {
                     if isWriting {
                         PlanWritingAnimatedText()
                     } else {
-                        Text("Plan")
+                        Text(artifact?.kind == "pr" && artifact?.state == .ready ? "PR" : "Plan")
                     }
                 }
                 .font(.system(size: 14, weight: .regular))
@@ -354,25 +354,29 @@ private struct PlanTranscriptMarkdownView: View {
 struct PlanTranscriptInspectorView: View {
     let artifact: TatwoPlanArtifactV1?
     @Binding var isPresented: Bool
+    var isWriting: Bool = false
     let selection: TatwoPlanArtifactV1.PlanFlowSelectionV1?
     let localActionPresentation:
         ChatPlanWorkOSLocalActionPresentation
     let editableText: String?
     let onSelectionChange:
         (TatwoPlanArtifactV1.PlanFlowSelectionV1) -> Void
-    let onSaveEditedText: (String) -> Void
+    let onSaveEditedText: (String) -> Bool
     let ultraworkPanel: AnyView
     let ultraworkPrimaryModelID: String
     let ultraworkSecondaryModelID: String?
     let ultraworkAuxiliaryCount: Int
     let onDismissUltrawork: () -> Void
     let onExecute: () -> Void
+    var onFeedbackSubmitted: (UUID) -> Void = { _ in }
+    var onPRSubmit: () -> Void = {}
 
     @State private var isCollapsed = false
     @State private var copied = false
     @State private var isEditing = false
     @State private var editedText = ""
     @State private var showsUltraworkCanvas = false
+    @State private var feedbackLocked = false
 
     private static let collapsedHeight: CGFloat = 320
 
@@ -396,7 +400,16 @@ struct PlanTranscriptInspectorView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             inspectorHeader
                             inspectorBody(markdown: artifact.markdownExport())
-                            if showsUltraworkCanvas {
+                            if artifact.kind == "feedback" {
+                                FeedbackPlanActions(artifact: artifact, isDisabled: isEditing || isWriting,
+                                                    isLocked: $feedbackLocked, onSubmitted: onFeedbackSubmitted)
+                                    .id(artifact.planID)
+                                    .padding(12)
+                            } else if artifact.kind == "pr" {
+                                PRPlanActions(artifact: artifact, isDisabled: isEditing || isWriting,
+                                              onConfirm: onExecute, onSubmit: onPRSubmit)
+                                    .id(artifact.planID).padding(12)
+                            } else if showsUltraworkCanvas {
                                 VStack(alignment: .leading, spacing: 6) {
                                     HStack(spacing: 8) {
                                         Text("Ultrawork")
@@ -422,6 +435,12 @@ struct PlanTranscriptInspectorView: View {
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.bottom, 12)
+                            } else if selection == nil {
+                                Button(artifact.state == .confirmed ? "計畫已確認" : "確認計畫", action: onExecute)
+                                    .frame(maxWidth: .infinity, minHeight: 34)
+                                    .disabled(artifact.state == .confirmed || isEditing || isWriting)
+                                    .accessibilityIdentifier("plan-canvas-confirm")
+                                    .padding(12)
                             } else {
                                 PlanExecutionHandoffView(
                                     selection: selection,
@@ -476,7 +495,10 @@ struct PlanTranscriptInspectorView: View {
 
     private var inspectorHeader: some View {
         HStack(spacing: 4) {
-            Text("Plan")
+            Group {
+                if artifact?.kind == "pr" { Text(artifact?.state == .ready ? "PR" : "PR · Plan") }
+                else { Text(artifact?.kind == "feedback" ? "回報問題" : "Plan") }
+            }
                 .font(.system(size: 14, weight: .semibold))
             Spacer(minLength: 8)
             Button {
@@ -500,8 +522,7 @@ struct PlanTranscriptInspectorView: View {
 
             Button {
                 if isEditing {
-                    onSaveEditedText(editedText)
-                    isEditing = false
+                    if onSaveEditedText(editedText) { isEditing = false }
                 } else {
                     editedText = editableText ?? markdown
                     isEditing = true
@@ -513,6 +534,7 @@ struct PlanTranscriptInspectorView: View {
             .buttonStyle(.plain)
             .planSummaryActionStyle()
             .help(isEditing ? "Finish editing plan" : "Edit plan")
+            .disabled(isWriting || feedbackLocked || (artifact?.kind == "pr" && artifact?.state != .discussing))
             .accessibilityLabel(
                 isEditing ? "Finish editing plan" : "Edit plan")
 
