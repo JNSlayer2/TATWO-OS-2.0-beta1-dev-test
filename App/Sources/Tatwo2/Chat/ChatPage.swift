@@ -97,6 +97,7 @@ struct ChatPage: View {
     enum IssueSettingsTab { case all, archived }
     @State var showOSMenu = false
     @State var showSettingsPage = ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_CHAT_SETTINGS_OPEN"] == "1"  // 2.0 匯出旗標
+    @State var updateSettingsSection: TatwoSettingsPage.Section?
     @State var showLiveQuota = false
     @State var showThemePicker =
         ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_CHAT_THEME_PICKER"] == "1"

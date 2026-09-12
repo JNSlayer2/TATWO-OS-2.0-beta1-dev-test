@@ -1,6 +1,6 @@
-Source commit: 51be7786afb37ad488605f96f299a24a7f3996b5
+Source commit: 5fc7901af75e8dd05461e4071a354f8e923d60a1
 Source worktree: clean
-Files: 1412
+Files: 1413
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -1335,6 +1335,7 @@ tests/ipad-use-packaging.test.mjs
 tests/ipad-use-ui-source.test.mjs
 tests/os-upstream-refresh.test.mjs
 tests/plan-canvas.test.mjs
+tests/plan-transcript-card.test.mjs
 tests/pr-plan.test.mjs
 tests/skill-suggestions-refresh.test.mjs
 tests/tatwo-agent-preset-controller.test.mjs

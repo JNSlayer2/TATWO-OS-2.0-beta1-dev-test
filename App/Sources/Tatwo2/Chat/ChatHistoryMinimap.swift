@@ -13,6 +13,8 @@ extension ChatTranscriptDisplayItem {
                 : (message.role == .assistant ? "回覆" : "系統")
         case .workTimeline:
             return "工作"
+        case .planSummary:
+            return "計畫"
         }
     }
 
@@ -21,6 +23,7 @@ extension ChatTranscriptDisplayItem {
         switch self {
         case .message(let message): text = message.text
         case .workTimeline(let timeline): text = timeline.presentation.text
+        case .planSummary: text = "展開計畫畫布"
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "（無文字）" : String(trimmed.prefix(140))

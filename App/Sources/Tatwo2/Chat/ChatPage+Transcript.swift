@@ -143,11 +143,12 @@ extension ChatPage {
 
         private var displayItems: [ChatTranscriptDisplayItem] {
             let fingerprint = displayFingerprint
-            if fingerprint == cachedDisplayFingerprint {
-                return cachedDisplayItems
-            }
-            return ChatTranscriptDisplayBuilder.build(
-                planThoughtPresentationMessages)
+            let items = fingerprint == cachedDisplayFingerprint
+                ? cachedDisplayItems
+                : ChatTranscriptDisplayBuilder.build(planThoughtPresentationMessages)
+            return ChatPlanArtifactTranscriptProjection.displayItems(
+                items, placement: planArtifactPlacement,
+                sourceAssistantMessageID: planArtifactMessageID)
         }
 
         private var latestAssistantMessageID: String? {
@@ -177,14 +178,6 @@ extension ChatPage {
                 sourceAssistantMessageID:
                     planArtifactMessageID,
                 isPlanWriting: isPlanWriting)
-        }
-
-        private var standalonePlanArtifact: TatwoPlanArtifactV1? {
-            guard planArtifactPlacement.completedArtifact == .standalone
-            else {
-                return nil
-            }
-            return planArtifact
         }
 
         private var shouldRenderPlanWritingSummary: Bool {
@@ -241,7 +234,18 @@ extension ChatPage {
                                             ChatInlineWorkTimelineView(
                                                 timeline: timeline,
                                                 assistantRoute: assistantRoute,
-                                                rowWidth: rowWidth)
+                                                rowWidth: rowWidth,
+                                                planSourceText: timeline.messages.contains { $0.id == planArtifactMessageID }
+                                                    ? messages.first { $0.id == planArtifactMessageID && $0.role == .assistant && $0.eventKind == .message }?.text
+                                                    : nil)
+                                        case .planSummary:
+                                            PlanTranscriptSummaryView(
+                                                artifact: planArtifact,
+                                                isWriting: false,
+                                                isSidePanelPresented: $planInspectorPresented)
+                                                .frame(width: rowWidth, alignment: .leading)
+                                                .id(item.id)
+                                                .accessibilityIdentifier("plan-transcript-summary")
                                         }
                                     }
                                     .modifier(ChatHistoryArrivalNudge(id: item.id, arrival: historyArrival))
@@ -265,19 +269,6 @@ extension ChatPage {
                                             width: rowWidth,
                                             alignment: .leading)
                                         .id("tatwo-plan-writing-summary")
-                                        .accessibilityIdentifier(
-                                            "plan-transcript-summary")
-                                }
-                                if let standalonePlanArtifact {
-                                    PlanTranscriptSummaryView(
-                                        artifact: standalonePlanArtifact,
-                                        isWriting: false,
-                                        isSidePanelPresented:
-                                            $planInspectorPresented)
-                                        .frame(
-                                            width: rowWidth,
-                                            alignment: .leading)
-                                        .id("tatwo-plan-standalone-summary")
                                         .accessibilityIdentifier(
                                             "plan-transcript-summary")
                                 }
@@ -456,10 +447,7 @@ extension ChatPage {
                     assistantRoute: assistantRoute,
                     rowWidth: rowWidth,
                     assistantTranscriptCache: assistantTranscriptCache,
-                    planArtifact:
-                        message.id == planArtifactMessageID
-                            ? planArtifact
-                            : nil,
+                    planArtifact: nil,
                     isLatestAssistantMessage:
                         message.id == latestAssistantMessageID,
                     initialPlanQuestionFocusClaimed:

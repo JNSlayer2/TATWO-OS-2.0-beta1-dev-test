@@ -35,6 +35,39 @@ enum ChatTranscriptScrollDestination: Equatable {
 }
 
 enum ChatPlanArtifactTranscriptProjection {
+    static func title(for artifact: TatwoPlanArtifactV1?) -> String {
+        switch artifact?.kind {
+        case "feedback": "回報問題"
+        case "pr": "PR 計畫"
+        default: "Plan"
+        }
+    }
+
+    static func displayItems(
+        _ items: [ChatTranscriptDisplayItem],
+        placement: Placement,
+        sourceAssistantMessageID: String?
+    ) -> [ChatTranscriptDisplayItem] {
+        guard placement.completedArtifact != .none else { return items }
+        var result = items
+        if placement.completedArtifact == .attachedToSourceAssistant,
+           let sourceAssistantMessageID,
+           let index = items.firstIndex(where: { item in
+               switch item {
+               case .message(let message):
+                   message.id == sourceAssistantMessageID && message.role == .assistant
+               case .workTimeline(let timeline):
+                   timeline.messages.contains { $0.id == sourceAssistantMessageID }
+               case .planSummary: false
+               }
+           }) {
+            result.insert(.planSummary(sourceMessageID: sourceAssistantMessageID), at: index + 1)
+        } else {
+            result.append(.planSummary(sourceMessageID: nil))
+        }
+        return result
+    }
+
     enum CompletedArtifactPlacement: Equatable {
         case none
         case attachedToSourceAssistant
@@ -167,7 +200,7 @@ struct PlanTranscriptSummaryView: View {
                     if isWriting {
                         PlanWritingAnimatedText()
                     } else {
-                        Text(artifact?.kind == "pr" && artifact?.state == .ready ? "PR" : "Plan")
+                        Text(ChatPlanArtifactTranscriptProjection.title(for: artifact))
                     }
                 }
                 .font(.system(size: 14, weight: .regular))
@@ -495,10 +528,7 @@ struct PlanTranscriptInspectorView: View {
 
     private var inspectorHeader: some View {
         HStack(spacing: 4) {
-            Group {
-                if artifact?.kind == "pr" { Text(artifact?.state == .ready ? "PR" : "PR · Plan") }
-                else { Text(artifact?.kind == "feedback" ? "回報問題" : "Plan") }
-            }
+            Text(ChatPlanArtifactTranscriptProjection.title(for: artifact))
                 .font(.system(size: 14, weight: .semibold))
             Spacer(minLength: 8)
             Button {

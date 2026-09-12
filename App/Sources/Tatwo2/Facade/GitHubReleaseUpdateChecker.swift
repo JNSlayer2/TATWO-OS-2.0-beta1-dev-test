@@ -84,7 +84,11 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
     @Published private(set) var dismissed = false
     private var schedule: Task<Void, Never>?
     private let defaults: UserDefaults
-    private let session: URLSession
+    let session: URLSession
+    var repository: String {
+        (defaults.string(forKey: "tatwo2.feedback.repository") ?? Self.defaultRepository)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     private let installedVersion: String
 
     init(defaults: UserDefaults = .standard, session: URLSession? = nil,
@@ -116,8 +120,7 @@ final class GitHubReleaseUpdateChecker: ObservableObject {
         guard !isChecking else { return }
         isChecking = true
         defer { isChecking = false }
-        let repository = (defaults.string(forKey: "tatwo2.feedback.repository") ?? Self.defaultRepository)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let repository = self.repository
         guard repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil,
               let url = URL(string: "https://api.github.com/repos/\(repository)/releases/latest")
         else { availableRelease = nil; status = "更新倉庫設定無效"; return }

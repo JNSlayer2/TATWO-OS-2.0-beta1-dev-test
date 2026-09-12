@@ -204,9 +204,10 @@ extension ChatPage {
                     withAnimation(.easeOut(duration: 0.18)) { showSettingsPage = false }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            TatwoSettingsPage(model: model) {
+            TatwoSettingsPage(model: model, initialSection: updateSettingsSection) {
                 withAnimation(.easeOut(duration: 0.18)) { showSettingsPage = false }
             }
+            .onDisappear { updateSettingsSection = nil }
             .liquidGlassSurface(cornerRadius: LiquidGlassTokens.radiusCard)
             .shadow(color: .black.opacity(0.25), radius: 24, x: 0, y: 10)
             .transition(.opacity.combined(with: .scale(scale: 0.97)))

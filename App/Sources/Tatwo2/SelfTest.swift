@@ -261,6 +261,41 @@ enum SelfTest {
         let engine = ChatLiveEngine(store: ChatLiveStore(root: root), environment: environment)
         let id = engine.doc.selectedThreadID!
         var plan = TatwoPlanArtifactV1(threadID: id, objective: "測試計畫", sections: sections)
+        let source = ChatMessage(id: "plan-source", role: .assistant, text: reply, status: "completed", turnID: "plan-turn")
+        let following = ChatMessage(id: "after-plan", role: .user, text: "再討論")
+        func planItems(_ messages: [ChatMessage], _ sourceID: String?, hasArtifact: Bool = true) -> [ChatTranscriptDisplayItem] {
+            ChatPlanArtifactTranscriptProjection.displayItems(
+                ChatTranscriptDisplayBuilder.build(ChatPlanThoughtPresentation.projectedMessages(
+                    messages, planArtifactSourceMessageID: sourceID)),
+                placement: ChatPlanArtifactTranscriptProjection.placement(
+                    hasArtifact: hasArtifact, sourceAssistantMessageID: sourceID, isPlanWriting: false),
+                sourceAssistantMessageID: sourceID)
+        }
+        let items = planItems([source, following], source.id)
+        let sourceIndex = items.firstIndex {
+            if case .workTimeline(let timeline) = $0 { return timeline.messages.contains { $0.id == source.id } }
+            return false
+        }
+        check("attached summary immediately follows source timeline",
+              sourceIndex.map { $0 + 1 < items.count && items[$0 + 1] == .planSummary(sourceMessageID: source.id) } == true)
+        check("attached summary is unique and precedes next message",
+              items.count == 3 && items.last == .message(following))
+        check("missing source falls back to standalone summary",
+              planItems([source, following], "missing").last == .planSummary(sourceMessageID: nil))
+        check("nil source ends with standalone summary",
+              planItems([source], nil).last == .planSummary(sourceMessageID: nil))
+        check("empty transcript retains standalone summary",
+              planItems([], "missing") == [.planSummary(sourceMessageID: nil)])
+        check("no artifact produces no summary", planItems([], nil, hasArtifact: false).isEmpty)
+        let folded = ChatPlanThoughtPresentation.projectedMessage(source, planArtifactSourceMessageID: source.id)
+        check("folding preserves source and keeps projection empty",
+              folded.text.isEmpty && folded.eventKind == .thinking && source.text == reply)
+        check("normal plan title", ChatPlanArtifactTranscriptProjection.title(for: plan) == "Plan")
+        for (kind, title) in [("feedback", "回報問題"), ("pr", "PR 計畫")] {
+            var titledPlan = plan
+            titledPlan.kind = kind
+            check("shared title \(kind)", ChatPlanArtifactTranscriptProjection.title(for: titledPlan) == title)
+        }
         try engine.savePlanArtifact(plan)
         check("JSON round trip", try engine.loadPlanArtifact(id) == plan)
         check("thread isolation", try engine.loadPlanArtifact(UUID()) == nil)

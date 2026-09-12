@@ -227,6 +227,11 @@ extension ChatPage {
 
                     // 額度條已撤（額度移進 TATWO OS 選單）。
 
+                    SidebarUpdateShortcut {
+                        updateSettingsSection = .github
+                        showOSMenu = false
+                        showSettingsPage = true
+                    }
                     userRowTrailingControls
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

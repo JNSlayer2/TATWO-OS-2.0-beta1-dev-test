@@ -97,6 +97,7 @@ struct TatwoSettingsShell<Content: View>: View {
 struct TatwoSettingsPage: View {
     @ObservedObject private var themeStore = TatwoThemeStore.shared
     @ObservedObject var model: ChatPageModel
+    var initialSection: Section? = nil
     let onClose: () -> Void
 
     enum Section: String, CaseIterable, Identifiable {
@@ -158,7 +159,10 @@ struct TatwoSettingsPage: View {
         TatwoSettingsShell(section: $section) {
             rightContent
         }
-        .onAppear { model.reloadIssueList() }
+        .onAppear {
+            if let initialSection { section = initialSection }
+            model.reloadIssueList()
+        }
         .confirmationDialog(
             "移除這筆 issue？",
             isPresented: Binding(

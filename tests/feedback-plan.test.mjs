@@ -39,7 +39,8 @@ test('hidden discussion rules ask first, forbid submission and contain all six h
 });
 
 test('human submit reuses coordinator review and submit with manual and stale-payload guards', () => {
-  assert.match(canvas, /Text\(artifact\?\.kind == "feedback" \? "回報問題" : "Plan"\)/);
+  assert.match(canvas, /Text\(ChatPlanArtifactTranscriptProjection\.title\(for: artifact\)\)/);
+  assert.match(canvas, /case "feedback": "回報問題"/);
   assert.match(canvas, /if artifact\.kind == "feedback" \{\s+FeedbackPlanActions/);
   assert.match(actions, /"提交 Issue", action: submitIssue/);
   assert.match(actions, /coordinator\.title = issueTitle[\s\S]*coordinator\.content = issueBody[\s\S]*coordinator\.review\(\)/);

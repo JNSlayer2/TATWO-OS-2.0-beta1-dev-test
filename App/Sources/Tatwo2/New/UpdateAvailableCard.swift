@@ -33,11 +33,21 @@ struct UpdateAvailableCard: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(updater.phase == .starting || updater.phase == .handedOff)
                     Spacer()
-                    Button("稍後") { checker.dismissForLaunch() }
+                    if updater.phase == .starting {
+                        Button("取消") { updater.cancelUpdate() }
+                    } else {
+                        Button("稍後") { checker.dismissForLaunch() }
+                            .disabled(updater.phase == .handedOff)
+                    }
+                }
+                if updater.phase == .starting {
+                    ProgressView(value: updater.downloadProgress)
+                    Text("\(Double(updater.downloadedBytes) / 1_000_000, specifier: "%.1f") MB / \(Double(updater.totalBytes) / 1_000_000, specifier: "%.1f") MB")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
                 Text(updater.phase == .handedOff
-                     ? "App 會先關閉，更新完成後自動重新開啟；若一分鐘內沒回來，重新開啟即可看到結果。"
-                     : "按下後 App 會關閉、自動下載並驗證新版、裝好再重新開啟。舊版會保留備份。")
+                     ? "已下載，即將關閉 App 安裝…"
+                     : "先在背景下載，下載完成後 App 才會關閉並安裝。裝好會自動重新開啟，舊版會保留備份。")
                     .font(.footnote).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if case .failed(let reason) = updater.phase {
@@ -69,8 +79,8 @@ struct UpdateAvailableCard: View {
 
     private var updateButtonTitle: String {
         switch updater.phase {
-        case .idle, .failed: return "立即更新"
-        case .starting: return "準備中…"
+        case .idle, .failed: return "下載並更新"
+        case .starting: return "下載與校驗中…"
         case .handedOff: return "更新中，App 即將關閉"
         }
     }
@@ -93,6 +103,26 @@ struct UpdateAvailableCard: View {
                 onOpenCLI()
             }
             catch { executionError = "無法送出安裝指令；請複製到終端機執行。" }
+        }
+    }
+}
+
+struct SidebarUpdateShortcut: View {
+    @ObservedObject private var checker = GitHubReleaseUpdateChecker.shared
+    @ObservedObject private var updater = InAppUpdater.shared
+    let openUpdateSettings: () -> Void
+    var body: some View {
+        if let release = checker.availableRelease, !checker.dismissed {
+            Button(action: openUpdateSettings) {
+                Text(updater.phase == .starting
+                     ? updater.downloadProgress.map { "下載 \(Int($0 * 100))%" } ?? "準備下載…"
+                     : "有新版 \(release.tag_name)")
+                    .font(.caption.weight(.semibold)).lineLimit(1)
+                    .frame(minHeight: 26).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary)
+            .help("開啟設定的 App 更新卡")
+            .accessibilityIdentifier("chat-sidebar-update")
         }
     }
 }

@@ -341,6 +341,7 @@ struct ChatInlineWorkTimeline: Identifiable, Equatable {
 enum ChatTranscriptDisplayItem: Identifiable, Equatable {
     case message(ChatMessage)
     case workTimeline(ChatInlineWorkTimeline)
+    case planSummary(sourceMessageID: String?)
 
     var id: String {
         switch self {
@@ -348,6 +349,8 @@ enum ChatTranscriptDisplayItem: Identifiable, Equatable {
             "message:\(message.id)"
         case .workTimeline(let timeline):
             timeline.id
+        case .planSummary(let sourceMessageID):
+            sourceMessageID.map { "tatwo-plan-summary:\($0)" } ?? "tatwo-plan-standalone-summary"
         }
     }
 }
@@ -612,6 +615,7 @@ struct ChatInlineWorkTimelineView: View {
     let timeline: ChatInlineWorkTimeline
     let assistantRoute: ChatRouteChoice
     let rowWidth: CGFloat
+    let planSourceText: String?
 
     @State private var isExpanded: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -619,11 +623,13 @@ struct ChatInlineWorkTimelineView: View {
     init(
         timeline: ChatInlineWorkTimeline,
         assistantRoute: ChatRouteChoice,
-        rowWidth: CGFloat
+        rowWidth: CGFloat,
+        planSourceText: String? = nil
     ) {
         self.timeline = timeline
         self.assistantRoute = assistantRoute
         self.rowWidth = rowWidth
+        self.planSourceText = planSourceText
         _isExpanded = State(
             initialValue: ChatInlineWorkTimelineExpansionPolicy.defaultIsExpanded(
                 for: timeline.presentation))
@@ -698,6 +704,11 @@ struct ChatInlineWorkTimelineView: View {
                 }
                 .frame(maxWidth: 440, alignment: .leading)
                 .padding(.leading, summary.isActive ? 2 : Self.assistantTextInset)
+                if let planSourceText {
+                    ChatAssistantTranscriptBlockView(
+                        document: TatwoAssistantTranscriptPresentation.document(markdown: planSourceText),
+                        copyAllText: planSourceText)
+                }
             }
         }
         .frame(width: rowWidth, alignment: .leading)
@@ -727,8 +738,8 @@ struct ChatInlineWorkTimelineView: View {
                                    startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
                 .overlay(Circle().strokeBorder(Color.red.opacity(failed ? 0.35 : 0), lineWidth: 1))
                 .shadow(color: .black.opacity(0.04), radius: 7, x: 0, y: 4)
-            if isExpanded || failed {
-                Text("\(summary.label) · \(summary.compactText)")
+            if isExpanded || failed || planSourceText != nil {
+                Text(planSourceText != nil ? "計畫已整理" : "\(summary.label) · \(summary.compactText)")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

@@ -58,20 +58,26 @@ for URL in "$ZIP_URL" "$SHA_URL"; do
   [[ "$URL" == "https://github.com/$REPO/releases/download/"* ]] || fail "附件下載網址不符合公開倉庫"
 done
 printf '正在下載 App 與 SHA-256 校驗檔…\n'
-curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$TEMP/TATWO-OS.zip" "$ZIP_URL"
+ZIP="$TEMP/TATWO-OS.zip"
+if [[ -n "${TATWO_OS_PREFETCHED_ZIP:-}" ]]; then
+  [[ -f "$TATWO_OS_PREFETCHED_ZIP" ]] || fail "預先下載的 App 不存在"
+  ZIP="$TATWO_OS_PREFETCHED_ZIP"
+else
+  curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$ZIP" "$ZIP_URL"
+fi
 curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$TEMP/TATWO-OS.zip.sha256" "$SHA_URL"
 read -r EXPECTED _ < "$TEMP/TATWO-OS.zip.sha256" || true
 [[ "${EXPECTED:-}" =~ ^[[:xdigit:]]{64}$ ]] || fail "SHA-256 校驗檔格式錯誤"
-ACTUAL="$(shasum -a 256 "$TEMP/TATWO-OS.zip")"
+ACTUAL="$(shasum -a 256 "$ZIP")"
 ACTUAL="${ACTUAL%% *}"
 [[ "$ACTUAL" == "$EXPECTED" ]] || fail "SHA-256 不符；未變更已安裝 App"
 printf '校驗成功，正在解壓縮…\n'
 # Reject traversal/absolute entries before extracting the verified publisher archive.
 while IFS= read -r ENTRY; do
   case "$ENTRY" in /*|../*|*/../*|*/..) fail "壓縮檔含不安全路徑" ;; esac
-done < <(unzip -Z1 "$TEMP/TATWO-OS.zip")
+done < <(unzip -Z1 "$ZIP")
 # ditto 解壓會把 AppleDouble（._ 檔）還原成 xattr 而不是留成檔案；unzip 會留成檔案，破壞簽章封印。
-ditto -x -k "$TEMP/TATWO-OS.zip" "$TEMP/unpacked"
+ditto -x -k "$ZIP" "$TEMP/unpacked"
 SOURCE="$TEMP/unpacked/TATWO OS.app"
 [[ -d "$SOURCE" && ! -L "$SOURCE" && -f "$SOURCE/Contents/Info.plist" ]] || fail "附件內沒有有效的 TATWO OS.app"
 # SHA-256 checks transport integrity; a valid persistent signature checks app identity.
