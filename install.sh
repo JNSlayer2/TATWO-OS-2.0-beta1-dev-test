@@ -62,11 +62,11 @@ done
 download_full() {
 printf '正在下載 App 與 SHA-256 校驗檔…\n'
 ZIP="$TEMP/TATWO-OS.zip"
+# 大檔下載：慢線路上 HTTP/2 串流常在中途被中斷（curl 92）；用 HTTP/1.1、續傳、對所有錯誤重試。
 if [[ -n "${TATWO_OS_PREFETCHED_ZIP:-}" ]]; then
   [[ -f "$TATWO_OS_PREFETCHED_ZIP" ]] || fail "預先下載的 App 不存在"
   ZIP="$TATWO_OS_PREFETCHED_ZIP"
 else
-  # 慢線路上 HTTP/2 串流常在中途被中斷（curl 92）；用 HTTP/1.1、續傳、對所有錯誤重試。
   curl --proto '=https' --proto-redir '=https' --http1.1 -fSL -C - --retry 5 --retry-all-errors --retry-delay 3 -o "$ZIP" "$ZIP_URL"
 fi
 curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$TEMP/TATWO-OS.zip.sha256" "$SHA_URL"
