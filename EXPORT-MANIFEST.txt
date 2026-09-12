@@ -1,6 +1,6 @@
 Source commit: c0d1e16df6476a494e59398c8a5fd895517d02b5
-Source worktree: clean
-Files: 1400
+Source worktree: dirty
+Files: 1402
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -1279,6 +1279,8 @@ scripts/tests/browser-staging-loopback-policy.m
 scripts/tests/browser-staging-loopback-startup.py
 scripts/update-blocklists.sh
 scripts/validate-tatwo-sync-catalog.mjs
+skills/tatwo-ultrawork/SKILL.md
+skills/tatwo-ultrawork/agents/openai.yaml
 tests/agent-kernel-driver-k3-source-contract.test.mjs
 tests/botpage-antismuggle-source-contract.test.mjs
 tests/browser-address-controls.test.mjs

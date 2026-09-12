@@ -43,7 +43,7 @@ export DEST
 # NUL-delimited file lists preserve Unicode/space-containing filenames.
 node --input-type=module <<'JS' | rsync -a --delete --from0 --files-from=- "$SOURCE/" "$DEST/"
 import { execFileSync } from 'node:child_process';
-const roots = ['App/', 'Apps/', 'Tools/', 'Packages/', 'Engines/', 'scripts/', 'tests/', 'public/', 'Package.swift', 'Package.resolved', 'README.md', 'LICENSE', 'SECURITY.md', 'os.md', '.gitignore'];
+const roots = ['App/', 'Apps/', 'Tools/', 'Packages/', 'Engines/', 'scripts/', 'tests/', 'public/', 'skills/tatwo-ultrawork/SKILL.md', 'skills/tatwo-ultrawork/agents/', 'Package.swift', 'Package.resolved', 'README.md', 'LICENSE', 'SECURITY.md', 'os.md', '.gitignore'];
 roots.push('config/tatwo-sync-catalog-v1.json', 'config/tatwo-durable-surface-inventory-v1.json', 'config/sync-modules.v1.json');
 const files = execFileSync('git', ['-C', process.env.SOURCE, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...roots], { maxBuffer: 64 * 1024 * 1024 }).toString().split('\0').filter(Boolean);
 const banned = new Set(['docs', 'note.md', '經驗.md', 'CLAUDE.md', 'AGENTS.md', '.seedmux', '.tatwo2', '.review-tmp', 'output', 'goldens', 'shots', 'runtime-backups', '.git', 'node_modules', 'dist']);

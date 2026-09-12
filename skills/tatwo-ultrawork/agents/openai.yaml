@@ -1,0 +1,4 @@
+interface:
+  display_name: "TATWO Ultrawork"
+  short_description: "TATWO 分工與驗收：主導、loops、高風險才審、spec/tasks/converge"
+  default_prompt: "讀 $tatwo-ultrawork：照角色表分工，能寫成規格的派 loops，高風險才開一輪跨家審查；用 spec/tasks/converge 三份檔對齊；sub 的完成不算數，主導親讀 diff 親跑驗證。"
