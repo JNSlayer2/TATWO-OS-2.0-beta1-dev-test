@@ -145,6 +145,6 @@ test('W30 80 MiB / 2,000 resource files: delta_tree <10s, one hash batch, final 
   const rejected = spawnSync('codesign', ['--verify', '--deep', '--strict', corrupt], { encoding: 'utf8' });
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /modified|invalid|sealed resource/i);
-  assert.match(install, /delta_tree "\$manifest"[^\n]+\|\| exit 1[\s\S]*?verify_signed_app "\$SOURCE"/);
+  assert.match(install, /delta_tree "\$manifest"[^\n]+\|\| soft_fail[^\n]+[\s\S]*?verify_signed_app "\$SOURCE"/);
   assert.match(install, /codesign --verify --deep --strict "\$app"/);
 });

@@ -39,7 +39,7 @@ test('updater reuses install.sh from the same public repository for signing and 
 
 // 把 Swift 裡的 helper 模板還原成真的 bash 腳本，用假的 install.sh 跑一遍。
 function renderHelper({ pid, resultPath, logPath, destination, label, prefetchedZip,
-  prefetchedAppZip = '', prefetchedRuntimeZip = '', prefetchedDeltaZip = '', prefetchedManifest = '', wait = 10 }) {
+  prefetchedAppZip = '', prefetchedRuntimeZip = '', prefetchedDeltaZip = '', prefetchedManifest = '', prefetchedRoute = '', wait = 10 }) {
   const begin = updater.indexOf('// UPDATE-HELPER-BEGIN');
   const end = updater.indexOf('// UPDATE-HELPER-END');
   const block = updater.slice(begin, end);
@@ -52,7 +52,7 @@ function renderHelper({ pid, resultPath, logPath, destination, label, prefetched
     .replace('\\(helperWaitSeconds)', String(wait))
     .replace(/\\\(quoted\((\w+)\)\)/g, (_, key) => {
       const values = { tag: 'v9.9.9', installURL: 'https://invalid.example/install.sh',
-        resultPath, logPath, destination, label, prefetchedZip, prefetchedAppZip, prefetchedRuntimeZip, prefetchedDeltaZip, prefetchedManifest, privateInstaller: "", githubUsername: "" };
+        resultPath, logPath, destination, label, prefetchedZip, prefetchedAppZip, prefetchedRuntimeZip, prefetchedDeltaZip, prefetchedManifest, prefetchedRoute, privateInstaller: "", githubUsername: "" };
       return "'" + values[key].replaceAll("'", "'\\''") + "'";
     });
 }
@@ -85,6 +85,7 @@ function run(fakeInstallExit, options = {}) {
     printf 'version=%s\\nzip=%s\\n' "$TATWO_OS_VERSION" "$TATWO_OS_PREFETCHED_ZIP" >> "$TEST_DIR/install.calls"
     printf 'app=%s\\nruntime=%s\\n' "$TATWO_OS_PREFETCHED_APP_ZIP" "$TATWO_OS_PREFETCHED_RUNTIME_ZIP" > "$TEST_DIR/layers.calls"
     printf 'delta=%s\\nmanifest=%s\\n' "$TATWO_OS_PREFETCHED_DELTA_ZIP" "$TATWO_OS_PREFETCHED_MANIFEST" > "$TEST_DIR/delta.calls"
+    printf '%s\\n' "$TATWO_OS_PREFETCHED_ROUTE" > "$TEST_DIR/route.calls"
     [ "\${RELAUNCH_DURING_INSTALL:-0}" = 0 ] || touch "$TEST_DIR/relaunched"
     exit ${fakeInstallExit}
   `);
@@ -100,7 +101,7 @@ function run(fakeInstallExit, options = {}) {
   const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
   writeFileSync(script, renderHelper({
     pid, resultPath: join(dir, options.runID ? options.runID + '.json' : 'result.json'), logPath: join(dir, 'update.log'),
-    destination, prefetchedZip, prefetchedAppZip: options.appZip ?? '', prefetchedRuntimeZip: options.runtimeZip ?? '', prefetchedDeltaZip: options.deltaZip ?? '', prefetchedManifest: options.manifest ?? '',
+    destination, prefetchedZip, prefetchedAppZip: options.appZip ?? '', prefetchedRuntimeZip: options.runtimeZip ?? '', prefetchedDeltaZip: options.deltaZip ?? '', prefetchedManifest: options.manifest ?? '', prefetchedRoute: options.route ?? '',
     label: 'ai.tatwo.tatwo2.updater.' + (options.runID ?? 'test'), wait: options.stillRunning ? 0 : 10,
   }).replace('export PATH=/usr/bin:/bin:/usr/sbin:/sbin', `export PATH=${quote(bin)}:/usr/bin:/bin:/usr/sbin:/sbin`));
   const started = Date.now();
@@ -709,4 +710,11 @@ test('W24 helper polls 0.2 seconds with unchanged total wait and emits installSe
   const receipt = JSON.parse(readFileSync(join(result.dir, 'result.json'), 'utf8'));
   assert.equal(receipt.ok, true);
   assert.ok(Number.isInteger(receipt.installSeconds) && receipt.installSeconds >= 0);
+});
+
+test('W31 helper passes prepared delta/layered route unchanged to the installer', () => {
+  for (const route of ['delta', 'layered']) {
+    const result = run(0, { route });
+    assert.equal(readFileSync(join(result.dir, 'route.calls'), 'utf8').trim(), route);
+  }
 });

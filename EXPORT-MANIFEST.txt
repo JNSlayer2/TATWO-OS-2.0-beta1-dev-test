@@ -1,6 +1,6 @@
-Source commit: b926550187df4319042707dd4d95e21e9884c7f2
+Source commit: 4f9095af0ee8b97ad38f5abf3563aceea0ed8f97
 Source worktree: clean
-Files: 1438
+Files: 1439
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -1439,3 +1439,4 @@ tests/update-channels.test.mjs
 tests/w28-audit.test.mjs
 tests/w29a-update-fixes.test.mjs
 tests/w29b-ux-fixes.test.mjs
+tests/w31-r2-tail.test.mjs

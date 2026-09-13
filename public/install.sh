@@ -37,7 +37,8 @@ cleanup() {
     fi
   fi
   if [[ -n "$LOCK" && -n "$STAGE" ]]; then mv "$LOCK" "$STAGE/lock.finished" || true; fi
-  if [[ "$REPLACED" == 0 && -n "$STAGE" && -d "$STAGE" && ! -f "$STAGE/transaction.json" ]]; then
+  if [[ "$REPLACED" == 0 && -n "$STAGE" && -d "$STAGE" ]] &&
+     { [[ ! -f "$STAGE/transaction.json" ]] || [[ "$(plutil -extract phase raw -o - "$STAGE/transaction.json" 2>/dev/null)" == prepared ]]; }; then
     local archives="$HOME/Library/Application Support/TATWO OS/UpdateArchives"
     mkdir -p "$archives" && mv "$STAGE" "$archives/failed-$(basename "$STAGE")" || true
   fi
@@ -125,13 +126,11 @@ reconcile_transactions() {
   done
 }
 claim_directory() {
-  local path="$1" temporary="$1.tmp.$$"
-  mkdir "$temporary" 2>/dev/null || return 1
-  write_owner "$temporary"
-  # mv publishes owner with the directory. A competing directory may absorb our
-  # temporary directory; verify ownership before doing anything under the lock.
-  mv "$temporary" "$path" 2>/dev/null || return 1
-  [[ "$(cat "$path/owner" 2>/dev/null)" == "$(printf '%s\n%s' "$$" "$(process_start "$$")")" ]]
+  local path="$1"
+  # Admission serializes publication; mkdir never nests into a competing lock.
+  # A killed owner write leaves a reclaimable lock (the ownerless grace applies).
+  mkdir -m 700 "$path" 2>/dev/null || return 1
+  write_owner "$path"
 }
 acquire_update_lock() {
   local path="$(dirname "$DEST")/.tatwo-update.lock" owner modified now guard
@@ -139,8 +138,9 @@ acquire_update_lock() {
   # Serialize stale-guard reclamation too. Kernel ownership disappears on SIGKILL;
   # the stable admission inode is never deleted or interpreted as a live lock.
   [[ ! -L "$admission" ]] || fail "更新鎖路徑無效"
+  [[ -w "$(dirname "$DEST")" ]] || fail "沒有應用程式目錄寫入權限，請使用具權限的帳號"
   exec 9>>"$admission"
-  /usr/bin/lockf -s -t 0 9 || fail "更新鎖復原正在進行"
+  /usr/bin/lockf -s -t 0 9 || fail "另一個更新正在取得鎖，請稍後再試"
   if [[ -d "$path" ]]; then
     [[ ! -L "$path" ]] || fail "更新鎖無效"
     owner_file_active "$path" && fail "另一個更新正在執行"
@@ -165,6 +165,26 @@ acquire_update_lock() {
 # TEMP-RETENTION-BEGIN
 archive_old_downloads() {
   local dir manifest="${TMPDIR:-/tmp}/tatwo-install-trash-$(uuidgen).md"
+  local archives="$HOME/Library/Application Support/TATWO OS/UpdateArchives" phase owner started
+  while IFS= read -r -d '' dir; do
+    [[ ! -L "$dir" && -O "$dir" ]] || continue
+    owner_file_active "$dir" && continue
+    if ! { mkdir -p "$archives/retained-locks" && mv "$dir" "$archives/retained-locks/$(basename "$dir")-$(uuidgen)"; }; then
+      printf '封存更新鎖失敗，保留原位置：%s\n' "$dir" >&2
+    fi
+  done < <(find "$(dirname "$DEST")" -depth -maxdepth 3 -type d \( -name '.tatwo-lock-retained.*' -o -name 'reconcile-orphan.*' \) -mmin +1440 -print0)
+  while IFS= read -r -d '' dir; do
+    [[ ! -L "$dir" && -O "$dir" ]] || continue
+    phase="$(plutil -extract phase raw -o - "$dir/transaction.json" 2>/dev/null)" || continue
+    case "$phase" in prepared|recovered|rolled_back) ;; *) continue;; esac
+    owner="$(plutil -extract owner raw -o - "$dir/transaction.json" 2>/dev/null)" || continue
+    [[ "$owner" =~ ^[0-9]+$ && "$owner" -gt 0 ]] || continue
+    started="$(plutil -extract ownerStart raw -o - "$dir/transaction.json" 2>/dev/null || true)"
+    owner_active "$owner" "$started" && continue
+    if ! { mkdir -p "$archives" && mv "$dir" "$archives/prepared-$(basename "$dir")-$(uuidgen)"; }; then
+      printf '封存暫存失敗，保留原位置：%s\n' "$dir" >&2
+    fi
+  done < <(find "$(dirname "$DEST")" -maxdepth 1 -type d -name '.tatwo-update.*.noindex' -print0)
   while IFS= read -r -d '' dir; do
     [[ ! -L "$dir" && -O "$dir" && ! -f "$dir/transaction.json" ]] || continue
     if [[ -f "$dir/owner" ]]; then
@@ -539,6 +559,15 @@ JXA
 # DELTA-TREE-END
 # DELTA-SELECTION-BEGIN
 delta_preferred() {
+  # A prepared candidate owns its route; assembly still checks hashes and seals.
+  case "${TATWO_OS_PREFETCHED_ROUTE:-}" in
+    delta) return 0;; layered) return 1;; "") ;; *) return 1;;
+  esac
+  if [[ -n "${TATWO_OS_OFFLINE_RELEASE:-}" &&
+        -f "${TATWO_OS_PREFETCHED_DELTA_ZIP:-}" && -f "${TATWO_OS_PREFETCHED_MANIFEST:-}" &&
+        ! -f "${TATWO_OS_PREFETCHED_APP_ZIP:-}" && ! -f "$TATWO_OS_OFFLINE_RELEASE/TATWO-OS-app.zip" ]]; then
+    return 0
+  fi
   local installed
   installed="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null)" || return 1
   osascript -l JavaScript - "$TEMP/release.json" "$DEST/Contents" "$installed" <<'JXA' >/dev/null 2>&1
@@ -573,67 +602,70 @@ function run(a) {
 JXA
 }
 # DELTA-SELECTION-END
-soft_fail() { exit 1; }
+soft_fail() {
+  printf '%s\n' "$*" >> "$STAGE/fallback.log"
+  exit 1
+}
 assemble_delta() (
   trap - EXIT ERR
   fail() { soft_fail "$@"; }
   local manifest="$STAGE/manifest.json" from tag installed
-  layer_download TATWO-OS.manifest.json "$TATWO_OS_PREFETCHED_MANIFEST" "$manifest" || exit 1
-  from="$(plutil -extract fromTag raw -o - "$manifest")" || exit 1
-  tag="$(plutil -extract tag raw -o - "$manifest")" || exit 1
-  installed="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist")" || exit 1
+  layer_download TATWO-OS.manifest.json "$TATWO_OS_PREFETCHED_MANIFEST" "$manifest" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  from="$(plutil -extract fromTag raw -o - "$manifest")" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  tag="$(plutil -extract tag raw -o - "$manifest")" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  installed="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist")" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   [[ "$from" =~ ^v[0-9]+([.][0-9]+){1,3}$ && "$tag" =~ ^v[0-9]+([.][0-9]+){1,3}$ && "$from" == "v${installed#v}" &&
-     "$tag" == "$(plutil -extract tag_name raw -o - "$TEMP/release.json")" ]] || exit 1
-  layer_download "TATWO-OS-delta-$from-$tag.zip" "$TATWO_OS_PREFETCHED_DELTA_ZIP" "$STAGE/delta.zip" || exit 1
-  delta_tree "$manifest" "$STAGE/delta.zip" "$DEST" "$STAGE/delta.app.disabled" || exit 1
+     "$tag" == "$(plutil -extract tag_name raw -o - "$TEMP/release.json")" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  layer_download "TATWO-OS-delta-$from-$tag.zip" "$TATWO_OS_PREFETCHED_DELTA_ZIP" "$STAGE/delta.zip" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  delta_tree "$manifest" "$STAGE/delta.zip" "$DEST" "$STAGE/delta.app.disabled" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   SOURCE="$STAGE/delta.app.disabled"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE/Contents/Info.plist")" == "${tag#v}" ]] || exit 1
-  verify_signed_app "$SOURCE"
-)
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE/Contents/Info.plist")" == "${tag#v}" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  verify_signed_app "$SOURCE" || soft_fail "候選 App 簽章驗證失敗"
+) 2>>"$STAGE/fallback.log"
 assemble_runtime() (
   trap - EXIT ERR
   fail() { soft_fail "$@"; }
   local meta="$SOURCE/Contents/Resources/runtime-layer.json" sha old_sha path parent n=0 reuse=1
   local paths=()
-  layer_download TATWO-OS-app.zip "${TATWO_OS_PREFETCHED_APP_ZIP:-}" "$TEMP/app.zip" || exit 1
-  ditto -x -k "$TEMP/app.zip" "$STAGE/split" || exit 1
-  [[ -d "$SOURCE" && ! -L "$SOURCE" && ! -L "$SOURCE/Contents" ]] || exit 1
-  sha="$(plutil -extract sha raw -o - "$meta")" || exit 1
-  [[ "$sha" =~ ^[0-9a-f]{64}$ && "$RUNTIME_NAMES" == *" TATWO-OS-runtime-${sha:0:12}.zip "* ]] || exit 1
+  layer_download TATWO-OS-app.zip "${TATWO_OS_PREFETCHED_APP_ZIP:-}" "$TEMP/app.zip" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  ditto -x -k "$TEMP/app.zip" "$STAGE/split" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  [[ -d "$SOURCE" && ! -L "$SOURCE" && ! -L "$SOURCE/Contents" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  sha="$(plutil -extract sha raw -o - "$meta")" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ && "$RUNTIME_NAMES" == *" TATWO-OS-runtime-${sha:0:12}.zip "* ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   old_sha="$(plutil -extract sha raw -o - "$DEST/Contents/Resources/runtime-layer.json" 2>/dev/null)" || old_sha=""
   [[ "$sha" == "$old_sha" ]] || reuse=0
   while path="$(plutil -extract "paths.$n" raw -o - "$meta" 2>/dev/null)"; do
-    case "$path" in Resources/*|Frameworks/*) ;; *) exit 1 ;; esac
-    case "/$path/" in *'/../'*|*'/./'*|*'//'*) exit 1 ;; esac
+    case "$path" in Resources/*|Frameworks/*) ;; *) soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）" ;; esac
+    case "/$path/" in *'/../'*|*'/./'*|*'//'*) soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）" ;; esac
     parent="$SOURCE/Contents/$path"
     while [[ "$parent" != "$SOURCE" ]]; do
-      [[ ! -L "$parent" ]] || exit 1
+      [[ ! -L "$parent" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
       parent="$(dirname "$parent")"
     done
     paths+=("$path"); n=$((n + 1))
     [[ -e "$DEST/Contents/$path" || -L "$DEST/Contents/$path" ]] || reuse=0
   done
-  [[ "$n" -gt 0 ]] || exit 1
+  [[ "$n" -gt 0 ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   if [[ "$reuse" == 0 ]]; then
-    layer_download "TATWO-OS-runtime-${sha:0:12}.zip" "${TATWO_OS_PREFETCHED_RUNTIME_ZIP:-}" "$TEMP/runtime.zip" || exit 1
-    ditto -x -k "$TEMP/runtime.zip" "$SOURCE/Contents" || exit 1
+    layer_download "TATWO-OS-runtime-${sha:0:12}.zip" "${TATWO_OS_PREFETCHED_RUNTIME_ZIP:-}" "$TEMP/runtime.zip" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+    ditto -x -k "$TEMP/runtime.zip" "$SOURCE/Contents" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   fi
   for path in "${paths[@]}"; do
     if [[ "$reuse" == 1 ]]; then
       parent="$DEST/Contents/$path"
       while [[ "$parent" != "$DEST" ]]; do
-        [[ ! -L "$parent" ]] || exit 1
+        [[ ! -L "$parent" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
         parent="$(dirname "$parent")"
       done
-      [[ ! -L "$DEST" ]] || exit 1
+      [[ ! -L "$DEST" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
       parent="$DEST/Contents"
-      clone_copy "$parent/$path" "$SOURCE/Contents/$path" || exit 1
+      clone_copy "$parent/$path" "$SOURCE/Contents/$path" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
     else
-      [[ -e "$SOURCE/Contents/$path" || -L "$SOURCE/Contents/$path" ]] || exit 1
+      [[ -e "$SOURCE/Contents/$path" || -L "$SOURCE/Contents/$path" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
     fi
   done
-  verify_signed_app "$SOURCE"
-)
+  verify_signed_app "$SOURCE" || soft_fail "候選 App 簽章驗證失敗"
+) 2>>"$STAGE/fallback.log"
 # RUNTIME-ASSEMBLY-END
 # Query the uncompressed, checksum-bound whole-tree size BEFORE any candidate ZIP.
 if [[ "$RELEASE_HAS_MANIFEST" == 1 ]]; then
@@ -646,18 +678,17 @@ else
   printf '此版本沒有大小清單，以壓縮大小 ×4 估計所需空間。\n' >&2
 fi
 check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"
-[[ -w /Applications ]] || fail "沒有 /Applications 寫入權限，請使用具權限的帳號"
 SOURCE="$STAGE/split/TATWO OS.app"
 if [[ -n "${TATWO_OS_PREFETCHED_DELTA_ZIP:-}" && -n "${TATWO_OS_PREFETCHED_MANIFEST:-}" ]] && delta_preferred; then
   if assemble_delta; then SOURCE="$STAGE/delta.app.disabled"
-  else printf '差異更新驗證失敗或版本不符，改用層級下載\n' >&2; fi
+  else printf '差異／層級路徑失敗原因見 %s；改用層級下載\n' "$STAGE/fallback.log" >&2; fi
 fi
 if [[ "$SOURCE" != "$STAGE/split/TATWO OS.app" ]]; then
   printf '差異更新組裝與簽章驗證成功。\n'
 elif [[ -n "$APP_URL" ]] && assemble_runtime; then
   printf '執行環境層組裝與簽章驗證成功。\n'
 else
-  [[ -z "$APP_URL" ]] || printf '執行環境層與簽章不符，改用完整下載\n' >&2
+  [[ -z "$APP_URL" ]] || printf '差異／層級路徑失敗原因見 %s；改用完整下載\n' "$STAGE/fallback.log" >&2
   download_full
   verify_signed_app "$SOURCE"
 fi

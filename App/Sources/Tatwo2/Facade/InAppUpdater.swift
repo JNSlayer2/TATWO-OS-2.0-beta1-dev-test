@@ -158,6 +158,7 @@ private struct UpdateRuntimeLayer: Decodable {
 }
 
 private struct UpdateArchives {
+    var route: String = "layered"
     var zip: URL?
     var appZip: URL?
     var runtimeZip: URL?
@@ -407,13 +408,17 @@ final class InAppUpdater: ObservableObject {
         let snapshot = owner(lock), guardPath = lock.appendingPathComponent("reconcile")
         var guarded = false
         defer {
-            if guarded {
-                try? fm.removeItem(at: guardPath.appendingPathComponent("owner")); rmdir(guardPath.path)
-            }
-            if owned {
-                try? fm.removeItem(at: lock.appendingPathComponent("owner")); rmdir(lock.path)
-            } else if guarded {
-                try? fm.moveItem(at: lock, to: parent.appendingPathComponent(".tatwo-lock-retained.\(UUID().uuidString)"))
+            // Retirement waits for a short claimant probe rather than leaving a live-owner lock behind.
+            if flock(admission, LOCK_EX) == 0 {
+                if guarded {
+                    try? fm.removeItem(at: guardPath.appendingPathComponent("owner")); rmdir(guardPath.path)
+                }
+                if owned {
+                    try? fm.removeItem(at: lock.appendingPathComponent("owner")); rmdir(lock.path)
+                } else if guarded {
+                    try? fm.moveItem(at: lock, to: parent.appendingPathComponent(".tatwo-lock-retained.\(UUID().uuidString)"))
+                }
+                flock(admission, LOCK_UN)
             }
         }
         if fm.fileExists(atPath: guardPath.path) {
@@ -424,6 +429,8 @@ final class InAppUpdater: ObservableObject {
         guard claim(guardPath) else { return }
         guarded = true
         guard owner(lock) == snapshot else { return }
+        // The owned lock/reconcile guard fences installers during seal verification.
+        flock(admission, LOCK_UN)
         for stage in (try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? []
             where stage.lastPathComponent.hasPrefix(".tatwo-update.") && stage.pathExtension == "noindex" {
             let file = stage.appendingPathComponent("transaction.json"), result = stage.appendingPathComponent("result.json")
@@ -450,6 +457,11 @@ final class InAppUpdater: ObservableObject {
                     receipt("interrupted_commit_completed", ok: true); continue
                 }
                 guard validApp(backup) else { receipt("restore_refused"); continue }
+                // Only the actual restore holds admission; codesign stays outside it.
+                guard flock(admission, LOCK_EX | LOCK_NB) == 0 else { return }
+                defer { flock(admission, LOCK_UN) }
+                guard owner(lock) == snapshot, owner(guardPath) == identity,
+                      (try? Data(contentsOf: file)) == data else { return }
                 if fm.fileExists(atPath: destination) {
                     try fm.moveItem(at: dest, to: stage.appendingPathComponent("interrupted.app.disabled"))
                 }
@@ -751,6 +763,7 @@ final class InAppUpdater: ObservableObject {
             return zip
         }
         var result = UpdateArchives(), completed: Int64 = 0
+        result.route = useDelta ? "delta" : "layered"
         for archive in archives {
             let zip = try await fetch(archive, offset: completed)
             try? PeerUpdateSource.publish(directory, tag: tag) {
@@ -844,7 +857,8 @@ final class InAppUpdater: ObservableObject {
                 destination: Self.destinationApp, label: label, prefetchedZip: zip.zip?.path ?? "",
                 prefetchedAppZip: zip.appZip?.path ?? "", prefetchedRuntimeZip: zip.runtimeZip?.path ?? "",
                 prefetchedDeltaZip: zip.deltaZip?.path ?? "", prefetchedManifest: zip.manifest?.path ?? "",
-                privateInstaller: zip.privateInstaller?.path ?? "", githubUsername: zip.username ?? ""
+                privateInstaller: zip.privateInstaller?.path ?? "", githubUsername: zip.username ?? "",
+                prefetchedRoute: zip.route
             ).write(to: script, atomically: true, encoding: .utf8)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
             let pending = ["label": label, "tag": tag, "startedAt": stamp, "log": logURL.path, "runID": runID, "state": "submitted", "submittedAt": String(Date().timeIntervalSince1970)]
@@ -920,7 +934,8 @@ final class InAppUpdater: ObservableObject {
                              destination: String, label: String, prefetchedZip: String,
                              prefetchedAppZip: String = "", prefetchedRuntimeZip: String = "",
                              prefetchedDeltaZip: String = "", prefetchedManifest: String = "",
-                             privateInstaller: String = "", githubUsername: String = "") -> String {
+                             privateInstaller: String = "", githubUsername: String = "",
+                             prefetchedRoute: String = "") -> String {
         """
         #!/bin/bash
         set -u
@@ -937,6 +952,7 @@ final class InAppUpdater: ObservableObject {
         export TATWO_OS_PREFETCHED_APP_ZIP=\(quoted(prefetchedAppZip))
         export TATWO_OS_PREFETCHED_RUNTIME_ZIP=\(quoted(prefetchedRuntimeZip))
         export TATWO_OS_PREFETCHED_DELTA_ZIP=\(quoted(prefetchedDeltaZip))
+        export TATWO_OS_PREFETCHED_ROUTE=\(quoted(prefetchedRoute))
         export TATWO_OS_PREFETCHED_MANIFEST=\(quoted(prefetchedManifest))
         PRIVATE_INSTALLER=\(quoted(privateInstaller))
         export TATWO_OS_GITHUB_USERNAME=\(quoted(githubUsername))

@@ -110,10 +110,10 @@ test('D4 peer only pulls repository-scoped cached archives; corrupt downloads ar
   assert.match(updater,/defer \{[\s\S]*removeInvalidDownloads\(in: folder\)/);
 });
 
-test('D6 SIGKILL after temporary owner write never publishes an ownerless lock', () => {
+test('D6 SIGKILL after atomic mkdir and owner write leaves a reclaimable dead lock', () => {
   const dir=root(), env={DEST:join(dir,'App.app')};
   const r=shell(`${transaction}\nfail() { exit 42; }\nwrite_owner() { printf '%s\\nold\\n' "$$" > "$1/owner"; kill -KILL $$; }\nacquire_update_lock`,env);
-  assert.equal(r.signal,'SIGKILL'); assert.ok(!existsSync(join(dir,'.tatwo-update.lock')));
+  assert.equal(r.signal,'SIGKILL'); assert.ok(existsSync(join(dir,'.tatwo-update.lock/owner'))); assert.ok(!readdirSync(dir).some(n=>n.includes('.tmp.')));
   const next=shell(`${transaction}\nfail() { exit 42; }\nacquire_update_lock`,env); assert.equal(next.status,0,next.stderr);
 });
 test('D7 failed pre-transaction stage is archived; age sweep excludes transaction stages', () => {
@@ -219,12 +219,12 @@ layer.archive(tree,root/'runtime.zip');assert seen and all(x==9 for x in seen),s
 test('D17 shell version patterns agree; soft assembly failures and reused-parent symlinks fail closed', () => {
   const version=install.match(/"\$TATWO_OS_VERSION" =~ (\S+)/)[1], tag=install.match(/"\$TAG" =~ (\S+)/)[1];assert.equal(version,tag);
   const soft=install.slice(install.indexOf('soft_fail()'),install.indexOf('assemble_delta()'));
-  const r=shell(`${soft}\nfail() { soft_fail "$@"; }\nfail fixture`);assert.equal(r.status,1);assert.doesNotMatch(r.stderr,/安裝失敗/);
+  const r=shell(`${soft}\nfail() { soft_fail "$@"; }\nfail fixture`,{STAGE:root()});assert.equal(r.status,1);assert.doesNotMatch(r.stderr,/安裝失敗/);
   const start=install.lastIndexOf('      parent="$DEST/Contents/$path"');
   const reuse=install.slice(start,install.indexOf('    else',start));assert.ok(reuse.includes('! -L'));
   const dir=root();mkdirSync(join(dir,'old/Contents'),{recursive:true});mkdirSync(join(dir,'outside'));mkdirSync(join(dir,'new/Contents/Resources'),{recursive:true});
   writeFileSync(join(dir,'outside/runtime'),'fixture');spawnSync('ln',['-s',join(dir,'outside'),join(dir,'old/Contents/Resources')]);
-  const refused=shell(`clone_copy() { cp "$1" "$2"; }\npath=Resources/runtime\n${reuse}`,{DEST:join(dir,'old'),SOURCE:join(dir,'new')});
+  const refused=shell(`${soft}\nclone_copy() { cp "$1" "$2"; }\npath=Resources/runtime\n${reuse}`,{DEST:join(dir,'old'),SOURCE:join(dir,'new'),STAGE:dir});
   assert.equal(refused.status,1);assert.ok(!existsSync(join(dir,'new/Contents/Resources/runtime')));
 });
 

@@ -260,7 +260,7 @@ test('W20 real assembly: local reuse, runtime fetch/cache, old release and seale
     assert.equal(calls.filter(n => n === 'TATWO-OS.zip').length, fallback || mode === 'old-release' ? 1 : 0, `${mode}: ${result.stderr}`);
     assert.equal(calls.filter(n => n === 'TATWO-OS-app.zip').length,
       ['cached', 'old-release', 'bad-prefetch'].includes(mode) ? 0 : 1, mode);
-    if (fallback) assert.match(result.stderr, /執行環境層與簽章不符，改用完整下載/);
+    if (fallback) assert.match(result.stderr, /差異／層級路徑失敗原因見 .*fallback.log；改用完整下載/);
     const selected = readFileSync(join(temp, 'selected'), 'utf8');
     assert.ok(selected.includes(fallback || mode === 'old-release' ? '/full/' : '/split/'), mode);
     run('codesign', ['--verify', '--deep', '--strict', selected]);
