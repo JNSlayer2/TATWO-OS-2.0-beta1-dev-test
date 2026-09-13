@@ -152,3 +152,19 @@ test('versioned frameworks follow real version directories, not Current symlink 
   assert.match(reuse(app, baseline), /runtime reuse: Frameworks\/Chromium Embedded Framework.framework\n/);
   layer('prepare', app); sign(app); verify(app);
 });
+
+test('npm hidden lockfile drift adopts baseline bytes only when the node_modules tree is otherwise identical', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w31-lock-'));
+  const baseline = fixture(join(dir, 'baseline'));
+  const lockRel = 'Contents/Resources/claude-sidecar/node_modules/.package-lock.json';
+  writeFileSync(join(baseline, lockRel), '{"baseline":true}');
+  sign(baseline);
+  for (const [name, extra, expectAdopt] of [['same', null, true], ['extra-file', 'Contents/Resources/claude-sidecar/node_modules/native/extra.txt', false]]) {
+    const app = join(dir, `${name}/TATWO OS.app`);
+    run('ditto', [baseline, app]);
+    writeFileSync(join(app, lockRel), '{"baseline":false,"drift":"npm version"}');
+    if (extra) writeFileSync(join(app, extra), 'new file');
+    const out = reuse(app, baseline);
+    assert.equal(readFileSync(join(app, lockRel), 'utf8') === '{"baseline":true}', expectAdopt, `${name}: ${out.stdout}`);
+  }
+});

@@ -220,7 +220,7 @@ final class ProtocolStub: URLProtocol {
       precondition(url.query == "ref=v9.9.9"); data = Data("#!/bin/bash\\n# OFFLINE-RELEASE-BEGIN\\nexit 0\\n".utf8)
     } else if url.host == "api.github.com" && !privateAsset {
       IO.events.append("release")
-      let names = IO.mode == "delta" ? ["TATWO-OS-app.zip", "TATWO-OS.manifest.json", "TATWO-OS-delta-v2.0.5-v9.9.9.zip"] : IO.mode == "legacy" ? ["TATWO-OS.zip"] : ["TATWO-OS-app.zip", IO.runtime]
+      let names = IO.mode == "delta" ? ["TATWO-OS-app.zip", IO.runtime, "TATWO-OS.manifest.json", "TATWO-OS-delta-v2.0.5-v9.9.9.zip"] : IO.mode == "legacy" ? ["TATWO-OS.zip"] : ["TATWO-OS-app.zip", IO.runtime]
       let all = names + ["TATWO-OS.zip", "TATWO-OS.manifest.json"].filter { !names.contains($0) }
       IO.assetNames = all + all.map { $0 + ".sha256" } + ["TATWO-OS.install-ready"]
       let repo = IO.mode == "private" ? UpdateChannel.privateRepository : "demo/repo"

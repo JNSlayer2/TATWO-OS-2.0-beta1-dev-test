@@ -96,9 +96,9 @@ test('promote rejects absent authorization and non-TTY before side effects; publ
 });
 
 test('promote revalidates before staging/publication; withdraw preserves recovery material', () => {
-  for (const text of ['git status --porcelain','git/ref/tags/$FROM','"$SHA" == "$HEAD"','TATWO_OS_VERSION="$VERSION"','TATWO_OS_DELTA_FROM="$BASE"','--exclude-pre-releases','read -r ANSWER','verify-release-train.py verify','--repo "$PUBLIC" --draft=false --latest']) assert.ok(promote.includes(text),text);
+  for (const text of ['git status --porcelain','git/ref/tags/$FROM','git diff --quiet "$SHA" "$HEAD" -- "${APP_PATHS[@]}"','TATWO_OS_VERSION="$VERSION"','TATWO_OS_DELTA_FROM="$BASE"','--exclude-pre-releases','read -r ANSWER','verify-release-train.py verify','--repo "$PUBLIC" --draft=false --latest']) assert.ok(promote.includes(text),text);
   assert.ok(promote.indexOf('verify-release-train.py verify') < promote.indexOf('gh release create'));
-  for(const text of ["'--verify', '--deep', '--strict'",'signed(full) == signed(assembled) == requirement','delta.manifest(assembled, tag, base) == expected',"['unzip', '-Z1'",'checksum mismatch']) assert.ok(verify.includes(text),text);
+  for(const text of ["'--verify', '--deep', '--strict'",'signed(full) == signed(assembled) == requirement','delta.manifest(assembled, tag, produced.get(\'fromTag\', \'\')) == expected',"['unzip', '-Z1'",'checksum mismatch']) assert.ok(verify.includes(text),text);
   const withdraw=read('scripts/withdraw-release.sh');
   assert.ok(withdraw.indexOf('gh release download') < withdraw.indexOf('gh release delete-asset'));
   assert.match(withdraw,/RESTORE.md/); assert.match(withdraw,/--prerelease --latest=false/);
@@ -184,6 +184,16 @@ shim.write_text('#!/bin/bash\nif [[ "$1" == -dv ]]; then echo "Authority=Fixture
 os.environ['PATH']=str(bin)+':'+os.environ['PATH']
 train.verify(root/'release',root/'previous','v9.9.8','v9.9.9')
 assert 'offline 0 differences' in (root/'release/verification.txt').read_text()
+# A previous public release without a manifest yields fromTag ''; any other fromTag is rejected.
+import shutil
+meta=root/'release/TATWO-OS.manifest.json'
+for from_tag,ok in [('',True),('v0.0.1',False)]:
+    meta.write_text(json.dumps(train.delta.manifest(root/'release/source/TATWO OS.app','v9.9.9',from_tag))); train.delta.checksum(meta)
+    for d in [root/'release/full',root/'release/assembled',root/'previous/extracted']: shutil.rmtree(d,ignore_errors=True)
+    (root/'release/verification.txt').unlink(missing_ok=True)
+    try: train.verify(root/'release',root/'previous','v9.9.8','v9.9.9')
+    except AssertionError as e: assert (not ok) and 'fromTag' in str(e), (from_tag,str(e))
+    else: assert ok, from_tag
 # A DR change is blocked even though both individual bundles remain validly signed.
 other=root/'other.app'; run('ditto',root/'release/source/TATWO OS.app',other)
 run('codesign','--force','--sign','-','--requirements','=designated => identifier "different.fixture"',other)

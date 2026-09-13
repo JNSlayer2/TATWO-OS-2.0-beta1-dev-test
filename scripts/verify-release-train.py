@@ -94,9 +94,12 @@ def verify(root, previous, base, tag):
         assert info['CFBundleIdentifier'] == 'ai.tatwo.tatwo2', 'bundle identity'
     requirement = signed(previous / 'extracted/TATWO OS.app')
     assert signed(full) == signed(assembled) == requirement, 'DR must be byte-identical'
-    expected = delta.manifest(full, tag, base)
-    assert delta.manifest(assembled, tag, base) == expected, 'offline assembly differs'
-    assert json.loads((root / 'TATWO-OS.manifest.json').read_text()) == expected, 'manifest/fromTag mismatch'
+    produced = json.loads((root / 'TATWO-OS.manifest.json').read_text())
+    # The previous public release may predate manifests (v2.0.5 and earlier): fromTag is then empty.
+    assert produced.get('fromTag') in ('', base), 'manifest/fromTag mismatch'
+    expected = delta.manifest(full, tag, produced.get('fromTag', ''))
+    assert delta.manifest(assembled, tag, produced.get('fromTag', '')) == expected, 'offline assembly differs'
+    assert produced == expected, 'manifest/fromTag mismatch'
     (root / 'verification.txt').write_text('codesign deep/strict PASS\nDR exact PASS\napp+runtime offline 0 differences\nAppleDouble 0\n')
 
 

@@ -176,7 +176,9 @@ private enum UpdateDelta {
         }) else { return nil }
         return "TATWO-OS-delta-\(from)-\(tag).zip"
     }
-    static func reasonable(_ size: Int64, appSize: Int64) -> Bool { size > 0 && size < appSize }
+    static func reasonable(_ size: Int64, appSize: Int64, runtimeReusable: Bool) -> Bool {
+        !runtimeReusable && size > 0 && size < appSize / 4
+    }
 }
 
 @MainActor
@@ -631,23 +633,26 @@ final class InAppUpdater: ObservableObject {
         }
         let split = release.assets.contains { $0.name == "TATWO-OS-app.zip" }
         var archives = [try asset(split ? "TATWO-OS-app.zip" : "TATWO-OS.zip")]
+        let runtimes = release.assets.filter {
+            $0.name.range(of: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$", options: .regularExpression) != nil
+        }
+        guard !split || runtimes.count == 1 else { throw failure("執行環境附件缺少或不唯一") }
+        let runtime = split ? try asset(runtimes[0].name) : nil
+        let runtimeReusable = runtime.map {
+            UpdateRuntimeLayer.canReuse(contents: URL(fileURLWithPath: Self.destinationApp).appendingPathComponent("Contents"),
+                                        archiveName: $0.name)
+        } ?? false
         let installed = Bundle(url: URL(fileURLWithPath: Self.destinationApp))?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let deltaName = UpdateDelta.name(installed: installed, tag: tag)
         let delta = release.assets.first { $0.name == deltaName }
-        let useDelta = split && delta.map { UpdateDelta.reasonable($0.size, appSize: archives[0].size) } == true
+        let useDelta = split && delta.map {
+            UpdateDelta.reasonable($0.size, appSize: archives[0].size, runtimeReusable: runtimeReusable)
+        } == true
             && [deltaName!, deltaName! + ".sha256", "TATWO-OS.manifest.json", "TATWO-OS.manifest.json.sha256"].allSatisfy { name in
                 (try? asset(name)) != nil
             }
         if useDelta { archives = [try asset("TATWO-OS.manifest.json"), try asset(deltaName!)] }
-        if split && !useDelta {
-            let runtimes = release.assets.filter {
-                $0.name.range(of: "^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$", options: .regularExpression) != nil
-            }
-            guard runtimes.count == 1 else { throw failure("執行環境附件缺少或不唯一") }
-            let runtime = try asset(runtimes[0].name)
-            if !UpdateRuntimeLayer.canReuse(contents: URL(fileURLWithPath: Self.destinationApp).appendingPathComponent("Contents"),
-                                            archiveName: runtime.name) { archives.append(runtime) }
-        }
+        if !useDelta, !runtimeReusable, let runtime { archives.append(runtime) }
         let folder = directory.appendingPathComponent("download/\(repository)/\(tag)", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try Data(repository.utf8).write(to: folder.appendingPathComponent("repository"), options: .atomic)

@@ -135,7 +135,7 @@ test('W20 helper passes both quoted layer paths and leaves runtime empty when re
 
 test('W20 prefetch plans only needed layers and aggregates byte offsets', () => {
   assert.match(updater, /try asset\(split \? "TATWO-OS-app.zip" : "TATWO-OS.zip"\)/);
-  assert.match(updater, /if !UpdateRuntimeLayer\.canReuse[\s\S]*archives\.append\(runtime\)/);
+  assert.match(updater, /if !useDelta, !runtimeReusable, let runtime \{ archives\.append\(runtime\) \}/);
   assert.match(updater, /runtimes\.count == 1/);
   assert.match(updater, /archives\.reduce\(Int64\(0\)\)/);
   assert.match(updater, /for archive in archives/);
@@ -154,8 +154,13 @@ let reuse = UpdateRuntimeLayer.canReuse(contents: URL(fileURLWithPath: CommandLi
                                        archiveName: CommandLine.arguments[2])
 precondition(UpdateDelta.name(installed: "2.0.5", tag: "v2.0.6") == "TATWO-OS-delta-v2.0.5-v2.0.6.zip")
 for old in [nil, "v2.0.6", "../bad"] { precondition(UpdateDelta.name(installed: old, tag: "v2.0.6") == nil) }
-for size: Int64 in [-1, 0, 100, 101] { precondition(!UpdateDelta.reasonable(size, appSize: 100)) }
-precondition(UpdateDelta.reasonable(99, appSize: 100))
+for size: Int64 in [-1, 0, 25, 99, 100, 101] {
+    precondition(!UpdateDelta.reasonable(size, appSize: 100, runtimeReusable: false))
+}
+precondition(UpdateDelta.reasonable(24, appSize: 100, runtimeReusable: false))
+precondition(!UpdateDelta.reasonable(1, appSize: 100, runtimeReusable: true))
+precondition(!UpdateDelta.reasonable(1, appSize: 0, runtimeReusable: false))
+precondition(!UpdateDelta.reasonable(Int64.max, appSize: Int64.max, runtimeReusable: false))
 print(reuse ? "reuse" : "download")
 `);
     const compile = spawnSync('swiftc', [swift, '-o', binary], { encoding: 'utf8', timeout: 60_000 });

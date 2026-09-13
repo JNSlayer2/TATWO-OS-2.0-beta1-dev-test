@@ -97,6 +97,29 @@ def stripped(root):
         return h.digest()
 
 
+def tree_identical(new_root, old_root, skip):
+    """Byte/mode/link-identical trees, ignoring one top-level file name."""
+    def snapshot(root):
+        out = {}
+        for p in root.rglob('*'):
+            rel = p.relative_to(root).as_posix()
+            if rel == skip:
+                continue
+            info = os.lstat(p)
+            if stat.S_ISLNK(info.st_mode):
+                out[rel] = ('link', os.readlink(p))
+            elif stat.S_ISREG(info.st_mode):
+                h = hashlib.sha256()
+                with p.open('rb') as f:
+                    for chunk in iter(lambda: f.read(1048576), b''):
+                        h.update(chunk)
+                out[rel] = ('file', stat.S_IMODE(info.st_mode), h.hexdigest())
+            else:
+                out[rel] = ('dir', stat.S_IMODE(info.st_mode))
+        return out
+    return snapshot(new_root) == snapshot(old_root)
+
+
 def main():
     app, identity = Path(sys.argv[1]).absolute(), sys.argv[2]
     baseline_value = os.environ.get('TATWO2_RELEASE_BASELINE', '')
@@ -154,11 +177,29 @@ def main():
                 run('codesign', '--verify', '--strict', p)
                 print('runtime sign:', p.relative_to(contents), flush=True)
 
-        for relative in Path(__file__).with_name('runtime-layer.txt').read_text().splitlines():
+        runtime_paths = [r for r in Path(__file__).with_name('runtime-layer.txt').read_text().splitlines() if r.strip() and not r.startswith('#')]
+        for relative in runtime_paths:
             assert relative.startswith(('Resources/', 'Frameworks/')) and all(x not in ('', '.', '..') for x in relative.split('/')), 'invalid runtime path'
             process(contents / relative, relative.startswith('Frameworks/'))
         for helper in sorted((contents / 'Frameworks').glob('* Helper*.app')):
             process(helper, True)
+        # npm's hidden lockfile drifts with the npm version while the installed tree stays identical
+        # (2026-09-13: v2.0.6 promote changed only this file and forced a 450 MB runtime re-download).
+        # Adopt the baseline bytes only when everything else under that node_modules is identical.
+        if baseline:
+            for lock in sorted(contents.rglob('node_modules/.package-lock.json')):
+                relative = lock.relative_to(contents)
+                if not any(relative.as_posix().startswith(r.rstrip('/') + '/') for r in runtime_paths):
+                    continue
+                old = baseline / 'Contents' / relative
+                if lock.is_symlink() or old.is_symlink() or not (lock.is_file() and old.is_file()):
+                    continue
+                if lock.read_bytes() == old.read_bytes():
+                    continue
+                if tree_identical(lock.parent, old.parent, skip=lock.name):
+                    shutil.copyfile(old, lock)
+                    os.chmod(lock, stat.S_IMODE(os.lstat(old).st_mode))
+                    print('runtime reuse:', relative, '(npm hidden lockfile; tree otherwise identical)', flush=True)
 
 
 if __name__ == '__main__':

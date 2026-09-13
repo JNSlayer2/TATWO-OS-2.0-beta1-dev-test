@@ -22,6 +22,7 @@ test('W22 production selection falls through delta, layer, then full without rep
     const temp = mkdtempSync(join(tmpdir(), 'w22-order-'));
     const result = spawnSync('bash', ['-c', `set -eu; TEMP=${JSON.stringify(temp)}; APP_URL=yes; STAGE="$TEMP/stage"
       TATWO_OS_PREFETCHED_DELTA_ZIP=yes; TATWO_OS_PREFETCHED_MANIFEST=yes
+      delta_preferred() { return 0; }
       assemble_delta() { echo delta >> "$TEMP/order"; return ${delta}; }
       assemble_runtime() { echo layer >> "$TEMP/order"; return ${layer}; }
       download_full() { echo full >> "$TEMP/order"; }; verify_signed_app() { :; }
@@ -29,6 +30,52 @@ test('W22 production selection falls through delta, layer, then full without rep
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(join(temp, 'order'), 'utf8').trim().replaceAll('\n', ' '), expected);
   }
+});
+
+test('W30 production selection prefers reusable runtime, otherwise delta must be < app/4', () => {
+  const decision = install.split('# DELTA-SELECTION-BEGIN\n')[1].split('# DELTA-SELECTION-END')[0];
+  const selection = install.slice(install.indexOf('SOURCE="$STAGE/split/TATWO OS.app"'), install.indexOf('# Do not silently'));
+  const dir = mkdtempSync(join(tmpdir(), 'w30-selection-'));
+  const sha = 'a'.repeat(64), otherSha = 'b'.repeat(64);
+  const deltaName = 'TATWO-OS-delta-v2.0.5.001-v2.0.5.002.zip';
+  for (const [mode, deltaSize, expected] of [
+    ['reuse', 1, 'layer'], ['reuse', 24, 'layer'],
+    ['changed', 24, 'delta'], ['changed', 25, 'layer'], ['changed', 26, 'layer'],
+    ['changed', 0, 'layer'], ['changed', -1, 'layer'], ['changed', '24', 'layer'],
+    ['missing', 24, 'delta'], ['no-meta', 24, 'delta'], ['null-meta', 24, 'delta'], ['bad-path', 24, 'delta'],
+    ['no-app-size', 24, 'layer'], ['ambiguous-runtime', 24, 'layer'],
+  ]) {
+    const temp = join(dir, `${mode}-${typeof deltaSize}-${deltaSize}`), dest = join(temp, 'installed.app');
+    mkdirSync(join(dest, 'Contents/Resources/runtime'), { recursive: true });
+    writeFileSync(join(dest, 'Contents/Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict>
+      <key>CFBundleShortVersionString</key><string>2.0.5.001</string></dict></plist>`);
+    if (mode !== 'no-meta') writeFileSync(join(dest, 'Contents/Resources/runtime-layer.json'), JSON.stringify({
+      sha: mode === 'changed' ? otherSha : sha,
+      paths: [mode === 'missing' ? 'Resources/absent' : mode === 'bad-path' ? 'Resources/../Resources/runtime' : 'Resources/runtime'],
+    }));
+    if (mode === 'null-meta') writeFileSync(join(dest, 'Contents/Resources/runtime-layer.json'), 'null');
+    const assets = [
+      { name: 'TATWO-OS-app.zip', size: mode === 'no-app-size' ? undefined : 100 },
+      { name: deltaName, size: deltaSize }, { name: deltaName + '.sha256' },
+      { name: 'TATWO-OS.manifest.json' }, { name: 'TATWO-OS.manifest.json.sha256' },
+      { name: `TATWO-OS-runtime-${sha.slice(0, 12)}.zip` },
+    ];
+    if (mode === 'ambiguous-runtime') assets.push({ name: `TATWO-OS-runtime-${otherSha.slice(0, 12)}.zip` });
+    writeFileSync(join(temp, 'release.json'), JSON.stringify({ tag_name: 'v2.0.5.002', assets }));
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+      APP_URL=yes; STAGE="$TEMP/stage"
+      TATWO_OS_PREFETCHED_DELTA_ZIP=stale-cache; TATWO_OS_PREFETCHED_MANIFEST=stale-cache
+      ${decision}
+      assemble_delta() { echo delta >> "$TEMP/order"; }
+      assemble_runtime() { echo layer >> "$TEMP/order"; }
+      download_full() { echo full >> "$TEMP/order"; }; verify_signed_app() { :; }
+      ${selection}`], { encoding: 'utf8', env: { ...process.env, TEMP: temp, DEST: dest } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(temp, 'order'), 'utf8').trim(), expected, `${mode}/${deltaSize}`);
+  }
+  const updater = readFileSync(new URL('../App/Sources/Tatwo2/Facade/InAppUpdater.swift', import.meta.url), 'utf8');
+  assert.ok(updater.indexOf('let runtimeReusable =') < updater.indexOf('let useDelta ='));
+  assert.match(updater, /reasonable\(\$0.size, appSize: archives\[0\].size, runtimeReusable: runtimeReusable\)/);
 });
 
 test('continuity check passes the designated requirement as inline text, not a file path', () => {
@@ -372,7 +419,7 @@ test('W24 clone-first fallback preserves real fake bundle contents and measures 
   }
   assert.match(primitives, /cp -cRPp "\$1" "\$2".*\|\| ditto/);
   assert.match(install, /clone_copy "\$parent\/\$path" "\$SOURCE\/Contents\/\$path"/);
-  assert.match(install, /\? 'cp -Pp ' : 'clone_copy '/);
+  assert.match(install, /cp -cRPp \"\$3\/Contents\" \"\$4\/Contents\"/);
   assert.doesNotMatch(install, /ditto "\$SOURCE" "\$STAGE\/TATWO OS.app"/);
 });
 

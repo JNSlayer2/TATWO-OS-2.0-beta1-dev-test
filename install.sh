@@ -399,15 +399,19 @@ layer_download() {
 }
 # DELTA-TREE-BEGIN
 delta_tree() (
+  [[ -d "$3/Contents" && ! -L "$3" && ! -L "$3/Contents" && ! -e "$4" && ! -L "$4" ]] || exit 1
   unzip -Z1 "$2" > "$4.entries" || exit 1
-  osascript -l JavaScript - "$@" <<'JXA' > "$4.assemble.sh" || exit 1
+  unzip -p "$2" > "$4.payload" || exit 1
+  mkdir "$4" || exit 1
+  cp -cRPp "$3/Contents" "$4/Contents" 2>/dev/null || ditto "$3/Contents" "$4/Contents" || exit 1
+  osascript -l JavaScript - "$@" <<'JXA' || exit 1
 ObjC.import('Foundation');
 function run(a) {
   const read = p => ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(p, $.NSUTF8StringEncoding, null));
-  const m = JSON.parse(read(a[0])), zip = a[1], old = a[2], out = a[3] + '/Contents';
+  const m = JSON.parse(read(a[0])), out = a[3] + '/Contents';
   const q = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
   const safe = p => typeof p === 'string' && p.length && !/[\x00-\x1f\x7f]/.test(p);
-  const entries = new Map(), commands = ['set -euo pipefail', 'clone_copy() { cp -cRPp \"$1\" \"$2\" 2>/dev/null || ditto \"$1\" \"$2\"; }', 'mkdir -p ' + q(out)];
+  const entries = new Map();
   if (m.schema !== 1 || !Array.isArray(m.files) || !m.files.length) throw Error('manifest schema');
   for (const e of m.files) {
     if (!safe(e.path) || (e.path !== '.' && e.path.split('/').some(p => !p || p === '.' || p === '..')) ||
@@ -433,34 +437,142 @@ function run(a) {
     if (!e || seen.has(key) || p.endsWith('/') !== !!e.directory) throw Error('delta entry');
     seen.add(key);
   }
-  for (const [p, e] of entries) {
-    const target = out + '/' + p, source = old + '/Contents/' + p, blob = a[3] + '.part-' + commands.length;
-    if (e.directory) { commands.push('mkdir -p ' + q(target)); continue; }
-    let input = source;
-    if (seen.has(p)) {
-      commands.push('unzip -p ' + q(zip) + ' ' + q(p.replace(/[\\*?[\]]/g, '\\$&')) + ' > ' + q(blob),
-        '[[ "$(shasum -a 256 < ' + q(blob) + ')" == ' + q(e.sha256 + '  -') + ' ]]',
-        '[[ "$(stat -f %z ' + q(blob) + ')" == ' + q(e.size) + ' ]]');
-      input = blob;
-      if (e.symlink !== undefined) { input += '.link'; commands.push('ln -s ' + q(e.symlink) + ' ' + q(input)); }
-      commands.push('chmod ' + (e.symlink !== undefined ? '-h ' : '') + e.mode + ' ' + q(input));
-    } else {
-      for (let parent = source.slice(0, source.lastIndexOf('/')); parent !== old; parent = parent.slice(0, parent.lastIndexOf('/')))
-        commands.push('[[ ! -L ' + q(parent) + ' ]]');
-      commands.push('[[ ! -L ' + q(old) + ' ]]', '[[' + (e.symlink !== undefined ? ' -L ' + q(source) : ' -f ' + q(source) + ' && ! -L ' + q(source)) + ' ]]');
+  const fm = $.NSFileManager.defaultManager, app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  const attrs = p => fm.attributesOfItemAtPathError(p, null);
+  const type = info => ObjC.unwrap(info.objectForKey($.NSFileType));
+  const mode = (p, value) => {
+    if (!fm.setAttributesOfItemAtPathError($({NSFilePosixPermissions: value}), p, null)) throw Error('mode');
+  };
+  const move = (src, dst) => { if (!fm.moveItemAtPathToPathError(src, dst, null)) throw Error('move'); };
+  const mkdir = p => { if (!fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(p, false, $({}), null)) throw Error('mkdir'); };
+  const write = (text, path) => {
+    if (!$(text).writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null)) throw Error('write');
+  };
+  // Only the disposable clone is pruned. Retain replaced/deleted entries beside it, never touch the baseline.
+  let retired = 0;
+  const retained = a[3] + '.retained'; mkdir(retained);
+  function prune(relative) {
+    const dir = out + (relative ? '/' + relative : '');
+    mode(dir, 0o700);
+    const names = ObjC.deepUnwrap(fm.contentsOfDirectoryAtPathError(dir, null));
+    if (!Array.isArray(names)) throw Error('directory read');
+    for (const name of names) {
+      const p = relative ? relative + '/' + name : name, path = out + '/' + p;
+      const e = entries.get(p), info = attrs(path);
+      if (!info) throw Error('metadata');
+      const directory = type(info) === 'NSFileTypeDirectory';
+      if (!e || (!e.directory && seen.has(p)) || !!e.directory !== directory) {
+        move(path, retained + '/' + retired++);
+      } else if (directory) prune(p);
     }
-    commands.push((e.symlink !== undefined ? 'cp -Pp ' : 'clone_copy ') + q(input) + ' ' + q(target), '[[ "$(stat -f %Lp ' + q(target) + ')" == ' + q(e.mode.replace(/^0+/, '') || '0') + ' ]]');
-    commands.push(e.symlink !== undefined
-      ? '[[ -L ' + q(target) + ' && "$(readlink ' + q(target) + ')" == ' + q(e.symlink) + ' && "$(printf %s "$(readlink ' + q(target) + ')" | shasum -a 256)" == ' + q(e.sha256 + '  -') + ' && "$(stat -f %z ' + q(target) + ')" == ' + q(e.size) + ' ]]'
-      : '[[ -f ' + q(target) + ' && ! -L ' + q(target) + ' && "$(stat -f %z ' + q(target) + ')" == ' + q(e.size) + ' && "$(shasum -a 256 < ' + q(target) + ')" == ' + q(e.sha256 + '  -') + ' ]]');
   }
-  for (const [p, e] of Array.from(entries).reverse()) if (e.directory) commands.push('chmod ' + e.mode + ' ' + q(out + '/' + p));
-  return commands.map(c => c + ' || exit 1').join('\n');
+  prune('');
+  for (const [p, e] of entries) if (e.directory && p !== '.') {
+    const path = out + '/' + p;
+    if (!fm.fileExistsAtPath(path)) mkdir(path);
+    mode(path, 0o700);
+  }
+  // unzip streams all members once, in central-directory order; never extract ZIP symlinks onto a tree.
+  const stream = $.NSFileHandle.fileHandleForReadingAtPath(a[3] + '.payload');
+  if (!stream) throw Error('payload');
+  const checks = [], linkModes = new Map();
+  let index = 0;
+  for (const p of packed) {
+    const key = p.replace(/\/$/, ''), e = entries.get(key);
+    if (e.directory) continue;
+    const target = out + '/' + key, blob = retained + '/payload-' + index++;
+    if (!fm.createFileAtPathContentsAttributes(blob, $.NSData.data, $({}))) throw Error('payload file');
+    const handle = $.NSFileHandle.fileHandleForWritingAtPath(blob);
+    let left = e.size;
+    while (left > 0) {
+      const data = stream.readDataOfLength(Math.min(left, 1048576));
+      if (!Number(data.length)) throw Error('short payload');
+      handle.writeData(data); left -= Number(data.length);
+    }
+    handle.closeFile;
+    let checked = target;
+    if (e.symlink !== undefined) {
+      if (read(blob) !== e.symlink) throw Error('link payload');
+      if (!fm.createSymbolicLinkAtPathWithDestinationPathError(target, e.symlink, null)) throw Error('link');
+      checked = blob;
+      if (!linkModes.has(e.mode)) linkModes.set(e.mode, []);
+      linkModes.get(e.mode).push(target);
+    } else { move(blob, target); mode(target, parseInt(e.mode, 8)); }
+    // shasum --check's escaped filename format preserves literal backslashes and spaces.
+    checks.push((checked.includes('\\') ? '\\' : '') + e.sha256 + '  ' + checked.replace(/\\/g, '\\\\'));
+  }
+  if (Number(stream.readDataOfLength(1).length)) throw Error('extra payload');
+  stream.closeFile;
+  const paths = [];
+  for (const [p, e] of entries) {
+    const target = out + '/' + p;
+    if (e.symlink !== undefined && ObjC.unwrap(fm.destinationOfSymbolicLinkAtPathError(target, null)) !== e.symlink) throw Error('link target');
+    paths.push(target);
+  }
+  write(checks.join('\n') + (checks.length ? '\n' : ''), a[3] + '.checks');
+  write(paths.join('\0') + '\0', a[3] + '.paths');
+  // Parent modes last, after descendants are complete; include directories in the metadata batch.
+  for (const [p, e] of Array.from(entries).reverse()) if (e.directory) mode(out + '/' + p, parseInt(e.mode, 8));
+  const commands = ['set -euo pipefail'];
+  for (const [permissions, links] of linkModes) {
+    const list = a[3] + '.links-' + permissions;
+    write(links.join('\0') + '\0', list);
+    commands.push('xargs -0 chmod -h ' + permissions + ' < ' + q(list));
+  }
+  if (checks.length) commands.push('shasum -a 256 --check --status < ' + q(a[3] + '.checks'));
+  commands.push('xargs -0 stat -f ' + q('%p %z') + ' < ' + q(a[3] + '.paths'));
+  const metadata = app.doShellScript('/bin/bash -c ' + q(commands.join('\n'))).split(/[\r\n]+/);
+  if (metadata.length !== entries.size) throw Error('metadata count');
+  index = 0;
+  for (const [p, e] of entries) {
+    const [permissions, size] = metadata[index++].split(' '), bits = parseInt(permissions, 8);
+    const expectedType = e.directory ? 0o040000 : e.symlink !== undefined ? 0o120000 : 0o100000;
+    if ((bits & 0o170000) !== expectedType || (bits & 0o7777) !== parseInt(e.mode, 8) ||
+        (!e.directory && Number(size) !== e.size)) throw Error('metadata mismatch: ' + p);
+  }
+  // Unchanged bytes are checked by the mandatory final code seal, not a second whole-tree hash sweep.
 }
 JXA
-  bash "$4.assemble.sh"
 )
+
 # DELTA-TREE-END
+# DELTA-SELECTION-BEGIN
+delta_preferred() {
+  local installed
+  installed="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null)" || return 1
+  osascript -l JavaScript - "$TEMP/release.json" "$DEST/Contents" "$installed" <<'JXA' >/dev/null 2>&1
+ObjC.import('Foundation');
+function run(a) {
+  const read = p => ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(p, $.NSUTF8StringEncoding, null));
+  const release = JSON.parse(read(a[0])), assets = release.assets;
+  const asset = name => {
+    const matches = assets.filter(e => e.name === name);
+    if (matches.length !== 1) throw Error('asset missing or ambiguous');
+    return matches[0];
+  };
+  const from = 'v' + a[2].replace(/^v/, ''), tag = release.tag_name;
+  if (from === tag || ![from, tag].every(t => /^v[0-9]+([.][0-9]+){1,3}$/.test(t))) throw Error('version');
+  const app = asset('TATWO-OS-app.zip'), delta = asset('TATWO-OS-delta-' + from + '-' + tag + '.zip');
+  for (const name of [delta.name + '.sha256', 'TATWO-OS.manifest.json', 'TATWO-OS.manifest.json.sha256']) asset(name);
+  if (![app.size, delta.size].every(Number.isSafeInteger) || delta.size <= 0 ||
+      delta.size >= Math.floor(app.size / 4)) throw Error('delta not economical');
+  const runtimes = assets.filter(e => /^TATWO-OS-runtime-[0-9a-f]{12}[.]zip$/.test(e.name));
+  if (runtimes.length !== 1) throw Error('runtime missing or ambiguous');
+  let layer;
+  try { layer = JSON.parse(read(a[1] + '/Resources/runtime-layer.json')); } catch (_) { return; }
+  if (!layer || typeof layer !== 'object') return;
+  const reusable = /^[0-9a-f]{64}$/.test(layer.sha) &&
+    runtimes[0].name === 'TATWO-OS-runtime-' + layer.sha.slice(0, 12) + '.zip' &&
+    Array.isArray(layer.paths) && layer.paths.length && layer.paths.every(p =>
+      typeof p === 'string' && /^(Resources|Frameworks)\//.test(p) &&
+      !p.split('/').some(part => !part || part === '.' || part === '..') &&
+      $.NSFileManager.defaultManager.fileExistsAtPath(a[1] + '/' + p));
+  if (reusable) throw Error('prefer runtime reuse');
+}
+JXA
+}
+# DELTA-SELECTION-END
 soft_fail() { exit 1; }
 assemble_delta() (
   trap - EXIT ERR
@@ -536,7 +648,7 @@ fi
 check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"
 [[ -w /Applications ]] || fail "沒有 /Applications 寫入權限，請使用具權限的帳號"
 SOURCE="$STAGE/split/TATWO OS.app"
-if [[ -n "${TATWO_OS_PREFETCHED_DELTA_ZIP:-}" && -n "${TATWO_OS_PREFETCHED_MANIFEST:-}" ]]; then
+if [[ -n "${TATWO_OS_PREFETCHED_DELTA_ZIP:-}" && -n "${TATWO_OS_PREFETCHED_MANIFEST:-}" ]] && delta_preferred; then
   if assemble_delta; then SOURCE="$STAGE/delta.app.disabled"
   else printf '差異更新驗證失敗或版本不符，改用層級下載\n' >&2; fi
 fi
