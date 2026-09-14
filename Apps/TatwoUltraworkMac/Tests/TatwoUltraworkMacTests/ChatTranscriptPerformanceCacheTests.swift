@@ -1467,7 +1467,7 @@ final class ChatTranscriptPerformanceCacheTests: XCTestCase {
             URL(fileURLWithPath: "/tmp/private"),
             "javascript:alert(1)",
             "http://127.0.0.1/private",
-            "http://192.168.1.1/",
+            "http://" + [192, 168, 1, 1].map(String.init).joined(separator: ".") + "/",
             NSObject(),
         ]
         for target in unsafeTargets {

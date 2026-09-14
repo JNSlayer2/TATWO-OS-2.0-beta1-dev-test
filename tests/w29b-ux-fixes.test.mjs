@@ -155,9 +155,10 @@ test('D9/D11/D18 wiring and private skill export boundaries', () => {
   for (const text of ['基本附件十個', 'results/<uuid>.json', '重新啟動以更新', 'keptUserEdited']) assert.ok(skill.includes(text));
 });
 
-test('D23 all 57 allowances constrain every detected value; unknown values fail closed', () => {
+test('D23 all 59 allowances constrain every detected value; unknown values fail closed', () => {
   const policy = read('scripts/public-safety-allow.txt').split('\n').filter(s => s && !s.startsWith('#'));
-  assert.equal(policy.length, 57);
+  // W50/W55 fixture entries were approved in 3860505d; retain an exact count gate.
+  assert.equal(policy.length, 59);
   for (const line of policy) {
     const regex = line.split('|').slice(3).join('|').trim();
     assert.ok(regex.startsWith('^') && regex.endsWith('$'));

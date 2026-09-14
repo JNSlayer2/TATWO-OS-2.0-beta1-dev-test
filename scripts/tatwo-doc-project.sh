@@ -604,7 +604,7 @@ run_selftest() {
   printf 'selftest: [dry-run-default] PASS\n'
 
   # 6) privacy: header has no private path markers even if source path is private-looking
-  local priv_src="$tmp/Users/fake/secret"
+  local priv_src="$tmp/Users/example/secret"
   mkdir -p "$priv_src"
   printf 'body\n' >"$priv_src/os.md"
   out="$(bash "$SCRIPT_PATH" \

@@ -159,13 +159,30 @@ public struct CodexV3ImportStore: Sendable {
         preferCodexHomeAuth: Bool = true
     ) {
         let homeURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        self.v3BaseURL = v3BaseURL ?? homeURL.appendingPathComponent(".jnslayer2", isDirectory: true)
+        self.v3BaseURL = v3BaseURL ?? Self.defaultV3BaseURL(homeURL: homeURL)
         self.v4BaseURL = v4BaseURL ?? homeURL
             .appendingPathComponent(".aiswitch-v4", isDirectory: true)
             .appendingPathComponent("providers", isDirectory: true)
             .appendingPathComponent("codex-v3", isDirectory: true)
         self.codexHomeURL = codexHomeURL ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
         self.preferCodexHomeAuth = preferCodexHomeAuth
+    }
+
+    static func defaultV3BaseURL(homeURL: URL) -> URL {
+        let current = homeURL.appendingPathComponent(".codex-v3", isDirectory: true)
+        let manager = FileManager.default
+        if manager.fileExists(atPath: current.appendingPathComponent("registry.json").path) {
+            return current
+        }
+        // Legacy product directories had a per-owner suffix. Discover the directory
+        // name locally; never embed an owner's identity or guess among multiple stores.
+        let candidates = ((try? manager.contentsOfDirectory(
+            at: homeURL, includingPropertiesForKeys: nil)) ?? []).filter {
+                $0.lastPathComponent.hasPrefix(".jns")
+                    && manager.fileExists(atPath: $0.appendingPathComponent("registry.json").path)
+                    && manager.fileExists(atPath: $0.appendingPathComponent("accounts").path)
+            }
+        return candidates.count == 1 ? candidates[0] : current
     }
 
     public var importedRegistryURL: URL {

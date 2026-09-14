@@ -191,16 +191,20 @@ final class TatwoIslandShellController {
         let hostingController = NSHostingController(rootView: TatwoIslandShellView(state: state))
         self.state = state
         IslandExceptionsNavigation.shell = state
-        ComputerUseConsentPrompt.shared.hostAvailable = true
+        IslandNotice.shared.hostAvailable = true
         self.panel = TatwoIslandShellPanel(
             contentRect: .zero,
             viewController: hostingController
         )
-        // 非 key panel 的 Esc 由 App 既有事件迴圈接收；不吞掉其他按鍵或點擊。
+        // 非 key panel 的 Esc 先取消目前卡片；空白 Island 才交回既有關窗路徑。
         localEvents = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]) { [weak self] event in
             guard let self, self.state.isExpanded else { return event }
             if event.type == .keyDown {
                 if event.keyCode == 53 {
+                    if let request = IslandNotice.shared.current {
+                        IslandNotice.shared.resolve(.cancel, id: request.id)
+                        return nil
+                    }
                     self.state.handleCollapseEvent(.escape)
                     return event
                 }
@@ -294,8 +298,8 @@ struct TatwoIslandShellView: View {
                         onHover: state.setPointerInside
                     )
                     .overlay(alignment: .top) {
-                        // 2026-09-11 使用者：Island 只保留 Computer Use 同意卡（工作／音樂／報價頁移除）。
-                        ComputerUseIslandContent(isExpanded: state.isExpanded)
+                        // W43: ask / confirm / info share the same FIFO surface.
+                        IslandNoticeContent(isExpanded: state.isExpanded)
                     }
                 }
         }

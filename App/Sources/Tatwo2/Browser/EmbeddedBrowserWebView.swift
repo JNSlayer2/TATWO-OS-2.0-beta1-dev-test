@@ -107,6 +107,8 @@ struct EmbeddedBrowserWebView: NSViewRepresentable {
             switch EmbeddedBrowserNavigationPolicy.decision(for: url) {
             case .allow:
                 enqueue = { webView.load(URLRequest(url: url)) }
+            case .askOncePerHost:
+                return
             case let .block(reason):
                 context.coordinator.record(
                     .blockedNavigation(reason),
@@ -117,6 +119,10 @@ struct EmbeddedBrowserWebView: NSViewRepresentable {
             enqueue = { if webView.canGoBack { webView.goBack() } }
         case .goForward:
             enqueue = { if webView.canGoForward { webView.goForward() } }
+        case .stopLoading: enqueue = { webView.stopLoading() }
+        // W57d native print/PDF callbacks are CEF-only; this fallback does not export page data.
+        case .printPage, .printPDF, .openPDF: return
+        case .find, .stopFinding, .zoom: return // CEF-only daily navigation.
         case .reload:
             enqueue = { if webView.url != nil { webView.reload() } }
         }
@@ -294,6 +300,8 @@ struct EmbeddedBrowserWebView: NSViewRepresentable {
             switch EmbeddedBrowserNavigationPolicy.decision(for: url) {
             case .allow:
                 return .allow
+            case .askOncePerHost:
+                return .cancel
             case let .block(reason):
                 // A rejected iframe must not replace the usable main page
                 // with a full-page security error. The request is still denied.
@@ -374,7 +382,7 @@ struct EmbeddedBrowserWebView: NSViewRepresentable {
                 for: webView)
             decisionHandler(
                 EmbeddedBrowserSensitivePermissionPolicy.decision(
-                    for: permission))
+                    for: permission).webKitDecision)
         }
 
         #if compiler(>=6.2)
@@ -391,7 +399,7 @@ struct EmbeddedBrowserWebView: NSViewRepresentable {
                 for: webView)
             decisionHandler(
                 EmbeddedBrowserSensitivePermissionPolicy.decision(
-                    for: .geolocation))
+                    for: .geolocation).webKitDecision)
         }
         #endif
 

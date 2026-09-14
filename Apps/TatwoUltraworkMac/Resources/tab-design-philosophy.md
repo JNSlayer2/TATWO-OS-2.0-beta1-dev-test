@@ -2,7 +2,7 @@
 
 > **真相源**：分頁存在邏輯的權威定義是 os.md §9.4（os-architecture-standard.md）。本檔＝該架構的**使用者面 UI 投影**（白話 hover 說明），非獨立真相源；若與 os.md §9.4 衝突以 os.md 為準，並回頭同步本檔（符 §9.5 單一真相源）。
 
-使用者需求：左列底部 layer2 使用者列右邊加一個設計說明鈕（紅圈 `!`/`i`），滑鼠停留顯示小窗，說明該分頁的設計理念、Chat 的理解、以及 Chat 如何與 CLI 合作。CLI 分頁重點解釋其設計。Ultrawork 先擺 placeholder。
+使用者需求：左列底部 example 使用者列右邊加一個設計說明鈕（紅圈 `!`/`i`），滑鼠停留顯示小窗，說明該分頁的設計理念、Chat 的理解、以及 Chat 如何與 CLI 合作。CLI 分頁重點解釋其設計。Ultrawork 先擺 placeholder。
 
 ---
 

@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -41,7 +42,6 @@ DEFAULT_OS_SKILL_ROOM = Path.home() / "Library/Application Support/tatwo2/skills
 DEFAULT_STATE = Path(
     os.path.expanduser("~/Library/Application Support/Tatwo Ultrawork/os-image")
 )
-DEFAULT_SSH_HOST = os.environ.get("TATWO_OS_IMAGE_SSH_HOST", "m4-mac-mini-codex")
 ADAPTER_RELATIVE = (
     "Contents/Resources/TatwoUltrawork_TatwoUltraworkMac.bundle/"
     "Contents/Resources/tatwo-direct-gateway-chat.mjs"
@@ -340,11 +340,33 @@ def app_running() -> bool:
     ) == 0
 
 
+def gateway_label() -> str:
+    explicit = os.environ.get("MODEL_GATEWAY_LABEL")
+    if explicit:
+        return explicit
+    current = "com.tatwo.codex-model-gateway"
+    # Discover old per-user registrations without persisting any owner's identity.
+    try:
+        output = subprocess.check_output(["launchctl", "list"], text=True, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return current
+    labels = {
+        fields[2] for line in output.splitlines()
+        if len(fields := line.split()) == 3
+        and re.fullmatch(r"com\.[^.]+\.codex-model-gateway", fields[2])
+    }
+    if current in labels or not labels:
+        return current
+    if len(labels) != 1:
+        raise RuntimeError("Multiple gateways registered; set MODEL_GATEWAY_LABEL")
+    return labels.pop()
+
+
 def kickstart_gateway() -> None:
     if os.environ.get("TATWO_OS_IMAGE_SKIP_HEALTHZ") == "1":
         return
     uid = os.getuid()
-    label = f"gui/{uid}/com.chenyawei.codex-model-gateway"
+    label = f"gui/{uid}/{gateway_label()}"
     subprocess.call(
         ["launchctl", "kickstart", "-k", label],
         stdout=subprocess.DEVNULL,

@@ -335,7 +335,7 @@ function scanGodFiles(root, relFiles, texts, opts, ctx) {
 }
 
 /**
- * Heuristic: path-like /Users/name or /Volumes/Name — not redaction regex char classes.
+ * Heuristic: path-like /Users/example or /Volumes/Name — not redaction regex char classes.
  */
 function privatePathHits(line) {
   const hits = [];
@@ -1228,7 +1228,7 @@ function selftest() {
         "public struct SmallOK { public init() {} }\n",
       "Packages/Demo/Sources/Demo/GodFileBig.swift": `${"// line\n".repeat(12)}public struct GodFileBig {}\n`,
       "Packages/Demo/Sources/Demo/PathLeak.swift":
-        'let p = "/Users/alice/secret/config.toml"\n',
+        'let p = "/Users/example/secret/config.toml"\n',
       "Packages/Demo/Sources/Demo/PathClean.swift":
         'let p = "relative/config.toml"\n',
       "Packages/Demo/Sources/Demo/TrustAuthority.swift": `

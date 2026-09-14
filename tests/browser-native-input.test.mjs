@@ -8,6 +8,19 @@ const source = bridge.match(/kTatwoTypeIntoNode\[\] = R"TATWOJS\(([\s\S]*?)\)TAT
 assert.ok(source, 'extract the exact production typing function, not a rewritten test version');
 function fixture(overrides = {}) {
   const document = {};
+  const expectedURL = 'https://example.invalid/fixture';
+  const window = {}; window.top = window;
+  class Node {
+    get isConnected() { return this.connected !== false; }
+    get ownerDocument() { return document; }
+  }
+  class Form extends Node {
+    get action() { return expectedURL; }
+    get method() { return 'get'; }
+    get target() { return ''; }
+    get enctype() { return 'application/x-www-form-urlencoded'; }
+    requestSubmit() { this.onSubmit?.(); }
+  }
   let reads = 0;
   class Input {
     constructor() { Object.assign(this, {tagName:'INPUT', type:'text', isConnected:true, ownerDocument:document, events:[], _value:'old'}); }
@@ -22,9 +35,13 @@ function fixture(overrides = {}) {
     set value(value) { this._value = value; }
     get value() { reads++; throw new Error('must not read form values'); }
   }
-  const fn = vm.runInNewContext('('+source+')', {document, HTMLInputElement:Input, HTMLTextAreaElement:Textarea, Event:class {constructor(type){this.type=type;}}});
+  const production = vm.runInNewContext('('+source+')', {document, window, location:{href:expectedURL},
+    Node, HTMLFormElement:Form, HTMLElement:Input, EventTarget:Input,
+    HTMLInputElement:Input, HTMLTextAreaElement:Textarea, Event:class {constructor(type){this.type=type;}}});
+  // Supply the observed document URL exactly as the production native caller does.
+  const fn = function(text, submit) { return production.call(this, text, submit, expectedURL); };
   const field = Object.assign(overrides.tagName === 'TEXTAREA' ? new Textarea() : new Input(), overrides);
-  return {field, fn, document, reads:()=>reads};
+  return {field, fn, document, Form, reads:()=>reads};
 }
 test('exact native function replaces a later field without reading its value', () => {
   const f = fixture(); assert.equal(f.fn.call(f.field,'hello',false),true);
@@ -58,12 +75,12 @@ test('focus redirection cannot send text into another field or App', () => {
   assert.equal(f.fn.call(f.field,'intended',false),true); assert.equal(f.field._value,'intended'); assert.equal(other.value,'untouched');
 });
 test('form submission is explicit and invoked once', () => {
-  const f=fixture(); let submitted=0; f.field.form={requestSubmit(){submitted++;}};
+  const f=fixture(); let submitted=0; f.field.form=new f.Form(); f.field.form.onSubmit=()=>{submitted++;};
   f.fn.call(f.field,'one',false); assert.equal(submitted,0); f.fn.call(f.field,'two',true); assert.equal(submitted,1);
 });
 test('removed field after input events cannot submit its old form', () => {
-  const f=fixture(); let submitted=0; f.field.form={requestSubmit(){submitted++;}};
-  f.field.onEvent=()=>{f.field.isConnected=false;}; assert.equal(f.fn.call(f.field,'text',true),true); assert.equal(submitted,0);
+  const f=fixture(); let submitted=0; f.field.form=new f.Form(); f.field.form.onSubmit=()=>{submitted++;};
+  f.field.onEvent=()=>{f.field.isConnected=false;}; assert.equal(f.fn.call(f.field,'text',true),false); assert.equal(submitted,0); // mutation during input invalidates submission
 });
 test('runtime failures are not converted into successful typing', () => {
   const f=fixture(); f.field.onFocus=()=>{throw new Error('fixture listener');}; assert.throws(()=>f.fn.call(f.field,'text',false),/fixture listener/);
@@ -71,6 +88,16 @@ test('runtime failures are not converted into successful typing', () => {
 test('production uses node-bound data arguments and no global event injection', () => {
   const swift=fs.readFileSync(new URL('../App/Sources/Tatwo2/Facade/BrowserAgentBridge.swift',import.meta.url),'utf8');
   assert.doesNotMatch(swift,/CGEvent|cghidEventTap|NSApp\.postEvent|TatwoCEFRuntime\.captureActiveVisibleSnapshot/);
-  assert.match(bridge,/SetString\("functionDeclaration", kTatwoTypeIntoNode\)/);
+  assert.match(bridge,/SetString\("functionDeclaration", type_kind_ == NodeInputKind::select \? kTatwoSelectNode : kTatwoTypeIntoNode\)/);
   assert.match(bridge,/SetString\("value", ToCefString\(type_text_\)\)/);
+});
+
+
+test('production typing refuses a mismatched observed URL and an embedded frame', () => {
+  for (const wrongFrame of [false, true]) {
+    const f = fixture(), window = {}; window.top = wrongFrame ? {} : window;
+    const fn = vm.runInNewContext('('+source+')', { window, location: {href:'https://example.invalid/new'} });
+    assert.equal(fn.call(f.field, 'never write', false, 'https://example.invalid/observed'), false);
+    assert.equal(f.field._value, 'old');
+  }
 });

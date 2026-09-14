@@ -11,6 +11,21 @@ const skip = new Set(['.git']);
 // Decode every non-resource file as UTF-8, including Swift, shell, TOML,
 // plist and strings. Unknown extensions must not provide a scan bypass.
 const binaryExtensions = new Set(['.png', '.icns', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.woff', '.woff2', '.ttf']);
+const genericUsers = new Set(['example', 'demo', 'test', 'user', 'octocat', 'runner', 'ci', 'root', 'admin', 'fixture', 'sample']);
+const exampleHost = value => /^(?:example(?:\.|$)|localhost$)|\.example$/i.test(value.replace(/\.$/, ''));
+const octet = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
+// Capture values, not field syntax, so each occurrence uses the same exact-value allowlist.
+const privacyRules = [
+  ['macos username', /\/Users\/([A-Za-z0-9_][A-Za-z0-9_.-]*)|\b(?:user|username|userName|USER|USERNAME|name)["']?\s*:\s*["']([A-Za-z0-9_][A-Za-z0-9_.-]*)["']|^\s*(?:-\s*)?(?:user|username|name):\s*([A-Za-z0-9_][A-Za-z0-9_.-]*)\s*(?:#.*)?$/g,
+    match => match[1] ?? match[2] ?? match[3], value => genericUsers.has(value.toLowerCase())],
+  ['private ip', new RegExp(String.raw`(?<![\w.])(?:10\.${octet}|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.${octet}\.${octet}(?![\w.]|\.\d)`, 'g')],
+  ['personal hostname', /(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:tatwo214\.com|local)\.?(?![\w.-])/gi,
+    match => match[0], exampleHost],
+  // Host-like literals, SSH arguments and shell defaults. Overlapping model/tool
+  // identifiers require reviewed exact-value exceptions, never a blanket skip.
+  ['ssh host alias', /(?:["'`]\s*|:-|(?:\bssh|\bHost)\s+|(?:SSH_HOST|PRIMARY_HOST)\s*=\s*)([a-z0-9][a-z0-9.-]*(?:mac-mini|macbook|-codex|m4-)[a-z0-9.-]*|mac-mini[a-z0-9.-]*|macbook[a-z0-9.-]*|m4-[a-z0-9.-]*)(?=["'`\s}:]|$)/gi,
+    match => match[1], exampleHost],
+];
 const forbidden = [
   ['private volume label', /Layer2[ ]ai|33\u8766/i],
   ['private user path', /\/Users\/layer[2]/i],
@@ -27,10 +42,17 @@ const allowed = [];
 const allowances = new Map();
 const pending = [];
 
+function occurrences(line, rule) {
+  const [label, pattern, value = match => match[0], harmless = () => false] = rule;
+  if (label === 'private key') return pattern.test(line) ? [line] : [];
+  return [...line.matchAll(new RegExp(pattern.source, [...new Set(pattern.flags + 'g')].join('')))]
+    .map(value).filter(value => !harmless(value));
+}
+
 function loadAllowances() {
   // Policy comes from this scanner's sibling, never from the tree being scanned.
   const policy = fileURLToPath(new URL('./public-safety-allow.txt', import.meta.url));
-  const labels = new Set(['email address', 'provider token', 'private key']);
+  const labels = new Set(['email address', 'provider token', 'private key', ...privacyRules.map(([label]) => label)]);
   fs.readFileSync(policy, 'utf8').split(/\r?\n/).forEach((line, index) => {
     if (!line.trim() || line.trimStart().startsWith('#')) return;
     const fields = line.split('|');
@@ -61,6 +83,9 @@ function walk(dir) {
       pattern.lastIndex = 0;
       if (pattern.test(rel)) fail(0, label);
     }
+    for (const rule of privacyRules) {
+      if (occurrences(rel, rule).length) fail(0, rule[0]);
+    }
     if (/(^|\/)(?:\.env(?:\..*)?|receipts|sessions|attachments|browser-profile|DerivedData|\.claude|\.codex)(?:\/|$)/i.test(rel)) fail(0, 'sensitive path rejected');
     if ((stat.mode & 0o002) !== 0) fail(0, 'world-writable file rejected');
     if (stat.isSymbolicLink()) { fail(0, 'symlink rejected'); continue; }
@@ -84,13 +109,12 @@ async function inspect({ file, rel }) {
       return;
     }
     source.split(/\r?\n/).forEach((line, index) => {
-      for (const [label, pattern] of forbidden) {
-        pattern.lastIndex = 0;
-        if (!pattern.test(line)) continue;
+      for (const rule of [...forbidden, ...privacyRules]) {
+        const [label] = rule;
+        const values = occurrences(line, rule);
+        if (!values.length) continue;
         const allowance = allowances.get(`${rel}|${label}`);
         // Every occurrence must be harmless; a fixture on the same line cannot hide another value.
-        const values = label === 'private key' ? [line]
-          : [...line.matchAll(new RegExp(pattern.source, [...new Set(pattern.flags + 'g')].join('')))].map(match => match[0]);
         if (allowance && values.length > 0 && values.every(value => allowance.pattern.test(value))) allowed.push(`ALLOW: ${rel}:${index + 1}: ${label} (${allowance.reason})`);
         else fail(index + 1, label);
       }

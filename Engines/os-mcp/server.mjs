@@ -17,7 +17,7 @@ const pixel = { type: 'number', minimum: 0, exclusiveMaximum: 2048 };
 const elementIndex = { type: 'integer', minimum: 0, maximum: 2147483647 };
 const tools = [
   ['computer_list_apps', 'List running regular Apps: name, bundleIdentifier, pid, isFrontmost. No consent needed. ' + computerRules, {}, []],
-  ['computer_start', 'Request consent for any installed App by bundleIdentifier, except TATWO, password managers and security/settings Apps. Reuses this chat’s unrevoked consent within its 15-minute lease; switches the single current target and returns sessionID. Stop or human input clears all approvals. ' + computerRules, {
+  ['computer_start', 'Request consent for any installed App by bundleIdentifier, except TATWO, password managers and security/settings Apps. 授權層級跟隨這條對話的權限設定：全權／代我核准不再詢問；要求核准則每個 session 問一次。 switches the single current target and returns sessionID. Stop clears all approvals; human input revokes unless full access is selected. ' + computerRules, {
     bundleIdentifier: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z0-9][A-Za-z0-9.-]*$' },
   }, ['bundleIdentifier']],
   ['computer_observe', 'Read the focused/main/first target window: screenshot and indexed AX tree (600 elements, depth 40, strings 300 characters, text 80KB; truncated rather than failed). Includes windows, focusedElement, appName, bundleIdentifier, width/height and fresh observationID. Secure values are redacted. No window returns windowState:none. ' + computerRules, {

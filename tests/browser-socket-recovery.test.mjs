@@ -30,6 +30,7 @@ test('browser bridge recovers dead endpoints while preserving active listeners',
   assert.equal(result.status, 0, result.stderr || String(result.error));
   assert.match(result.stdout, /RESULT checks=20 failures=0/);
   assert.match(source, /listenerLeaseFD = lease/);
-  assert.match(source, /guard path == Self.leasedSocketPath, Self.archiveStaleSocket/);
+  assert.match(source, /guard path == Self.leasedSocketPath \|\| path == explicitOverride,\s*Self.archiveStaleSocket\(at: path\)/);
+  assert.match(source, /let lease = Self.acquireSocketLease\(at: path\)/);
   assert.ok(source.indexOf('let lease = Self.acquireSocketLease') < source.indexOf('switch Self.probeSocket(at: path)'));
 });

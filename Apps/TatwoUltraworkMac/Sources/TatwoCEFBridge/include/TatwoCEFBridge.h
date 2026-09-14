@@ -88,12 +88,71 @@ typedef NS_ENUM(NSInteger, TatwoCEFOriginDataClearErrorCode) {
 /// This type is implemented by the real CEF bridge only when the package is
 /// built with a verified TATWO_CEF_ROOT and TATWO_CEF_WRAPPER_LIBRARY. The
 /// default build contains a fail-closed unavailable implementation instead.
+typedef NS_ENUM(NSInteger, TatwoCEFBrowserActor) {
+    TatwoCEFBrowserActorAgent = 0,
+    TatwoCEFBrowserActorHuman = 1,
+};
+typedef void (^TatwoCEFDecisionHandler)(BOOL allow);
+typedef void (^TatwoCEFPermissionRequestHandler)(NSString *site, NSString *permission, TatwoCEFDecisionHandler completion);
+typedef void (^TatwoCEFPrivateNetworkHandler)(NSString *host, TatwoCEFDecisionHandler completion);
+typedef void (^TatwoCEFDownloadProgressHandler)(NSString *identifier, NSString *filename, int64_t received, int64_t total, BOOL done);
+
+#pragma mark - W57d
+typedef void (^TatwoCEFFileDialogCompletion)(NSArray<NSString *> * _Nullable paths);
+typedef void (^TatwoCEFFileDialogHandler)(NSInteger mode, NSString *title, NSString *defaultPath,
+    NSArray<NSString *> *acceptFilters, BOOL multiple, TatwoCEFFileDialogCompletion completion);
+#pragma mark - W57d End
+
 @interface TatwoCEFBrowserView : NSView {
 @package
     void *_cefState;
 }
 
 @property(nonatomic, copy, nullable) TatwoCEFBrowserStateHandler stateHandler;
+/// CEF display metadata only; never DOM, credentials or page script.
+@property(nonatomic, copy, nullable) void (^pageMetadataHandler)(NSString *url, uint64_t generation, NSString * _Nullable title, NSData * _Nullable faviconPNG);
+@property(atomic, readonly) TatwoCEFBrowserActor browserActor;
+@property(atomic, readonly) BOOL agentControlled;
+@property(atomic, readonly) BOOL humanPreferencesDeferred;
+@property(atomic) BOOL blocksThirdPartyCookies;
+@property(atomic) BOOL adBlock;
+@property(nonatomic, copy, nullable) TatwoCEFDownloadProgressHandler onDownloadProgress;
+@property(nonatomic, copy, nullable) void (^onPopupRequested)(NSString *url);
+@property(nonatomic, copy, nullable) TatwoCEFPermissionRequestHandler onPermissionRequested;
+@property(nonatomic, copy, nullable) TatwoCEFPrivateNetworkHandler onPrivateNetworkRequested;
+#pragma mark - W57d
+@property(nonatomic, copy, nullable) TatwoCEFFileDialogHandler onFileDialog;
+@property(nonatomic, copy, nullable) void (^onFullscreenModeChange)(BOOL fullscreen);
+@property(nonatomic, copy, nullable) void (^onWebFeaturesInvalidated)(void);
+- (void)cancelWebFeatures;
+- (void)exitContentFullscreen;
+- (void)printPage;
+/// Explicit fallback when the native print dialog is unavailable; never a timed duplicate job.
+- (void)printToPDFWithCompletion:(void (^)(NSString * _Nullable path))completion
+    NS_SWIFT_NAME(printToPDF(completion:));
+/// Downloads the current PDF for the system viewer; cannot accept an arbitrary local path.
+- (void)downloadCurrentPDFWithCompletion:(void (^)(NSString * _Nullable path))completion
+    NS_SWIFT_NAME(downloadCurrentPDF(completion:));
+#pragma mark - W57d End
+#pragma mark - W57c Password assistance (human only, never logged)
+@property(nonatomic) BOOL passwordAssistEnabled;
+@property(nonatomic, copy, nullable) void (^onLoginFormDetected)(NSString *origin, NSString *formID, NSString *usernameFieldID, NSString *passwordFieldID, NSString *prefilledUsername);
+@property(nonatomic, copy, nullable) void (^onCredentialSubmitted)(NSString *origin, NSString *username, NSString *password);
+@property(nonatomic, copy, nullable) void (^onPasswordAssistPageLoaded)(NSString *origin, uint64_t generation, BOOL successful, BOOL hasPasswordForm);
+@property(nonatomic, copy, nullable) void (^onPasswordAssistInvalidated)(BOOL reload, BOOL preserveSubmission);
+- (void)fillCredentialUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g
+    NS_SWIFT_NAME(fillCredentialUsername(_:password:formID:navigationGeneration:));
+#pragma mark - W57c End
+#pragma mark - W58 AI vault login; strictly agent actor, never credential results
+@property(nonatomic, copy, readonly) NSDictionary *agentLoginState;
+- (BOOL)prepareAgentLogin;
+- (void)cancelAgentLogin;
+- (BOOL)fillCredentialForAgentUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g
+    NS_SWIFT_NAME(fillCredentialForAgentUsername(_:password:formID:navigationGeneration:));
+#pragma mark - W58 End
+/// Sticky downgrade: async effects may outlive the command. Only native human input restores it.
+- (void)beginAgentInteraction;
+- (BOOL)restoreHumanInteraction;
 @property(nonatomic, readonly) BOOL canGoBack;
 @property(nonatomic, readonly) BOOL canGoForward;
 @property(nonatomic, copy, readonly, nullable) NSString *currentURLString;
@@ -104,16 +163,28 @@ typedef NS_ENUM(NSInteger, TatwoCEFOriginDataClearErrorCode) {
 - (nullable instancetype)initWithFrame:(NSRect)frame
                     persistentProfile:(nullable NSString *)persistentProfile
                             initialURL:(NSString *)initialURL
+                                 actor:(TatwoCEFBrowserActor)actor
                                  error:(NSError * _Nullable * _Nullable)error
     NS_DESIGNATED_INITIALIZER;
+
+- (nullable instancetype)initWithFrame:(NSRect)frame
+                    persistentProfile:(nullable NSString *)persistentProfile
+                            initialURL:(NSString *)initialURL
+                                 error:(NSError * _Nullable * _Nullable)error;
 
 /// A normal tab with its own browser/history, using the already secured context.
 @property(nonatomic, readonly) BOOL canShareRequestContext;
 - (nullable instancetype)initWithFrame:(NSRect)frame
                    sharingContextWith:(TatwoCEFBrowserView *)source
                            initialURL:(NSString *)initialURL
-                                error:(NSError * _Nullable * _Nullable)error
+                                actor:(TatwoCEFBrowserActor)actor
+                                 error:(NSError * _Nullable * _Nullable)error
     NS_DESIGNATED_INITIALIZER;
+
+- (nullable instancetype)initWithFrame:(NSRect)frame
+                   sharingContextWith:(TatwoCEFBrowserView *)source
+                           initialURL:(NSString *)initialURL
+                                error:(NSError * _Nullable * _Nullable)error;
 
 - (instancetype)initWithFrame:(NSRect)frame NS_UNAVAILABLE;
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
@@ -163,6 +234,19 @@ typedef NS_ENUM(NSInteger, TatwoCEFOriginDataClearErrorCode) {
     navigationGeneration:(uint64_t)generation submit:(BOOL)submit
     dispatchGate:(TatwoCEFBrowserInputDispatchGate)dispatchGate
     completion:(TatwoCEFBrowserInputHandler)completion;
+#pragma mark - W57a
+@property(nonatomic, copy, nullable) void (^onDailyShortcut)(NSString *kind);
+@property(nonatomic, copy, nullable) void (^onFindResult)(int count, int activeIndex);
+@property(nonatomic, copy, nullable) void (^onContextMenuAction)(NSString *kind, NSString *url);
+@property(nonatomic, copy) NSString *contextSearchEngineTitle;
+@property(nonatomic, readonly) double zoomLevel;
+- (void)findText:(NSString *)text forward:(BOOL)forward matchCase:(BOOL)matchCase;
+- (void)stopFinding;
+- (void)setZoomLevel:(double)level;
+- (void)stopLoading;
+- (void)performContextEdit:(NSString *)kind;
+- (void)downloadImageURL:(NSString *)url;
+#pragma mark - W57a end
 - (void)goBack;
 - (void)goForward;
 - (void)reload;
@@ -179,6 +263,12 @@ typedef NS_ENUM(NSInteger, TatwoCEFOriginDataClearErrorCode) {
 /// Process-wide CEF lifecycle. The bridge intentionally exposes the engine
 /// identifier so UI and acceptance evidence cannot confuse WebKit with CEF.
 @interface TatwoCEFRuntime : NSObject
+#pragma mark - W60
+/// Role launch attempts and last ten renderer termination callbacks; not per-PID restarts.
++ (NSDictionary<NSString *, id> *)processDiagnostics;
+/// Startup-only soft process limit; zero leaves Chromium's default unchanged.
++ (void)configureRendererProcessLimit:(NSInteger)limit;
+#pragma mark - W60 End
 
 @property(class, nonatomic, readonly) BOOL compiled;
 @property(class, nonatomic, copy, readonly) NSString *engineIdentifier;

@@ -27,7 +27,7 @@ test('W24 network starts fail-closed, rejects expensive/constrained paths, allow
   assert.match(updater, /guard force \|\| unmetered/);
   assert.match(updater, /!allowed && !self.manualDownload && self.phase == \.starting/);
   assert.match(updater, /等 Wi‑Fi 再自動下載/);
-  assert.match(card, /Button\("現在就下載"\)[\s\S]*force: true/);
+  assert.match(updater, /prefetch\(to: tag, repository: repository, force: true\)/);
 });
 
 test('W24 cache and Applications space gates run before bytes, after verification and before handoff', () => {
@@ -39,14 +39,16 @@ test('W24 cache and Applications space gates run before bytes, after verificatio
   assert.match(updater, /try checkSpace\(\) \} catch[\s\S]*handOff\(tag: tag, repository: prepared.repository/);
 });
 
-test('W24 two-state UI has preparation/cancel and restart, no download-and-update or automatic termination', () => {
-  assert.match(updater, /正在準備 %@（%\.1f \/ %\.1f MB）/);
-  assert.match(updater, /已準備好/);
-  assert.match(card, /Button\("取消"\)/);
-  assert.match(card, /重新啟動以更新（約 10 秒）/);
-  assert.match(card, / · 重新啟動/);
-  assert.doesNotMatch(card, /下載並更新|下載與校驗中/);
+test('W42 shared three-state UI preserves ready-only handoff and hides background progress', () => {
+  assert.equal((card.match(/await updater\.activateUpdateMark/g) ?? []).length, 2);
+  assert.match(card, /私人通道 · /);
+  assert.match(card, /\.help\(updater\.updateMarkHelp\)/);
+  assert.doesNotMatch(card, /updater\.update\(to:|preparationTitle|現在就下載/);
   assert.match(updater, /guard phase == \.ready, let prepared, prepared.tag == tag/);
+  const action = updater.slice(updater.indexOf('    func activateUpdateMark'), updater.indexOf('    private func checkSpace'));
+  const download = action.slice(action.indexOf('if !userStarted'), action.indexOf('confirmingRestart = true'));
+  assert.match(download, /prefetch\(to: tag, repository: repository, force: true\)/);
+  assert.doesNotMatch(download, /handOff|update\(to:|terminate/);
 });
 
 test('W24 offline restart caches tag-pinned script and hash-bound metadata, namespaced by repository', () => {
@@ -75,7 +77,7 @@ final class Space {
 @MainActor final class Probe {
  enum Phase: Equatable { case idle, starting, ready, handedOff, failed(String) }
  static let destinationApp = "/fixture/Applications/TATWO OS.app"
- var phase = Phase.idle, unmetered = false, manualDownload = false
+ var phase = Phase.idle, unmetered = false, manualDownload = false, userStarted = false
  var candidateBytes: Int64 = 0, downloadedBytes: Int64 = 12_300_000, totalBytes: Int64 = 15_700_000
  var pendingCandidate: (tag:String, repository:String)?
  var prepared: (tag:String, repository:String, archives:UpdateArchives)?
@@ -102,21 +104,33 @@ ${cancel}
   p.prefetch(to:"v2.0.6", repository:repo, force:true)
   precondition(p.started == 1 && p.phase == .starting && p.manualDownload)
   precondition(p.preparationTitle("v2.0.6") == "正在準備 v2.0.6（12.3 / 15.7 MB）")
+  p.manualDownload = false
+  p.prefetch(to:"v2.0.6", repository:repo, force:true)
+  precondition(p.manualDownload && p.started == 1)
   p.update(to:"v2.0.6"); precondition(p.handoffs == 0)
   let task = Task<Void,Never> {}; p.download = task
   p.prefetch(to:"v2.0.7", repository:repo)
-  precondition(task.isCancelled && p.pendingCandidate?.tag == "v2.0.7")
+  precondition(task.isCancelled && p.pendingCandidate?.tag == "v2.0.7" && !p.manualDownload)
+  p.prefetch(to:"v2.0.8", repository:repo, force:true)
+  precondition(p.manualDownload && p.pendingCandidate?.tag == "v2.0.8")
   p.cancelUpdate(); precondition(p.pendingCandidate == nil)
   p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives()); p.candidateBytes = 6_000_000_000
   p.update(to:"v2.0.7"); precondition(p.handoffs == 0 && p.prepared == nil)
   p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives()); p.candidateBytes = 1
   p.update(to:"v2.0.6"); precondition(p.handoffs == 0)
   p.update(to:"v2.0.7",repository:"other/repo"); precondition(p.handoffs == 0)
-  p.update(to:"v2.0.7"); precondition(p.handoffs == 0 && p.phase == .starting)
+  p.update(to:"v2.0.7"); precondition(p.handoffs == 0 && p.phase == .starting && p.manualDownload)
   await p.download?.value; precondition(p.handoffs == 1)
   p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives()); p.rejectValidation = true
   p.update(to:"v2.0.7"); await p.download?.value
   precondition(p.handoffs == 1 && p.prepared == nil && p.fileManager.removed == 1 && p.phase == .failed("版本已撤回或無法確認"))
+  p.rejectValidation = false
+  p.phase = .ready; p.prepared = ("v2.0.7",repo,UpdateArchives())
+  p.update(to:"v2.0.7"); let validating = p.download
+  p.prefetch(to:"v2.0.8", repository:repo, force:true)
+  await validating?.value
+  precondition(p.handoffs == 1 && p.fileManager.removed == 1 && p.started == 2)
+  precondition(p.phase == .starting && p.pendingCandidate?.tag == "v2.0.8" && p.manualDownload)
   p.phase = .ready; p.invalidateCandidate(); precondition(p.phase == .idle && p.prepared == nil)
   print("state gates PASS")
  }

@@ -15,6 +15,7 @@ enum EmbeddedBrowserNavigationBlockReason: Equatable, Sendable {
 
 enum EmbeddedBrowserNavigationDecision: Equatable, Sendable {
     case allow
+    case askOncePerHost(String)
     case block(EmbeddedBrowserNavigationBlockReason)
 }
 
@@ -56,20 +57,24 @@ enum StagingBrowserLoopbackPolicy {
 enum EmbeddedBrowserNavigationPolicy {
     static func decision(
         for url: URL?,
+        actor: BrowserActor = .strict,
         environment: [String: String] = StagingBrowserLoopbackPolicy.runtimeEnvironment,
         bundleIdentifier: String? = StagingBrowserLoopbackPolicy.runtimeBundleIdentifier
     ) -> EmbeddedBrowserNavigationDecision {
         guard let url else {
+            BrowserPolicyLog.shared.record(decision: "navigation.block.missingURL", actor: actor == .human ? "human" : "agent")
             return .block(.missingURL)
         }
         guard let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https"
         else {
+            BrowserPolicyLog.shared.record(host: url.host, decision: "navigation.block.unsupportedScheme", actor: actor == .human ? "human" : "agent")
             return .block(.unsupportedScheme)
         }
         guard var host = url.host?.lowercased(),
               !host.isEmpty
         else {
+            BrowserPolicyLog.shared.record(decision: "navigation.block.missingHost", actor: actor == .human ? "human" : "agent")
             return .block(.missingHost)
         }
 
@@ -89,20 +94,25 @@ enum EmbeddedBrowserNavigationPolicy {
             || host == "lan"
             || host.hasSuffix(".lan")
         {
-            return .block(.localHostname)
+            BrowserPolicyLog.shared.record(host: host, decision: actor == .human ? "navigation.askOncePerHost" : "navigation.block.localHostname", actor: actor == .human ? "human" : "agent")
+            return actor == .human ? .askOncePerHost(host) : .block(.localHostname)
         }
 
         if StagingBrowserLoopbackPolicy.allows(
             url, environment: environment, bundleIdentifier: bundleIdentifier
         ) {
+            BrowserPolicyLog.shared.record(host: host, decision: "navigation.allow.staging", actor: actor == .human ? "human" : "agent")
             return .allow
         }
         if let isPublic = publicIPv4Literal(host), !isPublic {
-            return .block(.nonPublicIPAddress)
+            BrowserPolicyLog.shared.record(host: host, decision: actor == .human ? "navigation.askOncePerHost" : "navigation.block.nonPublicIP", actor: actor == .human ? "human" : "agent")
+            return actor == .human ? .askOncePerHost(host) : .block(.nonPublicIPAddress)
         }
         if let isPublic = publicIPv6Literal(host), !isPublic {
-            return .block(.nonPublicIPAddress)
+            BrowserPolicyLog.shared.record(host: host, decision: actor == .human ? "navigation.askOncePerHost" : "navigation.block.nonPublicIP", actor: actor == .human ? "human" : "agent")
+            return actor == .human ? .askOncePerHost(host) : .block(.nonPublicIPAddress)
         }
+        BrowserPolicyLog.shared.record(host: host, decision: "navigation.allow", actor: actor == .human ? "human" : "agent")
         return .allow
     }
 
@@ -296,11 +306,18 @@ enum EmbeddedBrowserSecurityStatusPresentation {
     }
 }
 
+enum EmbeddedBrowserSensitivePermissionDecision: Equatable, Sendable {
+    case ask, deny
+    var webKitDecision: WKPermissionDecision { self == .ask ? .prompt : .deny }
+}
+
 enum EmbeddedBrowserSensitivePermissionPolicy {
     static func decision(
-        for permission: EmbeddedBrowserSensitivePermission
-    ) -> WKPermissionDecision {
-        .deny
+        for permission: EmbeddedBrowserSensitivePermission,
+        actor: BrowserActor = .strict
+    ) -> EmbeddedBrowserSensitivePermissionDecision {
+        BrowserPolicyLog.shared.record(decision: "permission.\(permission)." + (actor == .human ? "ask" : "deny"), actor: actor == .human ? "human" : "agent")
+        return actor == .human ? .ask : .deny
     }
 }
 
@@ -347,6 +364,13 @@ struct EmbeddedBrowserCommand: Equatable {
         case goBack
         case goForward
         case reload
+        case stopLoading
+        case printPage
+        case printPDF
+        case openPDF
+        case find(String, forward: Bool, matchCase: Bool)
+        case stopFinding
+        case zoom(Double)
     }
 
     let id = UUID()

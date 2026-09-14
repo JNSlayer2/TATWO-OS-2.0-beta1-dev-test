@@ -88,6 +88,11 @@ final class OSAgentBridge: @unchecked Sendable {
 
     @MainActor func configureCallerTest(model: ChatPageModel, manager: BackgroundJobManager) {
         self.model = model
+        ComputerUseController.shared.consentPolicyProvider = { [weak model] caller in
+            guard let model, let thread = model.live?.threadRecord(caller) else { return .askOncePerSession }
+            return .resolve(user: model.permissionPreset, bot: thread.botPermissionPreset,
+                            readOnly: thread.roomReadOnly == true)
+        }
         self.backgroundJobs = manager
     }
 
@@ -109,6 +114,11 @@ final class OSAgentBridge: @unchecked Sendable {
     @MainActor
     func start(model: ChatPageModel) {
         self.model = model
+        ComputerUseController.shared.consentPolicyProvider = { [weak model] caller in
+            guard let model, let thread = model.live?.threadRecord(caller) else { return .askOncePerSession }
+            return .resolve(user: model.permissionPreset, bot: thread.botPermissionPreset,
+                            readOnly: thread.roomReadOnly == true)
+        }
         if backgroundJobs == nil {
             let manager = BackgroundJobManager()
             manager.onCompletion = { [weak self] job in

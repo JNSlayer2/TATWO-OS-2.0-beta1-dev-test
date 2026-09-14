@@ -467,189 +467,108 @@ final class EmbeddedBrowserBookmarkStore:
     }
 }
 
-enum EmbeddedBrowserBookmarkRailLayoutPolicy {
-    static let searchCardMaximumWidth: CGFloat = 620
-    static let railTopSpacing: CGFloat = 10
-    static let collapsedWidth: CGFloat = 30
-    static let bubbleWidth: CGFloat = 30
-    static let bubbleSpacing: CGFloat = 6
-    static let anchorVisualSize: CGFloat = 18
-    static let anchorSymbolSize: CGFloat = 11
+/// Chat's only address controls. Bookmark management lives in Browser work space.
+struct EmbeddedBrowserToolbar: View {
+    @Binding var addressText: String
+    var addressFieldFocused: FocusState<Bool>.Binding
+    let state: EmbeddedBrowserNavigationState
+    let enabled: Bool
+    let onSubmit: () -> Void
+    let onCommand: (EmbeddedBrowserCommand.Action) -> Void
 
-    static func width(
-        isExpanded: Bool,
-        bookmarkCount: Int,
-        cardContentWidth: CGFloat
-    ) -> CGFloat {
-        guard isExpanded else { return collapsedWidth }
-        let bubbleCount = max(0, bookmarkCount) + 2
-        let requested =
-            CGFloat(bubbleCount) * bubbleWidth
-            + CGFloat(max(0, bubbleCount - 1)) * bubbleSpacing
-        let available = max(collapsedWidth, cardContentWidth)
-        return min(requested, available)
+    var openTabs: [BrowserAddressSuggestion] = []
+    var onSelectTab: (String) -> Void = { _ in }
+    @State private var history: [BrowserHistoryEntry] = []
+    @State private var selection = -1
+    private struct Choice: Identifiable {
+        let id: String
+        let section: String
+        let title: String
+        let url: String?
+        let tabID: String?
     }
-
-    static func visibleRailFrame(
-        searchCardFrame: CGRect,
-        isExpanded: Bool,
-        bookmarkCount: Int
-    ) -> CGRect {
-        CGRect(
-            x: searchCardFrame.minX,
-            y: searchCardFrame.maxY + railTopSpacing,
-            width: width(
-                isExpanded: isExpanded,
-                bookmarkCount: bookmarkCount,
-                cardContentWidth: searchCardFrame.width),
-            height: bubbleWidth)
+    private var choices: [Choice] {
+        let query = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard addressFieldFocused.wrappedValue, !query.isEmpty else { return [] }
+        let tabs = openTabs.filter { $0.title.localizedCaseInsensitiveContains(query) || $0.url.localizedCaseInsensitiveContains(query) }
+            .prefix(6).map { Choice(id: "tab-" + $0.id, section: "開啟中的分頁", title: $0.title, url: nil, tabID: $0.id) }
+        let visits = BrowserHistoryStore.suggestions(history, matching: query).map {
+            Choice(id: $0.url.absoluteString, section: "歷史", title: $0.title, url: $0.url.absoluteString, tabID: nil)
+        }
+        let engine = BrowserGeneralSettings.load().searchEngine
+        return tabs + visits + [Choice(id: "search", section: "用 \(engine.title) 搜尋", title: query,
+            url: engine.queryURL(query).absoluteString, tabID: nil)]
     }
-}
-
-enum EmbeddedBrowserToolbarLayoutPolicy {
-    static let rowHeight: CGFloat = 36
-    static let toolbarControlSpacing: CGFloat = 10
-    static let trailingControlSpacing: CGFloat = 2
-    static let toolbarVerticalPadding: CGFloat = 7
-    static let tabSpacing: CGFloat = 8
-    static let tabTitleCloseSpacing: CGFloat = 8
-    static let tabContentSpacing: CGFloat = 7
-    static let tabHorizontalPadding: CGFloat = 9
-    static let controlHitTarget: CGFloat = 32
-    static let tabHeight: CGFloat = 32
-    static let tabFaviconSize: CGFloat = 16
-    static let tabCloseHitTarget: CGFloat = 22
-}
-
-enum EmbeddedBrowserNewTabAction {
-    static func perform(
-        state: TatwoBrowserLaneState,
-        id: TatwoBrowserLaneID,
-        now: Date
-    ) -> TatwoBrowserLaneState {
-        TatwoBrowserLaneReducer.reduce(
-            state: state,
-            action: .open(
-                id: id,
-                binding: .unboundReadOnly,
-                title: "新分頁"),
-            now: now)
+    private func choose(_ choice: Choice) {
+        if let id = choice.tabID { onSelectTab(id); addressFieldFocused.wrappedValue = false }
+        else if let url = choice.url { addressText = url; onSubmit() }
+        selection = -1
     }
-}
-
-enum EmbeddedBrowserBookmarkRailHoverPolicy {
-    static let verticalPadding: CGFloat = 10
-    static let collapseDelayMilliseconds = 400
-    static var collapseDelay: Duration {
-        .milliseconds(collapseDelayMilliseconds)
-    }
-
-    static func hoverRegion(
-        isExpanded: Bool,
-        bookmarkCount: Int,
-        cardContentWidth: CGFloat
-    ) -> CGRect {
-        CGRect(
-            x: 0,
-            y: -verticalPadding,
-            width: EmbeddedBrowserBookmarkRailLayoutPolicy.width(
-                isExpanded: isExpanded,
-                bookmarkCount: bookmarkCount,
-                cardContentWidth: cardContentWidth),
-            height:
-                EmbeddedBrowserBookmarkRailLayoutPolicy.bubbleWidth
-                + verticalPadding * 2)
-    }
-
-    static func shouldCollapse(
-        isPointerInside: Bool,
-        isPinnedOpen: Bool,
-        isContextMenuVisible: Bool
-    ) -> Bool {
-        !isPointerInside && !isPinnedOpen && !isContextMenuVisible
-    }
-}
-
-struct EmbeddedBrowserBookmarkRailInteractionState: Equatable {
-    private(set) var isExpanded = false
-    private(set) var isPointerInside = false
-    private(set) var isClickExpanded = false
-
-    mutating func toggleClick() {
-        if isClickExpanded {
-            isClickExpanded = false
-            isExpanded = false
-        } else {
-            isClickExpanded = true
-            isExpanded = true
+    var body: some View {
+        VStack(spacing: 0) {
+        HStack(spacing: BrowserSidebarMetrics.childGap) {
+            control("chevron.left", "上一頁", enabled && state.canGoBack, .goBack)
+            control("chevron.right", "下一頁", enabled && state.canGoForward, .goForward)
+            control(state.isLoading ? "xmark" : "arrow.clockwise", state.isLoading ? "停止載入" : "重新載入", enabled, state.isLoading ? .stopLoading : .reload)
+            TextField("搜尋或輸入網址", text: $addressText)
+                .textFieldStyle(.plain)
+                .font(.system(size: BrowserSidebarMetrics.rowFontSize))
+                .focused(addressFieldFocused)
+                .onSubmit {
+                    if choices.indices.contains(selection) { choose(choices[selection]) } else { onSubmit() }
+                }
+                .onMoveCommand { direction in
+                    guard !choices.isEmpty else { return }
+                    if direction == .down { selection = min(selection + 1, choices.count - 1) }
+                    if direction == .up { selection = max(0, selection - 1) }
+                }
+                .onChange(of: addressText) { _, _ in selection = -1 }
+                .onExitCommand {
+                    addressText = state.urlString ?? ""
+                    addressFieldFocused.wrappedValue = false
+                }
+                .padding(BrowserSidebarMetrics.rowHorizontalPadding)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowCornerRadius))
+                .accessibilityLabel("網址").accessibilityIdentifier("browser-address-field")
+                .disabled(!enabled)
+        }
+        .padding(.horizontal, BrowserSidebarMetrics.rowHorizontalPadding)
+        .padding(.vertical, BrowserSidebarMetrics.rowVerticalPadding)
+        .background(NonWindowDraggingView())
+        .accessibilityIdentifier("browser-navigation-bar")
+        if !choices.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
+                    Button { choose(choice) } label: {
+                        HStack {
+                            Text(choice.section).font(.caption).foregroundStyle(.secondary)
+                            Text(choice.title).lineLimit(1)
+                            Spacer(minLength: 0)
+                        }.padding(8).contentShape(Rectangle())
+                            .background(index == selection ? Color.accentColor.opacity(0.15) : .clear)
+                    }.buttonStyle(.plain)
+                }
+            }.accessibilityLabel("網址建議")
+        }
+        }
+        .task(id: addressText) {
+            guard addressFieldFocused.wrappedValue else { return }
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            history = (try? await BrowserHistoryStore.shared.entries()) ?? []
         }
     }
 
-    mutating func pointerEntered() {
-        isPointerInside = true
-        isExpanded = true
-    }
-
-    mutating func pointerExited() {
-        isPointerInside = false
-    }
-
-    mutating func collapseIfAllowed(
-        isContextMenuVisible: Bool
-    ) {
-        guard EmbeddedBrowserBookmarkRailHoverPolicy.shouldCollapse(
-            isPointerInside: isPointerInside,
-            isPinnedOpen: isClickExpanded,
-            isContextMenuVisible: isContextMenuVisible)
-        else {
-            return
-        }
-        isExpanded = false
-    }
-
-    mutating func collapseFromOutside() {
-        isClickExpanded = false
-        isExpanded = false
-    }
-}
-
-struct EmbeddedBrowserSecondaryClickSurface:
-    NSViewRepresentable
-{
-    let action: () -> Void
-
-    func makeNSView(context _: Context) -> SecondaryClickView {
-        let view = SecondaryClickView()
-        view.action = action
-        return view
-    }
-
-    func updateNSView(
-        _ nsView: SecondaryClickView,
-        context _: Context
-    ) {
-        nsView.action = action
-    }
-
-    final class SecondaryClickView: NSView {
-        var action: () -> Void = {}
-
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            guard let event = NSApp.currentEvent,
-                  event.type == .rightMouseDown
-                    || event.type == .otherMouseDown
-            else {
-                return nil
-            }
-            return bounds.contains(point) ? self : nil
-        }
-
-        override func rightMouseDown(with _: NSEvent) {
-            action()
-        }
-
-        override func otherMouseDown(with _: NSEvent) {
-            action()
-        }
+    private func control(_ symbol: String, _ label: String, _ enabled: Bool,
+                         _ action: EmbeddedBrowserCommand.Action) -> some View {
+        Button {
+            addressFieldFocused.wrappedValue = false
+            addressText = state.urlString ?? ""
+            onCommand(action)
+        } label: {
+            Image(systemName: symbol).font(.system(size: BrowserSidebarMetrics.rowFontSize))
+                .frame(width: BrowserSidebarMetrics.controlHitSize, height: BrowserSidebarMetrics.controlHitSize)
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(!enabled).help(label).accessibilityLabel(label)
     }
 }

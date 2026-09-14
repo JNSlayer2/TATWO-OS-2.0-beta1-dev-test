@@ -73,19 +73,19 @@ final class PersistenceTests: XCTestCase {
   /// HOME fallback 時必須 fail-closed 導回 scratch home，不得寫進正式 App Support。
   func testDefaultStoreKeepsStagingPreferencesOutOfRealHomeWhenScratchHomeIsSet() {
     let store = TatwoPreferenceStore.defaultStore(environment: [
-      "HOME": "/Users/real-account",
+      "HOME": "/Users/example",
       "TATWO_STAGING_SCRATCH_HOME": "/staging/runtime-58/home",
     ])
 
     XCTAssertEqual(
       store.fileURL.path,
       "/staging/runtime-58/home/Library/Application Support/Tatwo Ultrawork/preferences.json")
-    XCTAssertFalse(store.fileURL.path.hasPrefix("/Users/real-account"))
+    XCTAssertFalse(store.fileURL.path.hasPrefix("/Users/example"))
   }
 
   func testDefaultStorePrefersExplicitStateDirOverStagingScratchHome() {
     let store = TatwoPreferenceStore.defaultStore(environment: [
-      "HOME": "/Users/real-account",
+      "HOME": "/Users/example",
       "TATWO_STAGING_SCRATCH_HOME": "/staging/runtime-58/home",
       "TATWO_ULTRAWORK_STATE_DIR": "/staging/runtime-58/state",
     ])
@@ -95,12 +95,12 @@ final class PersistenceTests: XCTestCase {
 
   func testDefaultStoreIgnoresBlankScratchHomeAndKeepsFormalHomeLayout() {
     let store = TatwoPreferenceStore.defaultStore(environment: [
-      "HOME": "/Users/real-account",
+      "HOME": "/Users/example",
       "TATWO_STAGING_SCRATCH_HOME": "   ",
     ])
 
     XCTAssertEqual(
       store.fileURL.path,
-      "/Users/real-account/Library/Application Support/Tatwo Ultrawork/preferences.json")
+      "/Users/example/Library/Application Support/Tatwo Ultrawork/preferences.json")
   }
 }

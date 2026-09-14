@@ -19,8 +19,8 @@ test('W22 exact delta naming, size boundary and quoted handoff', () => {
   assert.match(updater, /TATWO-OS.manifest.json.sha256/);
 });
 
-test('update card offers a one-click update and keeps the terminal path as an advanced fallback', () => {
-  assert.match(card, /Button\(updateButtonTitle\) \{ updater\.update\(to: release\.tag_name\) \}/);
+test('update card shares the guarded update action and keeps the terminal fallback', () => {
+  assert.match(card, /await updater\.activateUpdateMark\(to: release\.tag_name, repository: checker\.repository\)/);
   assert.match(card, /\.buttonStyle\(\.borderedProminent\)/);
   assert.match(card, /DisclosureGroup\("進階：用終端機更新"\)/);
   assert.match(card, /checker\.terminalInstallCommand/);
@@ -413,12 +413,12 @@ test('timeout, mktemp failure and curl failure finish without restart loops', ()
   }
 });
 
-test('source guards: progress, cancel, verified cache, active helper, zero exits', () => {
-  assert.match(card, /updater\.preparationTitle/);
+test('source guards: progress, guarded action, verified cache, active helper, zero exits', () => {
+  assert.match(card, /updater\.updateMarkTitle/);
   assert.match(updater, /Double\(downloadedBytes\)/);
   assert.match(updater, /Double\(totalBytes\)/);
-  assert.match(card, /Button\("取消"\) \{ updater\.cancelUpdate\(\) \}/);
-  assert.match(card, /重新啟動以更新/);
+  assert.match(card, /\.disabled\(updater\.updateMarkDisabled\)/);
+  assert.match(updater, /await IslandNotice.shared.confirm/);
   assert.match(updater, /progress\.download\(/);
   assert.match(updater, /SHA256\(\)/);
   assert.match(updater, /fileExists\(atPath: zip\.path\)/);
@@ -433,12 +433,12 @@ test('source guards: progress, cancel, verified cache, active helper, zero exits
   assert.doesNotMatch(helper, /tatwo-install\.XXXXXX\.sh/);
 });
 
-test('sidebar observes releases/progress and opens the existing GitHub settings card', () => {
+test('sidebar observes shared update state and retains settings integration', () => {
   const source = path => readFileSync(new URL(`../App/Sources/Tatwo2/${path}`, import.meta.url), 'utf8');
   assert.match(card, /struct SidebarUpdateShortcut/);
   assert.match(card, /if let release = checker\.availableRelease, !checker\.dismissed/);
-  assert.match(card, /updater\.preparationTitle\(release\.tag_name\)/);
-  assert.match(card, /已準備好|重新啟動/);
+  assert.match(card, /updater\.updateMarkTitle/);
+  assert.match(card, /updater\.activateUpdateMark/);
   assert.match(source('Chat/ChatPage+Sidebar.swift'), /SidebarUpdateShortcut \{\s*updateSettingsSection = \.github/);
   assert.match(source('Chat/ChatPage+Panels.swift'), /TatwoSettingsPage\(model: model, initialSection: updateSettingsSection\)/);
   assert.match(source('Shell/ChatPageSettings.swift'), /if let initialSection \{ section = initialSection \}/);
@@ -717,4 +717,103 @@ test('W31 helper passes prepared delta/layered route unchanged to the installer'
     const result = run(0, { route });
     assert.equal(readFileSync(join(result.dir, 'route.calls'), 'utf8').trim(), route);
   }
+});
+
+test('W42 production mark and action fixture: intent, integer %, false/true confirm, stale candidate and duplicate taps', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w42-mark-'));
+  const title = updater.slice(updater.indexOf('enum UpdateMarkState'));
+  const phase = updater.slice(updater.indexOf('    enum Phase:'), updater.indexOf('    static let shared'));
+  const action = updater.slice(updater.indexOf('    var updateMarkTitle:'), updater.indexOf('    private func checkSpace'));
+  const swift = `import Foundation
+${title}
+@MainActor final class IslandNotice {
+ static let shared = IslandNotice()
+ var calls = 0, answer = false
+ func confirm(title: String, detail: String, confirmLabel: String, cancelLabel: String) async -> Bool {
+  precondition(title == "重新啟動 TATWO OS 以完成更新？")
+  precondition(detail == "會關閉目前所有工作，約 10 秒後自動重開")
+  precondition(confirmLabel == "重開" && cancelLabel == "稍後")
+  calls += 1; return answer
+ }
+}
+@MainActor final class InAppUpdater {
+${phase}
+ var phase = Phase.idle, userStarted = false, confirmingRestart = false
+ var downloadProgress: Double?, downloadID = UUID()
+ var downloads = 0, updates = 0
+ func prefetch(to: String, repository: String, force: Bool) {
+  precondition(force); userStarted = false; downloads += 1; phase = .starting
+ }
+ func update(to: String, repository: String) { precondition(phase == .ready); updates += 1 }
+${action}
+}
+@main struct Main {
+ @MainActor static func main() async {
+  let p = InAppUpdater(), repo = "fixture/repo", tag = "v2.0.7"
+  for phase: InAppUpdater.Phase in [.idle, .starting, .ready] {
+   precondition(UpdateMarkState.title(phase:phase, progress:0.76, userStarted:false) == "更新")
+  }
+  for percent in 0...100 {
+   let progress = (Double(percent) + 0.1) / 100
+   precondition(UpdateMarkState.title(phase:.starting, progress:progress, userStarted:true) == "下載中 \\(percent)%")
+  }
+  for progress: Double? in [nil, .nan, .infinity, -.infinity, -0.1] {
+   precondition(UpdateMarkState.title(phase:.starting, progress:progress, userStarted:true) == "下載中 0%")
+  }
+  precondition(UpdateMarkState.title(phase:.starting, progress:1.5, userStarted:true) == "下載中 100%")
+  precondition(UpdateMarkState.title(phase:.ready, progress:1, userStarted:true) == "重開")
+  precondition(UpdateMarkState.title(phase:.failed("offline"), progress:nil, userStarted:false) == "更新失敗")
+  await p.activateUpdateMark(to:tag, repository:repo)
+  precondition(p.downloads == 1 && p.updates == 0 && p.updateMarkTitle == "下載中 0%")
+  await p.activateUpdateMark(to:tag, repository:repo)
+  precondition(p.downloads == 1 && p.updates == 0 && p.updateMarkDisabled)
+  p.phase = .ready
+  await p.activateUpdateMark(to:tag, repository:repo, confirm: { false })
+  precondition(p.updates == 0 && p.updateMarkTitle == "重開" && !p.confirmingRestart)
+  await p.activateUpdateMark(to:tag, repository:repo) // Real adapter, fake Island rejects.
+  precondition(IslandNotice.shared.calls == 1 && p.updates == 0)
+  await p.activateUpdateMark(to:tag, repository:repo, confirm: {
+   await p.activateUpdateMark(to:tag, repository:repo, confirm: { preconditionFailure("duplicate prompt") })
+   return true
+  })
+  precondition(p.updates == 1)
+  await p.activateUpdateMark(to:tag, repository:repo, confirm: { p.downloadID = UUID(); return true })
+  precondition(p.updates == 1)
+  p.userStarted = false // A prefetched candidate still requires two separate taps.
+  await p.activateUpdateMark(to:tag, repository:repo, confirm: { preconditionFailure("first tap prompted") })
+  precondition(p.downloads == 1 && p.updates == 1 && p.updateMarkTitle == "重開")
+  IslandNotice.shared.answer = true
+  await p.activateUpdateMark(to:tag, repository:repo)
+  precondition(p.updates == 2 && IslandNotice.shared.calls == 2)
+  p.phase = .failed("offline")
+  precondition(p.updateMarkTitle == "更新失敗" && p.updateMarkHelp == "offline" && !p.updateMarkDisabled)
+  await p.activateUpdateMark(to:tag, repository:repo)
+  precondition(p.downloads == 2 && p.updates == 2 && p.phase == .starting)
+  p.phase = .starting; p.userStarted = false // Adopt an ongoing background download.
+  await p.activateUpdateMark(to:tag, repository:repo)
+  precondition(p.userStarted && p.downloads == 3 && p.updates == 2)
+  p.phase = .handedOff
+  await p.activateUpdateMark(to:tag, repository:repo)
+  precondition(p.downloads == 3 && p.updates == 2)
+  print("W42 mark/action PASS")
+ }
+}`;
+  const file = join(dir, 'Mark.swift'), binary = join(dir, 'mark');
+  writeFileSync(file, swift);
+  let result = spawnSync('swiftc', ['-swift-version', '6', '-parse-as-library', file, '-o', binary], {encoding:'utf8', timeout:60000});
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync(binary, [], {encoding:'utf8', timeout:10000});
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /W42 mark\/action PASS/);
+});
+
+test('W42-fix hand-off terminate bypasses the Island terminate confirmation exactly once and progress publishes per 1%', () => {
+  const updaterSwift = updater;
+  const stubs = readFileSync(new URL('../App/Sources/Tatwo2/Facade/OS1Stubs.swift', import.meta.url), 'utf8');
+  const bypassIndex = updaterSwift.indexOf('TatwoInterruptGate.bypassNextTerminate = true');
+  const terminateIndex = updaterSwift.indexOf('NSApp.terminate(nil)');
+  assert.ok(bypassIndex > 0 && terminateIndex > bypassIndex, 'bypass must be armed right before the hand-off terminate');
+  assert.equal((updaterSwift.match(/NSApp\.terminate\(nil\)/g) || []).length, 1);
+  assert.match(stubs, /if bypassNextTerminate \{ bypassNextTerminate = false; return \.init\(requiresConfirmation: false\) \}/);
+  assert.match(updaterSwift, /if next\.map\(\{ Int\(\$0 \* 100\) \}\) != downloadProgress\.map\(\{ Int\(\$0 \* 100\) \}\)/);
 });

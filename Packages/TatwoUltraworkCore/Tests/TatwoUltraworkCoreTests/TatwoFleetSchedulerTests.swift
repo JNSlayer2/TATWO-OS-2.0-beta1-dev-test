@@ -1203,9 +1203,9 @@ final class TatwoFleetSchedulerTests: XCTestCase {
       "PATH": "/evil/bin:/usr/bin:/bin",
       "SHELL": "/bin/zsh",
       "TMPDIR": "/evil/tmp",
-      "HOME": "/Users/victim",
+      "HOME": "/Users/example",
       "DYLD_INSERT_LIBRARIES": "/evil.dylib",
-      "CODEX_HOME": "/Users/victim/.codex",
+      "CODEX_HOME": "/Users/example/.codex",
       "CLAUDE_CONFIG_DIR": "/evil",
       "LANG": "en_US.UTF-8",
     ]

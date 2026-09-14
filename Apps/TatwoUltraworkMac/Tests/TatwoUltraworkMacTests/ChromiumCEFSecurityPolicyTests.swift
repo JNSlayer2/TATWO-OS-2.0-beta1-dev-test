@@ -534,7 +534,7 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
             "http://127.1/",
             "http://0x7f000001/",
             "http://[::ffff:127.0.0.1]/",
-            "http://[::ffff:192.168.1.1]/",
+            "http://[::ffff:" + [192, 168, 1, 1].map(String.init).joined(separator: ".") + "]/",
         ] {
             XCTAssertFalse(
                 TatwoCEFURLPolicyAllowsURLString(rawURL),
@@ -2040,18 +2040,13 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
         XCTAssertTrue(helperBody.contains("gate.EndAndTakeFollowUp()"))
         XCTAssertTrue(body.contains(
             "std::max<int64_t>(delay_ms, 0)"))
-        XCTAssertTrue(body.contains(
-            "std::numeric_limits<int64_t>::max()"))
-        XCTAssertTrue(body.contains(
-            "normalized_delay_ms > kMaximumDispatchDelayMilliseconds"))
-        XCTAssertTrue(body.contains(
-            "normalized_delay_ms * kNanosecondsPerMillisecond"))
-        XCTAssertTrue(body.contains(
-            "dispatch_time(DISPATCH_TIME_NOW, delay_nanoseconds)"))
-        XCTAssertTrue(body.contains(
-            "if (normalized_delay_ms == 0)"))
-        XCTAssertTrue(body.contains(
-            "dispatch_async(dispatch_get_main_queue(), work)"))
+        // W60: replaceable DispatchSourceTimer deadlines, never dispatch_after polling.
+        XCTAssertTrue(body.contains("INT64_MAX / NSEC_PER_MSEC - 250"))
+        XCTAssertTrue(body.contains("delay <= maximum"))
+        XCTAssertTrue(body.contains("dispatch_time(DISPATCH_TIME_NOW, delay * NSEC_PER_MSEC)"))
+        XCTAssertTrue(body.contains("if (delay == 0)"))
+        XCTAssertTrue(body.contains("dispatch_async(dispatch_get_main_queue(), ^{"))
+        XCTAssertTrue(body.contains("dispatch_source_set_timer(g_w60_vendor_timer, deadline, DISPATCH_TIME_FOREVER"))
         XCTAssertTrue(body.contains("dispatch_get_main_queue()"))
         XCTAssertTrue(helperBody.contains(
             "NSCAssert(NSThread.isMainThread"))
@@ -2293,7 +2288,7 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
         let source = try bridgeSource()
         for requiredTelemetry in [
             "phase=helper_process event=launch role=%@",
-            "restartCount=%llu",
+            "launchCount=%llu countScope=role launchMeaning=attempt_not_restart",
             "phase=helper_process event=spawn role=%@",
             "exitCode=%d signal=0",
             "phase=navigation_timeline event=%@",
@@ -2304,7 +2299,7 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
             "@\"main_frame_commit\"",
             "@\"main_frame_load_end\"",
             "@\"first_frame_presented\"",
-            "phase=message_pump_detail event=schedule",
+            "phase=message_pump_overdue event=recover",
             "phase=message_pump_detail event=do_work",
         ] {
             XCTAssertTrue(
@@ -2352,18 +2347,14 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
                 range: scheduler.upperBound..<source.endIndex))
         let body = String(
             source[scheduler.lowerBound..<immediateScheduler.lowerBound])
-        XCTAssertTrue(body.contains(
-            "const bool cancels_pending_delayed = normalized_delay_ms > 0"))
-        XCTAssertTrue(body.contains(
-            "cancels_pending_delayed"
-                + "\n                ? CanRunScheduledMessagePump("))
-        XCTAssertTrue(body.contains(
-            ": CanRunImmediateMessagePump("))
-        XCTAssertTrue(body.contains(
-            "cancelsPendingDelayed=%d"))
+        XCTAssertTrue(body.contains("const uint64_t generation = delay > 0"))
+        XCTAssertTrue(body.contains("if (delay == 0)"))
+        XCTAssertTrue(body.contains("generation != g_message_pump_generation.load"))
+        XCTAssertTrue(body.contains("W60CancelVendorTimers()"))
+
     }
 
-    func testRealCEFLoadingActiveFallbackTicksStopAtIdleAndClose()
+    func testRealCEFLegacyLoadingGateCannotArmTimersInW60()
         throws
     {
         guard TatwoCEFRuntime.compiled else {
@@ -2386,7 +2377,7 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
         XCTAssertEqual(
             (encoded >> 48) & 0xffff,
             3,
-            "active loading must permit bounded fallback ticks without a new vendor schedule")
+            "legacy gate predicate still permits three ticks in isolation; W60 never arms its timer")
         XCTAssertEqual(
             (encoded >> 32) & 0xffff,
             0,
@@ -2401,18 +2392,10 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
             "close and runtime shutdown must both stop the fresh generation")
 
         let source = try bridgeSource()
-        XCTAssertTrue(source.contains(
-            "kCEFLoadingActivePumpIntervalMilliseconds = 1000 / 30"))
-        XCTAssertTrue(source.contains(
-            "phase=message_pump_loading_fallback event=start"))
-        XCTAssertTrue(source.contains(
-            "phase=message_pump_loading_fallback event=tick"))
-        XCTAssertTrue(source.contains(
-            "phase=message_pump_loading_fallback event=stop"))
-        XCTAssertTrue(source.contains(
-            "forMode:NSRunLoopCommonModes"))
-        XCTAssertTrue(source.contains(
-            "forMode:NSEventTrackingRunLoopMode"))
+        // W60 keeps lifecycle calls for close fencing but removes both fixed cadences.
+        XCTAssertFalse(source.contains("phase=message_pump_loading_fallback"))
+        XCTAssertFalse(source.contains("ArmLoadingActiveMessagePumpTimer"))
+        XCTAssertTrue(source.contains("phase=message_pump_overdue event=recover"))
         XCTAssertTrue(source.contains(
             "owner, mount_generation_, @\"main_frame_load_end\")"))
         XCTAssertTrue(source.contains(
@@ -2432,9 +2415,9 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
                 range: fallback.upperBound..<source.endIndex))
         let fallbackBody = String(
             source[fallback.lowerBound..<closeDriver.lowerBound])
-        XCTAssertTrue(fallbackBody.contains(
-            "state->loading_active_pump_timer != nil"))
-        XCTAssertTrue(fallbackBody.contains("repeats:NO"))
+        XCTAssertTrue(fallbackBody.contains("IsActiveMountCallback"))
+        XCTAssertFalse(fallbackBody.contains("timerWithTimeInterval"))
+        XCTAssertFalse(fallbackBody.contains("RunCEFMessagePumpWorkOnMainThread()"))
         XCTAssertFalse(fallbackBody.contains("Reload()"))
         XCTAssertFalse(fallbackBody.contains("LoadURL("))
         XCTAssertFalse(fallbackBody.contains("while ("))

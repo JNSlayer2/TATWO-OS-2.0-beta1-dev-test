@@ -250,10 +250,10 @@ final class ComputerUseSessionTests: XCTestCase {
         XCTAssertEqual(dispatched, 2)
     }
 
-    func testBrowserGrantStillExpiresWithoutExtendingItsLease() throws {
+    func testExplicitBrowserDeadlineStillExpiresWithoutExtendingItsLease() throws {
         let gate = ComputerUseSession()
         let browser = try gate.authorize(owner: UUID(), scope: "browser-chat", pid: getpid(),
-            expectedEpoch: gate.currentEpoch, lane: .builtInBrowser, now: 100)
+            expectedEpoch: gate.currentEpoch, lane: .builtInBrowser, expiresAt: 1000, now: 100)
         XCTAssertNoThrow(try gate.require(owner: browser.owner, scope: browser.scope,
             token: browser.id.uuidString, lane: .builtInBrowser, now: 999.999))
         XCTAssertThrowsError(try gate.require(owner: browser.owner, scope: browser.scope,
@@ -384,13 +384,14 @@ final class ComputerUseSessionTests: XCTestCase {
         XCTAssertThrowsError(try gate.beginAction(observationID: observation.id.uuidString, fingerprint: "changed", for: value))
     }
 
-    func testOldObservationsAndExpiredConsentAreRejected() throws {
+    func testOldObservationsAreRejectedWithoutExpiringSessionConsent() throws {
         let gate = ComputerUseSession()
         let value = try browserGrant(gate)
         let now = ProcessInfo.processInfo.systemUptime
         let observation = try gate.publish(fingerprint: "state", for: value, now: now)
         XCTAssertThrowsError(try gate.beginAction(observationID: observation.id.uuidString, fingerprint: "state", for: value, now: now + 31))
-        XCTAssertThrowsError(try gate.require(owner: value.owner, scope: value.scope, token: value.id.uuidString, now: now + 901))
+        XCTAssertNoThrow(try gate.require(owner: value.owner, scope: value.scope, token: value.id.uuidString,
+            lane: .builtInBrowser, now: now + 901))
     }
 
     func testStopImmediatelyBlocksDispatchAndLateCapture() throws {
@@ -475,7 +476,7 @@ final class ComputerUseSessionTests: XCTestCase {
         XCTAssertTrue(cache.permits("app.A", owner: owner, scope: "chat", epoch: gate.currentEpoch, now: 300))
         XCTAssertFalse(cache.permits("app.A", owner: UUID(), scope: "chat", epoch: gate.currentEpoch, now: 300))
         XCTAssertFalse(cache.permits("app.A", owner: owner, scope: "other", epoch: gate.currentEpoch, now: 300))
-        XCTAssertFalse(cache.permits("app.A", owner: owner, scope: "chat", epoch: gate.currentEpoch, now: 1000))
+        XCTAssertTrue(cache.permits("app.A", owner: owner, scope: "chat", epoch: gate.currentEpoch, now: 1000))
         gate.stop()
         XCTAssertFalse(cache.permits("app.A", owner: owner, scope: "chat", epoch: gate.currentEpoch, now: 300))
     }

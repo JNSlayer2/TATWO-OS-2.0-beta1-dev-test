@@ -963,7 +963,21 @@ final class TatwoUltraworkAppDelegate: NSObject, NSApplicationDelegate {
         externalReopenObserver = TatwoSingleInstanceGuard.registerExternalReopenObserver { [weak self] in
             self?.showDefaultSurfaceForUserOpen()
         }
+        if BrowserExternalURLQueue.shared.hasPendingURLs { showExternalBrowserWindow() }
     }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard BrowserExternalURLQueue.shared.enqueue(urls) else { return }
+        // Launch Services can deliver before didFinishLaunching installs the window controller.
+        if statusBarController != nil { showExternalBrowserWindow() }
+    }
+
+    private func showExternalBrowserWindow() {
+        NotificationCenter.default.post(name: .tatwoOpenWorkOSWindow, object: TatwoPage.chat.rawValue)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// 這個 app 沒有 SwiftUI App scene 的預設選單，故 Cmd+C/V/X/A/Z 全失效（使用者：聊天輸入無法複製貼上）。
     /// 裝一個含 Edit 群組的主選單，動作 target=nil 走 first responder → 所有 NSTextView/欄位都能複製貼上。
@@ -2336,6 +2350,7 @@ private struct TatwoHydratedPanelView: View {
     @State private var issuedModesContract: TatwoWorkOSContractV1?
     @State private var issuedModesIntegrityState: ModesIssuedIntegrityState
     @State private var pendingGoalRevision: TatwoGoalRevisionChallenge?
+    @State private var browserImportRequest: BrowserImportRequest?
     @State private var goalRevisionErrorMessage: String?
     @State private var goalRevisionPreparationError: String?
     @State private var isConfirmingGoalRevision = false
@@ -2949,6 +2964,23 @@ private struct TatwoHydratedPanelView: View {
             else { return }
             selection = page
         }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("tatwo.browser.openImport"))) { notification in
+            guard surface == .window, browserImportRequest == nil else { return }
+            let spaceID = notification.userInfo?["spaceID"] as? UUID
+            browserImportRequest = BrowserImportRequest(spaceID: spaceID)
+        }
+        .onAppear {
+            if surface == .window, BrowserExternalURLQueue.shared.hasPendingURLs {
+                selection = .chat
+                chatModel.mode = .browser
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .tatwoBrowserOpenExternalURLs)) { _ in
+            guard surface == .window, BrowserExternalURLQueue.shared.hasPendingURLs else { return }
+            selection = .chat
+            chatModel.mode = .browser
+        }
+        .sheet(item: $browserImportRequest) { request in BrowserImportFlowView(spaceID: request.spaceID) { spaceID in selection = .chat; chatModel.mode = .browser; NotificationCenter.default.post(name: Notification.Name("tatwo.browser.selectSpace"), object: spaceID) } }
         .sheet(item: $pendingGoalRevision) { challenge in
             GoalRevisionConfirmationSheet(
                 challenge: challenge,

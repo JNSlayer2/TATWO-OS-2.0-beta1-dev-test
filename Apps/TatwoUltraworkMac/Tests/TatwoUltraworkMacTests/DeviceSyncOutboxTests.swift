@@ -1386,7 +1386,7 @@ final class DeviceSyncOutboxTests: XCTestCase {
 
     func testTargetNamesIncludeReceiptTargetWithoutEnrollmentRow() {
         let receipt = DeviceSyncReceipt(
-            target: "Mac-mini-fangjian",
+            target: "demo-device",
             action: "system-pull",
             requestedAt: Date(timeIntervalSince1970: 1),
             result: "converged",
@@ -1401,7 +1401,7 @@ final class DeviceSyncOutboxTests: XCTestCase {
             receipts: DeviceSyncOperationIndex.latestReceipts([receipt])
         )
 
-        XCTAssertEqual(targets, ["Mac-mini-fangjian"])
+        XCTAssertEqual(targets, ["demo-device"])
     }
 
     func testSourceRefreshAttemptLoaderProjectsEveryRequiredFailureKind() throws {
@@ -1514,7 +1514,7 @@ final class DeviceSyncOutboxTests: XCTestCase {
                 makeSourceRefreshAttempt(
                     attemptID: "attempt-private-path",
                     ledgerSequence: 31,
-                    message: "failed at /Users/private/skills/alpha",
+                    message: "failed at /Users/example/skills/alpha",
                     results: [
                         DeviceSyncSourceRefreshResult(
                             sourceName: "alpha",

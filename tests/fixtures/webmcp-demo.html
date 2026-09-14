@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TATWO WebMCP note fixture</title>
+<style>
+  body { max-width: 38rem; margin: 3rem auto; padding: 1rem; font: 18px system-ui; }
+  textarea { width: 100%; min-height: 8rem; font: inherit; }
+</style>
+<h1>人與 AI 共用的筆記</h1>
+<label for="note">筆記（只存在此分頁；不連網、不持久化）</label>
+<textarea id="note">Hello WebMCP</textarea>
+<p id="status" role="status">等待 WebMCP</p>
+<script>
+  // This branch's native binding is document.modelContext. Fixture-local alias,
+  // not a general browser polyfill; prefer TATWO over any native modelContext.
+  if (document.modelContext?.__tatwoWebMCP) {
+    Object.defineProperty(navigator, 'modelContext', { value: document.modelContext, configurable: true });
+  }
+  if (navigator.modelContext?.registerTool) {
+    navigator.modelContext.registerTool({
+      name: 'get_note',
+      description: '讀取此分頁的筆記。readOnlyHint: true',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false, readOnlyHint: true },
+      execute() { return { note: document.getElementById('note').value }; },
+    });
+    navigator.modelContext.registerTool({
+      name: 'set_note',
+      description: '修改此分頁的筆記。',
+      inputSchema: {
+        type: 'object', properties: { note: { type: 'string', maxLength: 4000 } },
+        required: ['note'], additionalProperties: false,
+      },
+      execute({ note }) {
+        if (typeof note !== 'string' || note.length > 4000) throw new Error('invalid_note');
+        document.getElementById('note').value = note;
+        document.getElementById('status').textContent = 'AI 已更新筆記';
+        return { updated: true };
+      },
+    });
+    document.getElementById('status').textContent = '已登記 get_note / set_note';
+    addEventListener('pagehide', () => {
+      navigator.modelContext.unregisterTool('get_note');
+      navigator.modelContext.unregisterTool('set_note');
+    }, { once: true });
+  } else {
+    document.getElementById('status').textContent = '此瀏覽器未提供 WebMCP；沒有假登記或假執行。';
+  }
+</script>
+</html>

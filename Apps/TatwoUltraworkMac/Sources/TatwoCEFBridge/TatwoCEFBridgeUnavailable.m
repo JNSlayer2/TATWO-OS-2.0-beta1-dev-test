@@ -34,10 +34,32 @@ static NSString *const TatwoCEFErrorDomain = @"com.tatwo.ultrawork.cef";
 @end
 
 @implementation TatwoCEFBrowserView
+#pragma mark - W57c Unavailable bridge never fills
+- (void)fillCredentialUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g {}
+#pragma mark - W58
+- (BOOL)prepareAgentLogin { return NO; }
+- (void)cancelAgentLogin {}
+- (NSDictionary *)agentLoginState { return @{@"phase": @"failed", @"error": @"ai_login_engine_unavailable"}; }
+- (BOOL)fillCredentialForAgentUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g { return NO; }
+#pragma mark - W58 End
+#pragma mark - W57c End
+- (TatwoCEFBrowserActor)browserActor { return TatwoCEFBrowserActorAgent; }
+- (BOOL)agentControlled { return YES; }
+- (BOOL)humanPreferencesDeferred { return NO; }
+- (void)beginAgentInteraction {}
+- (BOOL)restoreHumanInteraction { return NO; }
 
 - (nullable instancetype)initWithFrame:(NSRect)frame
                     persistentProfile:(nullable NSString *)persistentProfile
                             initialURL:(NSString *)initialURL
+                                 error:(NSError * _Nullable * _Nullable)error {
+  return [self initWithFrame:frame persistentProfile:persistentProfile initialURL:initialURL actor:TatwoCEFBrowserActorAgent error:error];
+}
+
+- (nullable instancetype)initWithFrame:(NSRect)frame
+                    persistentProfile:(nullable NSString *)persistentProfile
+                            initialURL:(NSString *)initialURL
+                                 actor:(TatwoCEFBrowserActor)actor
                                  error:(NSError * _Nullable * _Nullable)error {
     if (error != NULL) {
         *error = [NSError errorWithDomain:TatwoCEFErrorDomain
@@ -58,6 +80,14 @@ static NSString *const TatwoCEFErrorDomain = @"com.tatwo.ultrawork.cef";
                    sharingContextWith:(TatwoCEFBrowserView *)source
                            initialURL:(NSString *)initialURL
                                 error:(NSError * _Nullable * _Nullable)error {
+  return [self initWithFrame:frame sharingContextWith:source initialURL:initialURL actor:TatwoCEFBrowserActorAgent error:error];
+}
+
+- (nullable instancetype)initWithFrame:(NSRect)frame
+                   sharingContextWith:(TatwoCEFBrowserView *)source
+                           initialURL:(NSString *)initialURL
+                                actor:(TatwoCEFBrowserActor)actor
+                                 error:(NSError * _Nullable * _Nullable)error {
     if (error != NULL) {
         *error = [NSError errorWithDomain:TatwoCEFErrorDomain
                                      code:1
@@ -127,7 +157,23 @@ static NSString *const TatwoCEFErrorDomain = @"com.tatwo.ultrawork.cef";
         dispatchGate:(TatwoCEFBrowserInputDispatchGate)dispatchGate {
     // No native backend exists; do not consume an agent's dispatch attempt.
 }
+#pragma mark - W57a
+- (void)findText:(NSString *)text forward:(BOOL)forward matchCase:(BOOL)matchCase {}
+- (void)stopFinding {}
+- (double)zoomLevel { return 0; }
+- (void)setZoomLevel:(double)level {}
+- (void)stopLoading {}
+- (void)performContextEdit:(NSString *)kind {}
+- (void)downloadImageURL:(NSString *)url {}
+#pragma mark - W57a end
 - (void)goBack {}
+#pragma mark - W57d
+- (void)cancelWebFeatures { if (self.onWebFeaturesInvalidated) self.onWebFeaturesInvalidated(); }
+- (void)exitContentFullscreen {}
+- (void)printPage {}
+- (void)printToPDFWithCompletion:(void (^)(NSString * _Nullable))completion { completion(nil); }
+- (void)downloadCurrentPDFWithCompletion:(void (^)(NSString * _Nullable))completion { completion(nil); }
+#pragma mark - W57d End
 - (void)goForward {}
 - (void)reload {}
 - (void)invokeWebMCPToolNamed:(NSString *)toolName
@@ -147,6 +193,10 @@ static NSString *const TatwoCEFErrorDomain = @"com.tatwo.ultrawork.cef";
 @end
 
 @implementation TatwoCEFRuntime
+#pragma mark - W60
++ (NSDictionary<NSString *, id> *)processDiagnostics { return @{}; }
++ (void)configureRendererProcessLimit:(NSInteger)limit {}
+#pragma mark - W60 End
 
 + (BOOL)compiled {
     return NO;

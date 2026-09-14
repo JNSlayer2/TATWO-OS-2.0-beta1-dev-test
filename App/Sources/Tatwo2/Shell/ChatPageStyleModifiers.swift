@@ -183,7 +183,7 @@ struct ChatGlassChipModifier: ViewModifier {
                 RoundedRectangle(cornerRadius: LiquidGlassTokens.radiusChip, style: LiquidGlassTokens.shapeStyle)
                     .fill(
                         isSelected
-                            ? AnyShapeStyle(LiquidGlassTokens.brandAccent.opacity(0.16))
+                            ? AnyShapeStyle(LiquidGlassTokens.brandAccent.opacity(0.15))
                             : AnyShapeStyle(TatwoActivePalette.current.surfaceFill)
                     )
             }

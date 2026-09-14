@@ -13,14 +13,14 @@ final class ClaudeOAuthUsageClientTests: XCTestCase {
                     #"{"claudeAiOauth":{"accessToken":"oauth-test-token"}}"#
                         .utf8)))
         let reader = ClaudeKeychainOAuthCredentialReader(
-            environment: ["USER": "layer2"],
+            environment: ["USER": "example"],
             commandRunner: commandRunner)
 
         let token = try reader.readAccessToken()
 
         XCTAssertEqual(token, "oauth-test-token")
         XCTAssertEqual(commandRunner.service, "Claude Code-credentials")
-        XCTAssertEqual(commandRunner.account, "layer2")
+        XCTAssertEqual(commandRunner.account, "example")
     }
 
     func testClientParsesOfficialUsageFixtureAndBuildsOAuthRequest()

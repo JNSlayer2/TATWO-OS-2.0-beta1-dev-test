@@ -13,7 +13,8 @@ elif [ -f "$SCRIPT_DIR/tatwo-skillet-md.py" ]; then
 else
   TOOL="$ROOT_DIR/scripts/tatwo-skillet-md.py"
 fi
-SSH_HOST="${TATWO_OS_IMAGE_SSH_HOST:-${TATWO_PRIMARY_SSH_HOST:-m4-mac-mini-codex}}"
+SSH_HOST="${TATWO_OS_IMAGE_SSH_HOST:-${TATWO_PRIMARY_SSH_HOST:-}}"
+[ -n "$SSH_HOST" ] || { echo "請設定 TATWO_PRIMARY_SSH_HOST" >&2; exit 2; }
 SUPPORT="${TATWO_APP_SUPPORT:-$HOME/Library/Application Support/Tatwo Ultrawork}"
 STATE="${TATWO_SKILLET_MD_STATE:-$SUPPORT/skillet-md}"
 DEVICE="${TATWO_DEVICE_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname -s)}"

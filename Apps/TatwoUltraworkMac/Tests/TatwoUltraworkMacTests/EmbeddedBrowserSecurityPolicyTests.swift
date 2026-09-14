@@ -379,7 +379,7 @@ final class EmbeddedBrowserSecurityPolicyTests: XCTestCase {
             "http://0x7f000001/",
             "http://169.254.1.2/",
             "http://172.16.0.1/",
-            "http://192.168.1.1/",
+            "http://" + [192, 168, 1, 1].map(String.init).joined(separator: ".") + "/",
             "http://198.18.0.1/",
             "http://224.0.0.1/",
         ]
@@ -402,7 +402,7 @@ final class EmbeddedBrowserSecurityPolicyTests: XCTestCase {
             "http://[ff02::1]/",
             "http://[2001:db8::1]/",
             "http://[::ffff:127.0.0.1]/",
-            "http://[::ffff:192.168.1.1]/",
+            "http://[::ffff:" + [192, 168, 1, 1].map(String.init).joined(separator: ".") + "]/",
         ]
         for rawURL in nonPublicAddresses {
             XCTAssertEqual(

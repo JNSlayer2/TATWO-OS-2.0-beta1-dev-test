@@ -1,50 +1,36 @@
 import SwiftUI
 
-/// Computer Use consent inside TATWO Island (approved design v4, 2026-09-11): invisible normally; when a
-/// consent is needed the Island opens and shows this card.
-/// TATWO's window is never brought forward. The Island shows nothing else (2026-09-11).
+/// Compatibility facade: existing Computer Use callers retain their Decision and cancellation API.
 @MainActor
 final class ComputerUseConsentPrompt: ObservableObject {
     static let shared = ComputerUseConsentPrompt()
-
-    struct Request: Identifiable, Equatable {
-        let id = UUID()
-        let title: String
-        let detail: String
-        let allowLabel: String
-        let deadline: Date
+    typealias Request = IslandNotice.Request
+    typealias Decision = IslandNotice.Decision
+    private var pendingIDs: Set<UUID> = []
+    var current: Request? {
+        guard let request = IslandNotice.shared.current, pendingIDs.contains(request.id) else { return nil }
+        return request
     }
-    enum Decision { case allow, cancel, timeout }
-
-    @Published private(set) var current: Request?
-    /// Set when the Island shell is created (TatwoIslandShellController).
-    var hostAvailable = false
-    private var continuation: CheckedContinuation<Decision, Never>?
-    private var timeoutTask: Task<Void, Never>?
+    var hostAvailable: Bool {
+        get { IslandNotice.shared.hostAvailable }
+        set { IslandNotice.shared.hostAvailable = newValue }
+    }
 
     func ask(title: String, detail: String, allowLabel: String, timeout: TimeInterval) async -> Decision {
-        resolve(.cancel)   // never two prompts at once
-        let request = Request(title: title, detail: detail, allowLabel: allowLabel,
-                              deadline: Date().addingTimeInterval(timeout))
-        return await withCheckedContinuation { continuation in
-            self.continuation = continuation
-            current = request
-            IslandExceptionsNavigation.shell?.holdOpen(true)
-            timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(timeout))
-                guard !Task.isCancelled, self?.current?.id == request.id else { return }
-                self?.resolve(.timeout)
-            }
-        }
+        let id = UUID()
+        pendingIDs.insert(id)
+        defer { pendingIDs.remove(id) }
+        return await IslandNotice.shared.ask(title: title, detail: detail, allowLabel: allowLabel,
+                                             timeout: timeout, requestID: id)
     }
 
     func resolve(_ decision: Decision) {
-        timeoutTask?.cancel(); timeoutTask = nil
-        guard let continuation else { return }
-        self.continuation = nil
-        current = nil
-        IslandExceptionsNavigation.shell?.holdOpen(false)
-        continuation.resume(returning: decision)
+        // A Computer Use stop cannot dismiss an unrelated confirm/info card.
+        if decision == .allow {
+            if let current { IslandNotice.shared.resolve(decision, id: current.id) }
+        } else {
+            for id in pendingIDs { IslandNotice.shared.resolve(decision, id: id) }
+        }
     }
 }
 
@@ -57,9 +43,11 @@ enum ComputerUseIslandContentKind: Equatable {
     }
 }
 
-/// W8: pending consent takes priority; otherwise leave the expanded Island blank.
-struct ComputerUseIslandContent: View {
-    @ObservedObject private var prompt = ComputerUseConsentPrompt.shared
+/// Compatibility name for the shared notice surface; idle expanded content remains blank.
+typealias ComputerUseIslandContent = IslandNoticeContent
+
+struct IslandNoticeContent: View {
+    @ObservedObject private var prompt = IslandNotice.shared
     let isExpanded: Bool
 
     var body: some View {
@@ -96,30 +84,17 @@ final class ComputerUseIslandNotice: ObservableObject {
 
     struct Message: Identifiable, Equatable { let id = UUID(); let title: String; let detail: String }
 
-    @Published private(set) var current: Message?
-    private var dismissTask: Task<Void, Never>?
     private var lastShownByKey: [String: Date] = [:]
 
-    /// Show `title`/`detail` for `seconds`, at most once per `throttle` for the given `key`.
     func show(key: String, title: String, detail: String, seconds: TimeInterval = 7, throttle: TimeInterval = 300) {
-        // Never cover a live consent prompt.
-        guard ComputerUseConsentPrompt.shared.current == nil else { return }
         if let last = lastShownByKey[key], Date().timeIntervalSince(last) < throttle { return }
         lastShownByKey[key] = Date()
-        current = Message(title: title, detail: detail)
-        IslandExceptionsNavigation.shell?.holdOpen(true)
-        dismissTask?.cancel()
-        dismissTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
-            guard !Task.isCancelled else { return }
-            self?.dismiss()
-        }
+        IslandNotice.shared.info(title: title, detail: detail, duration: seconds)
     }
 
     func dismiss() {
-        dismissTask?.cancel(); dismissTask = nil
-        current = nil
-        IslandExceptionsNavigation.shell?.holdOpen(false)
+        guard let request = IslandNotice.shared.current, request.kind == .info else { return }
+        IslandNotice.shared.resolve(.cancel, id: request.id)
     }
 
     /// Browser independent-storage capacity: warn from `warnAt` up to `limit`; explain LRU auto-eviction.
@@ -227,35 +202,37 @@ struct ComputerUseConsentCard: View {
             }
             .frame(maxHeight: .infinity)
             HStack(spacing: 10) {
-                Button { ComputerUseConsentPrompt.shared.resolve(.allow) } label: {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 32, height: 32)
-                        .background(LiquidGlassTokens.brandAccent, in: Circle())
-                        .shadow(color: LiquidGlassTokens.brandAccent.opacity(0.25), radius: 4, y: 3)
+                if request.kind != .info {
+                    Button { IslandNotice.shared.resolve(.allow, id: request.id) } label: {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(LiquidGlassTokens.brandAccent, in: Circle())
+                            .shadow(color: LiquidGlassTokens.brandAccent.opacity(0.25), radius: 4, y: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .help(request.allowLabel)
+                    .accessibilityLabel(request.allowLabel)
+                    Button { IslandNotice.shared.resolve(.cancel, id: request.id) } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(consentColor(0x5E554E))
+                            .frame(width: 32, height: 32)
+                            .background(Color.white.opacity(0.72), in: Circle())
+                            .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help(request.cancelLabel)
+                    .accessibilityLabel(request.cancelLabel)
                 }
-                .buttonStyle(.plain)
-                .help(request.allowLabel)
-                .accessibilityLabel(request.allowLabel)
-                Button { ComputerUseConsentPrompt.shared.resolve(.cancel) } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(consentColor(0x5E554E))
-                        .frame(width: 32, height: 32)
-                        .background(Color.white.opacity(0.72), in: Circle())
-                        .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .help("取消")
-                .accessibilityLabel("取消")
             }
             .padding(.bottom, 2)
         }
         .overlay(alignment: .bottom) {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let left = max(0, Int(request.deadline.timeIntervalSince(context.date).rounded(.up)))
-                Text("\(left) 秒後自動取消")
+                Text(request.kind == .info ? "\(left) 秒後收起" : "\(left) 秒後自動取消")
                     .font(.system(size: 11, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(consentColor(0xA39889))

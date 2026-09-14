@@ -197,6 +197,8 @@ final class InAppUpdater: ObservableObject {
     static let helperWaitSeconds = 300
 
     @Published private(set) var phase: Phase = .idle
+    @Published private(set) var userStarted = false
+    @Published private(set) var confirmingRestart = false
     /// 上一次更新的結果（由 helper 寫、本次啟動讀到），給更新卡顯示。
     @Published private(set) var lastResult: String?
 
@@ -215,6 +217,44 @@ final class InAppUpdater: ObservableObject {
     private var prepared: (tag: String, repository: String, archives: UpdateArchives)?
     @Published private(set) var preparationReason = ""
     private var candidateBytes: Int64 = 0
+
+    var updateMarkTitle: String {
+        UpdateMarkState.title(phase: phase, progress: downloadProgress, userStarted: userStarted)
+    }
+
+    var updateMarkHelp: String {
+        if case .failed(let reason) = phase { return reason }
+        return updateMarkTitle
+    }
+
+    var updateMarkDisabled: Bool {
+        confirmingRestart || phase == .handedOff || (userStarted && phase == .starting)
+    }
+
+    /// Both surfaces share intent and confirmation; downloading never dispatches the installer.
+    func activateUpdateMark(to tag: String, repository: String,
+                            confirm: (@MainActor () async -> Bool)? = nil) async {
+        guard !updateMarkDisabled else { return }
+        if !userStarted || phase != .ready {
+            if phase != .ready { prefetch(to: tag, repository: repository, force: true) }
+            userStarted = true
+            return
+        }
+        confirmingRestart = true
+        defer { confirmingRestart = false }
+        let candidateID = downloadID
+        let accepted: Bool
+        if let confirm {
+            accepted = await confirm()
+        } else {
+            accepted = await IslandNotice.shared.confirm(
+                title: "重新啟動 TATWO OS 以完成更新？",
+                detail: "會關閉目前所有工作，約 10 秒後自動重開",
+                confirmLabel: "重開", cancelLabel: "稍後")
+        }
+        guard accepted, !Task.isCancelled, userStarted, downloadID == candidateID else { return }
+        update(to: tag, repository: repository)
+    }
 
     private func checkSpace() throws {
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -236,6 +276,9 @@ final class InAppUpdater: ObservableObject {
     }
 
     func invalidateCandidate() {
+        userStarted = false
+        manualDownload = false
+        downloadID = UUID()
         pendingCandidate = nil; prepared = nil; preparationReason = ""
         if phase == .starting { download?.cancel() }
         else if phase != .handedOff { phase = .idle }
@@ -244,15 +287,27 @@ final class InAppUpdater: ObservableObject {
     func prefetch(to tag: String, repository: String, force: Bool = false) {
         if prepared?.tag == tag && prepared?.repository == repository { return }
         guard phase != .handedOff else { return }
+        if let candidate = prepared.map({ (tag: $0.tag, repository: $0.repository) }) ?? pendingCandidate,
+           candidate.tag != tag || candidate.repository != repository {
+            userStarted = false
+        }
         if phase == .starting {
             if pendingCandidate?.tag != tag || pendingCandidate?.repository != repository {
+                userStarted = false
+                manualDownload = force
                 pendingCandidate = (tag, repository); download?.cancel()
+            } else if force {
+                manualDownload = true
             }
             return
         }
         prepared = nil; phase = .idle; candidateBytes = 0; pendingCandidate = (tag, repository)
         guard force || unmetered else { preparationReason = "已找到 \(tag)，等 Wi‑Fi 再自動下載"; return }
-        do { try checkSpace() } catch { preparationReason = error.localizedDescription; return }
+        do { try checkSpace() } catch {
+            preparationReason = error.localizedDescription
+            phase = .failed(error.localizedDescription)
+            return
+        }
         manualDownload = force; preparationReason = ""
         beginPrefetch(to: tag, repository: repository)
     }
@@ -261,6 +316,7 @@ final class InAppUpdater: ObservableObject {
         guard phase == .ready, let prepared, prepared.tag == tag,
               prepared.repository == (repository ?? GitHubReleaseUpdateChecker.shared.repository) else { return }
         do { try checkSpace() } catch { self.prepared = nil; phase = .failed(error.localizedDescription); return }
+        manualDownload = true // Explicit restart validation must also survive a metered path change.
         phase = .starting
         let validationID = UUID(); downloadID = validationID
         download = Task {
@@ -274,6 +330,14 @@ final class InAppUpdater: ObservableObject {
                 try checkSpace()
                 handOff(tag: tag, repository: prepared.repository, zip: prepared.archives)
             } catch {
+                if Task.isCancelled {
+                    self.prepared = nil
+                    phase = .idle
+                    if let next = pendingCandidate {
+                        prefetch(to: next.tag, repository: next.repository, force: manualDownload)
+                    }
+                    return
+                }
                 // Only cached metadata is removed; verified archives remain reusable after a fresh check.
                 try? fileManager.removeItem(at: folder.appendingPathComponent("release.json"))
                 self.prepared = nil; pendingCandidate = nil
@@ -501,8 +565,8 @@ final class InAppUpdater: ObservableObject {
         download = Task {
             defer {
                 download = nil
-                if Task.isCancelled, unmetered, let next = pendingCandidate {
-                    prefetch(to: next.tag, repository: next.repository)
+                if Task.isCancelled, unmetered || manualDownload, let next = pendingCandidate {
+                    prefetch(to: next.tag, repository: next.repository, force: manualDownload)
                 }
             }
             do {
@@ -810,7 +874,11 @@ final class InAppUpdater: ObservableObject {
                                         now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         downloadedBytes = max(downloadedBytes, written)
         totalBytes = max(totalBytes, total)
-        downloadProgress = totalBytes > 0 ? min(1, Double(downloadedBytes) / Double(totalBytes)) : nil
+        // 每 1% 才發布一次進度，避免每個 chunk 都重繪布標。
+        let next: Double? = totalBytes > 0 ? min(1, Double(downloadedBytes) / Double(totalBytes)) : nil
+        if next.map({ Int($0 * 100) }) != downloadProgress.map({ Int($0 * 100) }) || next == nil || next == 1 {
+            downloadProgress = next
+        }
         speedSamples.append((now, downloadedBytes))
         speedSamples.removeAll { $0.time < now - 5 }
         if let first = speedSamples.first, now > first.time {
@@ -878,7 +946,8 @@ final class InAppUpdater: ObservableObject {
                 return
             }
             phase = .handedOff
-            // 讓畫面先顯示「更新中」再退出；使用者取消結束時 helper 會在等待逾時後放棄。
+            // 讓畫面先顯示「更新中」再退出；使用者已在 Island 確認過「重開」，這次退出不再問第二次。
+            TatwoInterruptGate.bypassNextTerminate = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 NSApp.terminate(nil)
             }
@@ -1033,4 +1102,13 @@ final class InAppUpdater: ObservableObject {
         """
     }
     // UPDATE-HELPER-END
+}
+enum UpdateMarkState {
+    static func title(phase: InAppUpdater.Phase, progress: Double?, userStarted: Bool) -> String {
+        if case .failed = phase { return "更新失敗" }
+        guard userStarted else { return "更新" }
+        if phase == .ready || phase == .handedOff { return "重開" }
+        let value = progress.flatMap { $0.isFinite ? $0 : nil } ?? 0
+        return "下載中 \(Int((min(1, max(0, value)) * 100).rounded(.down)))%"
+    }
 }

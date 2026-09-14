@@ -45,14 +45,25 @@ class TatwoThirdPartyCookieAccessFilter: public CefCookieAccessFilter {
 #define IMPLEMENT_REFCOUNTING(Type)
 NSString *FromCefString(const CefString &s) { return [NSString stringWithUTF8String:s.c_str()]; }
 CefString ToCefString(NSString *s) { return s.UTF8String; }
+// Staging opt-in is not enabled by this isolated resource fixture.
+int TatwoBrowserStagingLoopbackRuntimePort() { return 0; }
+bool TatwoBrowserStagingLoopbackAllows(NSURLComponents*, int) { return false; }
 // INSERT urlPolicy
 // INSERT urlCredentials
 // INSERT list
 // INSERT policy
-// INSERT decision
-
-@interface TatwoCEFBrowserView : NSObject @end
+typedef NS_ENUM(NSInteger, TatwoCEFBrowserActor) { TatwoCEFBrowserActorAgent, TatwoCEFBrowserActorHuman };
+@interface TatwoCEFBrowserView : NSObject
+@property BOOL agentControlled;
+@property BOOL blocksThirdPartyCookies;
+@property BOOL adBlock;
+@property TatwoCEFBrowserActor browserActor;
+@property(copy) void (^onPrivateNetworkRequested)(NSString*, void (^)(BOOL));
+@end
 @implementation TatwoCEFBrowserView @end
+std::shared_ptr<const BrowserHostDenyListSnapshot> g_host_deny_list;
+// INSERT actor
+// INSERT decision
 enum TatwoCEFBrowserErrorKind { TatwoCEFBrowserErrorKindNavigation, TatwoCEFBrowserErrorKindSecurity };
 enum TatwoCEFBrowserPhase { TatwoCEFBrowserPhaseNavigationFailed, TatwoCEFBrowserPhaseBlockedBySecurity };
 struct BrowserState { uint64_t mount_generation=7; bool close_requested=false, close_completed=false; bool navigation_in_flight=false; uint64_t navigation_generation=1; };
@@ -92,8 +103,8 @@ void CompletePendingResourceDecision(uint64_t, bool allowed) { lastAllowed=allow
 int blockedMain=0, blockedSub=0;
 void RecordHostBlocklistRequest(bool main, cef_resource_type_t) { if(main) ++blockedMain; else ++blockedSub; }
 void LogBrowserNavigationTrace(NSString*, int, bool) {}
+bool IsActiveMountCallback(TatwoCEFBrowserView*, uint64_t mount, NSString*) { return mount==state.mount_generation && !state.close_requested && !state.close_completed; }
 // INSERT handler
-bool IsActiveMountCallback(TatwoCEFBrowserView*, uint64_t mount, NSString*) { return mount==state.mount_generation; }
 void StopLoadingActiveMessagePump(TatwoCEFBrowserView*, uint64_t, NSString*) {}
 bool HasVisibleSecurityError(TatwoCEFBrowserView*) { return lastKind==TatwoCEFBrowserErrorKindSecurity; }
 void PublishState(TatwoCEFBrowserView*) {}
@@ -123,6 +134,7 @@ int main() { @autoreleasepool {
   auto list=std::make_shared<BrowserHostDenyListSnapshot>();
   list->suffix_hosts.insert("ads.example");
   BrowserRequestPolicySnapshot policy; policy.host_deny_list=list;
+  g_host_deny_list=list;
   auto epoch=std::make_shared<ResourceNavigationEpoch>();
   TatwoCEFBrowserView *view=[TatwoCEFBrowserView new];
   CefFrame frame; CefCallback callback;
@@ -217,5 +229,43 @@ int main() { @autoreleasepool {
   lastKind=TatwoCEFBrowserErrorKindSecurity;
   load.OnLoadError(nullptr,&frame,ERR_BLOCKED_BY_CLIENT,"","");
   check(visibleErrors==before+1,"generic load failure preserves specific security reason");
+  // Human private literal and DNS alias requests wait for the same Swift callback.
+  view.browserActor=TatwoCEFBrowserActorHuman; view.adBlock=YES;
+  auto human=ActorRequestPolicy(view);
+  for (const char* url : {"http://192." "168.1.1/", "https://example.com/private"}) {
+    dnsResult=PublicAddressResult::kNonPublic;
+    for (bool consent : {false,true}) {
+      __block int prompts=0;
+      view.onPrivateNetworkRequested=^(NSString* host, void (^done)(BOOL)) { ++prompts; done(consent); };
+      TatwoResourceRequestHandler h(view,@"",human,context());
+      CefRequest r{RT_MAIN_FRAME,url}; int target=completions+1;
+      check(h.OnBeforeResourceLoad(nullptr,&frame,&r,&callback)==RV_CONTINUE_ASYNC,"human private network waits");
+      waitCompletion(target);
+      check(prompts==1 && lastAllowed==consent,"human allow and deny enforced at resource boundary");
+    }
+  }
+  // Downgrade while Island is open cannot reuse a human decision for an agent.
+  __weak TatwoCEFBrowserView *weakView=view;
+  view.onPrivateNetworkRequested=^(NSString*, void (^done)(BOOL)) { weakView.agentControlled=YES; done(YES); };
+  TatwoResourceRequestHandler pendingHuman(view,@"",human,context());
+  CefRequest local{RT_MAIN_FRAME,"http://192." "168.1.1/"};
+  int target=completions+1;
+  pendingHuman.OnBeforeResourceLoad(nullptr,&frame,&local,&callback); waitCompletion(target);
+  check(!lastAllowed,"late human grant cannot authorize an agent");
+  // A close while the Island is open also prevents the pending grant.
+  view.agentControlled=NO;
+  view.onPrivateNetworkRequested=^(NSString*, void (^done)(BOOL)) { state.close_requested=true; done(YES); };
+  TatwoResourceRequestHandler closing(view,@"",human,context());
+  target=completions+1;
+  closing.OnBeforeResourceLoad(nullptr,&frame,&local,&callback); waitCompletion(target);
+  check(!lastAllowed,"closing browser cannot accept a late grant");
+  state.close_requested=false; view.agentControlled=YES;
+  auto agent=ActorRequestPolicy(view);
+  TatwoResourceRequestHandler strict(view,@"",agent,context());
+  check(strict.OnBeforeResourceLoad(nullptr,&frame,&local,&callback)==RV_CANCEL,"agent private IP unchanged");
+  check(agent.blocks_third_party_cookies,"agent cookies stay blocked");
+  check(!IsActorURLAllowed(human,@"file:///tmp/a"),"human cannot open local files");
+  human.ad_block=false;
+  check(!IsDeniedByLocalHostList(human,@"https://ads.example"),"adblock setting reaches snapshot");
   std::cout << "RESOURCEBLOCK RESULT passed=" << checks << " failed=0 skipped=0\n";
 } }

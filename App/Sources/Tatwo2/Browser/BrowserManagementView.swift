@@ -120,7 +120,7 @@ struct TatwoBrowserManagementView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("瀏覽器管理")
+                Text("工作階段資料")
                     .font(.title3.bold())
                 Text("查看每個工作階段留下的登入與網站資料。")
                     .font(.system(size: 12))

@@ -16,12 +16,16 @@ final class BrowserAgentRequest: @unchecked Sendable {
     let clientFD: Int32
     let inputGrant: ComputerUseSession.Grant?
     let observationID: UUID?
+    let pageTools: Bool
+    let aiVaultLogin: Bool
     private let lock = NSLock()
     private var finished = false
 
     init(caller: UUID, scope: String, epoch: UInt64, clientFD: Int32 = -1,
          inputGrant: ComputerUseSession.Grant? = nil,
          observationID: UUID? = nil,
+         pageTools: Bool = false,
+         aiVaultLogin: Bool = false,
          now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         self.caller = caller
         self.scope = scope
@@ -29,7 +33,11 @@ final class BrowserAgentRequest: @unchecked Sendable {
         self.clientFD = clientFD
         self.inputGrant = inputGrant
         self.observationID = observationID
-        self.deadline = now + 40
+        self.pageTools = pageTools
+        self.aiVaultLogin = aiVaultLogin
+        // WebMCP may spend 20 seconds at Island followed by a 30-second renderer
+        // call. Keep the native-input lane's existing 40-second lifetime.
+        self.deadline = now + (pageTools ? 60 : 40)
     }
 
     static func caller(from params: [String: Any]) throws -> UUID {

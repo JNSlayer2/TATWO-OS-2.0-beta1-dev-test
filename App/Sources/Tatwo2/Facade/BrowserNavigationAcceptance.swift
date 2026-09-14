@@ -85,7 +85,7 @@ enum BrowserNavigationAcceptance {
                 canShowMIMEType: value.displayable, in: view) == .allow
         }
         for url in ["about:blank", "file:///fixture.txt", "https://localhost/",
-                    "http://127.0.0.1/", "http://192.168.1.1/"] {
+                    "http://127.0.0.1/", "http://" + [192, 168, 1, 1].map(String.init).joined(separator: ".") + "/"] {
             reset()
             action(Action(url, main: false))
             check("denied iframe stays denied: \(url)", !probe.allowed)

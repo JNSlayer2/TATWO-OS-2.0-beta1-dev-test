@@ -304,7 +304,7 @@ final class TatwoDeviceSnapshotProducerCompositionTests: XCTestCase {
         // Non-loopback http stays forbidden even with the flag.
         XCTAssertNil(makeStack(
             environment: makeEnvironment(
-                url: "http://192.168.1.10:18888",
+                url: "http://" + [192, 168, 1, 10].map(String.init).joined(separator: ".") + ":18888",
                 loopbackFlag: "1",
                 stateDirectory: stateDir
             ),

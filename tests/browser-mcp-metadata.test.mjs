@@ -13,6 +13,9 @@ test('real MCP stdio forwards read selectors and explicit submit without leaking
   const root = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/mcpmeta.'));
   const socketPath = path.join(root, 'b.sock');
   const requests = [];
+  const callerThreadID = '00000000-0000-4000-8000-000000000053';
+  const sessionID = 'fixture-grant';
+  const observationID = '00000000-0000-4000-8000-000000000054';
   let reply = {};
   const server = net.createServer(socket => {
     let buffer = '';
@@ -27,7 +30,7 @@ test('real MCP stdio forwards read selectors and explicit submit without leaking
   server.listen(socketPath);
   await once(server, 'listening');
   const child = spawn(process.execPath, ['Engines/browser-mcp/server.mjs'], {
-    cwd: repo, env: { ...process.env, TATWO2_BROWSER_SOCKET: socketPath },
+    cwd: repo, env: { ...process.env, TATWO2_BROWSER_SOCKET: socketPath, TATWO2_THREAD_ID: callerThreadID },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stderr = '';
@@ -61,7 +64,7 @@ test('real MCP stdio forwards read selectors and explicit submit without leaking
   assert.equal(typeTool.inputSchema.additionalProperties, false);
   assert.match(catalog.result.tools.find(tool => tool.name === 'browser_read').description, /untrusted/);
   reply = {
-    title: 'Fixture form', url: 'https://example.com/', text: 'Public text',
+    observationID, title: 'Fixture form', url: 'https://example.com/', text: 'Public text',
     elements: [
       { selector: 'cef-11', kind: 'text', label: 'Name', value: 'SECRET_VALUE', rect: { x: 1 } },
       { selector: 'cef-12', kind: 'password', label: 'Password', sensitive: true },
@@ -70,7 +73,7 @@ test('real MCP stdio forwards read selectors and explicit submit without leaking
     cookies: 'SECRET_COOKIE',
     truncated: { text: true, elements: false, snapshot: true },
   };
-  const read = await rpc('tools/call', { name: 'browser_read', arguments: { maxChars: 1200 } });
+  const read = await rpc('tools/call', { name: 'browser_read', arguments: { sessionID, maxChars: 1200 } });
   const text = read.result.content[0].text;
   assert.match(text, /Public text/);
   assert.match(text, /"selector":"cef-11"/);
@@ -79,17 +82,22 @@ test('real MCP stdio forwards read selectors and explicit submit without leaking
   assert.match(text, /\\nSign in/);
   assert.match(text, /\[Truncated: text, snapshot\]/);
   assert.doesNotMatch(text, /SECRET|rect/);
-  assert.deepEqual(requests.at(-1).params, { maxChars: 1200 });
+  assert.deepEqual(requests.at(-1).params, { callerThreadID, sessionID, maxChars: 1200 });
   const input = '繁體中文 🐱 "); doNotExecute(); //';
   reply = { typed: true, characters: input.length };
-  await rpc('tools/call', { name: 'browser_type', arguments: { selector: 'cef-11', text: input, submit: true } });
-  assert.deepEqual(requests.at(-1).params, { selector: 'cef-11', text: input, submit: true });
-  await rpc('tools/call', { name: 'browser_type', arguments: { selector: 'cef-11', text: input } });
+  await rpc('tools/call', { name: 'browser_type', arguments: { sessionID, observationID, selector: 'cef-11', text: input, submit: true } });
+  assert.deepEqual(requests.at(-1).params, { callerThreadID, sessionID, observationID, selector: 'cef-11', text: input, submit: true });
+  await rpc('tools/call', { name: 'browser_type', arguments: { sessionID, observationID, selector: 'cef-11', text: input } });
   assert.equal(Object.hasOwn(requests.at(-1).params, 'submit'), false);
-  reply = { title: 'Legacy', url: 'https://example.com/', text: 'Plain text' };
-  const legacy = await rpc('tools/call', { name: 'browser_read', arguments: {} });
-  assert.equal(legacy.result.content[0].text, 'Title: Legacy\nURL: https://example.com/\nPlain text');
+  reply = { observationID, title: 'Legacy', url: 'https://example.com/', text: 'Plain text' };
+  const legacy = await rpc('tools/call', { name: 'browser_read', arguments: { sessionID } });
+  assert.match(legacy.result.content[0].text, /Title: Legacy\nURL: https:\/\/example.com\/\nPlain text$/);
+  assert.match(legacy.result.content[0].text, /Host observation metadata:/);
   const count = requests.length;
+  const noGrant = await rpc('tools/call', { name: 'browser_read', arguments: {} });
+  assert.equal(noGrant.result.isError, true);
+  const noObservation = await rpc('tools/call', { name: 'browser_type', arguments: {sessionID, selector:'cef-11', text:'x'} });
+  assert.equal(noObservation.result.isError, true);
   const unknown = await rpc('tools/call', { name: 'browser_exec_arbitrary', arguments: {} });
   assert.equal(unknown.result.isError, true);
   assert.equal(requests.length, count);

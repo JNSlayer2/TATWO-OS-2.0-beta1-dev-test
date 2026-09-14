@@ -37,8 +37,9 @@ extension ChatPage {
                 }
             } else if model.mode == .browser {
                 if ChatRunMode.browserPreviewEnabled {
-                    BrowserWorkSpaceDesignView()
+                    BrowserWorkSpaceDesignView(store: browserWorkSpaceStore)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .modifier(BrowserWorkSpaceLifecycleModifier(store: browserWorkSpaceStore, registry: model.browserTabRegistry, isWindow: surface == .window))
                 } else {
                     // Fail closed even for a stale selection or mode notification.
                     Color.clear
@@ -519,13 +520,15 @@ extension ChatPage {
 
     func rightPanelControlStrip(showsThreadControls: Bool) -> some View {
         HStack(spacing: 8) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { sidebarPinnedPref.toggle() }
-            } label: {
-                controlStripGlyph("sidebar.left")
+            if model.mode != .browser {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { sidebarPinnedPref.toggle() }
+                } label: {
+                    controlStripGlyph("sidebar.left")
+                }
+                .buttonStyle(.plain)
+                .help(sidebarPinnedPref ? "取消左列常駐" : "左列常駐展示")
             }
-            .buttonStyle(.plain)
-            .help(sidebarPinnedPref ? "取消左列常駐" : "左列常駐展示")
 
             if showsThreadControls {
             // 資訊卡（icon-only）。點擊開/關「懸浮浮層」，不進右側面板（使用者 2026-07-12）。
@@ -757,7 +760,8 @@ extension ChatPage {
                     EmbeddedBrowserView(
                         sessionID: model.selectedThreadID?.uuidString.lowercased(),
                         model: model,
-                        isPanelResizing: browserPanelResizeActive)
+                        isPanelResizing: browserPanelResizeActive,
+                        agentControllable: true)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         // Keep the glass modifier mounted so the CEF subtree
                         // retains identity. During live resize, place an

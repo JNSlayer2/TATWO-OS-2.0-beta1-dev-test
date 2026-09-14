@@ -1,5 +1,6 @@
 // 照搬自 Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/ChatPageSettings.swift；改動 2 行（原因：run A 照搬，僅移除舊水電 import／呼叫並接同名 Facade）
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 設定 → Issue List 管理表：全部清單 / 封存的 issue；可還原、可三段移除。
 
@@ -96,6 +97,7 @@ struct TatwoSettingsShell<Content: View>: View {
 /// TATWO OS 設定整頁：左列直行導覽，右側內容區。
 struct TatwoSettingsPage: View {
     @ObservedObject private var themeStore = TatwoThemeStore.shared
+    @State private var browserDiagnosticsPresented = false
     @ObservedObject var model: ChatPageModel
     var initialSection: Section? = nil
     let onClose: () -> Void
@@ -119,7 +121,7 @@ struct TatwoSettingsPage: View {
             switch self {
             case .space: "Space"
             case .issueList: "Issue List"
-            case .browserManagement: "瀏覽器管理"
+            case .browserManagement: "瀏覽器"
             case .modelAccess: "模型登入"
             case .tatwoIsland: "Tatwo Island"
             case .computerUse: "Computer Use"
@@ -199,24 +201,19 @@ struct TatwoSettingsPage: View {
         case .issueList:
             issueListContent
         case .browserManagement:
-            VStack(alignment: .leading, spacing: 14) {
-                OpenBrowsersCard(model: model)
-                TatwoBrowserManagementView(
-                    model: model,
-                    provider: browserManagementProvider,
-                    onClose: onClose)
-            }
-            .padding(22)
-            .frame(
-                maxWidth: .infinity,
-                maxHeight: .infinity,
-                alignment: .topLeading)
+            browserSettingsContent
         case .modelAccess:
             EngineLoginCard(model: model)
         case .tatwoIsland:
             tatwoIslandContent
         case .computerUse:
-            ComputerUseSettingsView(onClose: onClose)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("授權層級跟隨對話的權限設定（要求核准／代我核准／完整存取權）")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 22).padding(.top, 12)
+                ComputerUseSettingsView(onClose: onClose)
+            }
         case .devices:
             DevicesCard(model: model)
         case .plugin:
@@ -235,6 +232,181 @@ struct TatwoSettingsPage: View {
         case .os:
             OSBindingCard(model: model)
         }
+    }
+
+    @State private var browserGeneral = BrowserGeneralSettings.load()
+    @State private var browserSecurity = BrowserSecuritySettings.load()
+    @State private var browserSettingsError: String?
+
+    private var browserSettingsContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: BrowserSettingsMetrics.sectionSpacing) {
+                browserSettingsCard("Browser work space") { browserWorkSpaceSettings }
+                browserSettingsCard("快捷鍵") { BrowserShortcutsSettingsView() }
+                browserSettingsCard("Session 瀏覽器") { browserSessionSettings }
+                // 密碼：直接使用 W50 的完整卡片。
+                BrowserPasswordsSettingsView()
+                browserSettingsCard("擴充功能") {
+                    Text("2.0.7 尚未支援 Chrome 擴充功能。TATWO OS 的內建瀏覽器以嵌入模式執行，Chromium 的擴充功能框架只能在獨立視窗模式運作；我們正在評估替代方案。")
+                    Text("導入時只會列出你原本的擴充功能，不會安裝")
+                        .foregroundStyle(.secondary)
+                }
+                browserSettingsCard("引擎與安全") { browserSecuritySettings }
+                browserSettingsCard("診斷") { browserDiagnosticsSettings }
+                if let browserSettingsError {
+                    Text(browserSettingsError).foregroundStyle(.red)
+                }
+            }
+            .padding(BrowserSettingsMetrics.pagePadding)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func browserSettingsCard<Content: View>(
+        _ title: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+            Text(title).font(.headline)
+            content().font(.callout)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(BrowserSettingsMetrics.cardPadding)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: BrowserSettingsMetrics.cardRadius))
+    }
+
+    private var browserWorkSpaceSettings: some View {
+        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+            BrowserDefaultBrowserRow()
+            Picker("預設 space", selection: generalBinding(\.defaultSpaceID)) {
+                Text("自動").tag(nil as UUID?)
+                ForEach(model.browserTabRegistry.spaces.filter { !$0.isSessionSpace }) { space in
+                    Text(space.name).tag(Optional(space.id))
+                }
+                if let id = browserGeneral.defaultSpaceID,
+                   !model.browserTabRegistry.spaces.contains(where: { $0.id == id && !$0.isSessionSpace }) {
+                    Text("原 space 已移除，請重新選擇").tag(Optional(id))
+                }
+            }
+            Picker("預設搜尋引擎", selection: generalBinding(\.searchEngine)) {
+                ForEach(BrowserSearchEngine.allCases, id: \.self) { engine in
+                    Text(engine.title).tag(engine)
+                }
+            }
+            HStack {
+                Text("下載位置：~/Downloads")
+                Spacer()
+                Button("在 Finder 顯示") {
+                    NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads"))
+                }
+            }
+            Button("匯出書籤 HTML", action: exportBrowserBookmarks)
+            Button("從其他瀏覽器導入…") {
+                onClose()
+                NotificationCenter.default.post(name: Notification.Name("tatwo.browser.openImport"), object: nil)
+            }
+        }
+    }
+
+    private var browserSessionSettings: some View {
+        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+            Text("\(model.browserTabRegistry.openSessions.count) 條 session 開著瀏覽器")
+            Button("去 Session space 管理") {
+                onClose()
+                // W47/AppShell integration owns navigation; Fable connects this event.
+                NotificationCenter.default.post(name: Notification.Name("tatwo.browser.openSessionSpace"), object: nil)
+            }
+            Picker("關閉 chat 時", selection: generalBinding(\.sessionRetention)) {
+                Text("保留分頁").tag(BrowserGeneralSettings.SessionRetention.keep)
+                Text("自動關閉").tag(BrowserGeneralSettings.SessionRetention.closeWithChat)
+            }
+        }
+    }
+
+    private var browserSecuritySettings: some View {
+        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.sectionSpacing) {
+            BrowserMemorySettingsView()
+            HStack(alignment: .top, spacing: BrowserSettingsMetrics.sectionSpacing) {
+                browserHumanSecurityColumn
+                Divider()
+                browserAISecurityColumn
+            }
+            Text("變更在下一個新分頁生效").font(.footnote).foregroundStyle(.secondary)
+            TatwoBrowserManagementView(model: model, provider: browserManagementProvider, onClose: onClose)
+                .frame(height: BrowserSettingsMetrics.managementHeight)
+        }
+    }
+
+    private var browserHumanSecurityColumn: some View {
+        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+            Text("人用分頁").font(.subheadline.bold())
+            Toggle("擋第三方 cookie", isOn: securityBinding(\.blocksThirdPartyCookies))
+            Toggle("擋廣告與追蹤", isOn: securityBinding(\.adBlock))
+            Text("區網連線：每個網站問一次")
+            Text("相機／麥克風／位置：詢問")
+            Text("下載：允許，存到下載項目")
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var browserAISecurityColumn: some View {
+        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+            Text("AI 操作分頁").font(.subheadline.bold())
+            Text("第三方 cookie：封鎖")
+            Text("廣告與追蹤：唯讀（跟隨共用設定）")
+            Text("區網連線：封鎖")
+            Text("相機／麥克風／位置：封鎖")
+            Text("下載：封鎖")
+        }
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var browserDiagnosticsSettings: some View {
+        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+            Text("引擎版本：\(BrowserRuntimeVersion.bundledDescription)")
+            Text("目前分頁數：\(model.browserTabRegistry.tabs.count)")
+            HStack {
+                Button("打開診斷頁") { browserDiagnosticsPresented = true }
+            }
+        }
+        .sheet(isPresented: $browserDiagnosticsPresented) {
+            BrowserDiagnosticsView(registry: model.browserTabRegistry)
+        }
+    }
+
+    private func generalBinding<Value>(_ keyPath: WritableKeyPath<BrowserGeneralSettings, Value>) -> Binding<Value> {
+        Binding(get: { browserGeneral[keyPath: keyPath] }, set: { value in
+            var updated = BrowserGeneralSettings.load()
+            updated[keyPath: keyPath] = value
+            do {
+                try updated.save()
+                browserGeneral = updated
+                browserSettingsError = nil
+            } catch { browserSettingsError = "無法儲存瀏覽器設定，請確認儲存位置後再試。" }
+        })
+    }
+
+    private func securityBinding(_ keyPath: WritableKeyPath<BrowserSecuritySettings, Bool>) -> Binding<Bool> {
+        Binding(get: { browserSecurity[keyPath: keyPath] }, set: { value in
+            var updated = BrowserSecuritySettings.load()
+            updated[keyPath: keyPath] = value
+            do {
+                try updated.save()
+                browserSecurity = updated
+                browserSettingsError = nil
+            } catch { browserSettingsError = "無法儲存安全設定，請確認儲存位置後再試。" }
+        })
+    }
+
+    private func exportBrowserBookmarks() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.html]
+        panel.nameFieldStringValue = "TATWO-bookmarks.html"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try BrowserBookmarkExport.html(registry: model.browserTabRegistry).write(to: url, atomically: true, encoding: .utf8)
+            browserSettingsError = nil
+        } catch { browserSettingsError = "無法匯出書籤，請確認儲存位置後再試。" }
     }
 
     private var browserManagementProvider:

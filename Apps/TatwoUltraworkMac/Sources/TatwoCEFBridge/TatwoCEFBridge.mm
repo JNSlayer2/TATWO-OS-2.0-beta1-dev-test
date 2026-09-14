@@ -25,6 +25,11 @@
 #include <unordered_set>
 #include <vector>
 
+#pragma mark - W57a
+#include "include/cef_context_menu_handler.h"
+#include "include/cef_find_handler.h"
+#include "include/cef_keyboard_handler.h"
+#pragma mark - W57a end
 #include "include/cef_app.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_browser.h"
@@ -51,6 +56,18 @@
 #include "include/cef_values.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
+
+#pragma mark - W57d
+#include "include/cef_dialog_handler.h"
+// Pure, deliberately reduced Chrome UA for the pinned Chromium 151 runtime.
+// This is compatibility metadata, not a promise that an identity provider accepts CEF.
+constexpr const char *W57dUserAgent() {
+  return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+}
+static_assert(CHROME_VERSION_MAJOR == 151, "Review W57d UA when upgrading Chromium");
+namespace { void W57dInvalidate(TatwoCEFBrowserView *view); }
+#pragma mark - W57d End
 
 @interface TatwoCEFApplication () <CefAppProtocol>
 @end
@@ -111,6 +128,9 @@ NSString *const kPrivacyStrictStartupError =
 std::unique_ptr<CefScopedLibraryLoader> g_library_loader;
 CefRefPtr<CefApp> g_application;
 std::atomic_bool g_initialized{false};
+// W60b: supplied by the same Swift policy as the browser admission budget.
+// Zero means no application override; Chromium still enforces its own model.
+std::atomic<int> g_renderer_process_limit{0};
 dispatch_source_t g_message_pump_idle_timer = nil;
 std::atomic_bool g_shutdown{false};
 std::atomic_bool g_shutdown_requested{false};
@@ -1004,11 +1024,14 @@ struct BrowserRequestPolicySnapshot {
   bool reduces_cross_origin_referrers = true;
   bool blocks_third_party_cookies = true;
   bool privacy_strict = true;
+  bool human = false;
+  bool ad_block = true;
   std::shared_ptr<const BrowserHostDenyListSnapshot> host_deny_list;
 };
 
 bool ApplyPrivacyStrictRequestContextPreferences(
-    CefRefPtr<CefRequestContext> request_context) {
+    CefRefPtr<CefRequestContext> request_context,
+    TatwoCEFBrowserActor actor = TatwoCEFBrowserActorAgent) {
   struct BooleanPreference {
     const char *name;
     bool required_for_privacy_strict;
@@ -1044,7 +1067,7 @@ bool ApplyPrivacyStrictRequestContextPreferences(
       continue;
     }
     CefRefPtr<CefValue> value = CefValue::Create();
-    if (!value || !value->SetBool(false)) {
+    if (!value || !value->SetBool(actor == TatwoCEFBrowserActorHuman && !preference.required_for_privacy_strict)) {
       AppendCEFEmbeddingTelemetryLine(
           [NSString stringWithFormat:
               @"phase=security_capability event=preference_failed "
@@ -1068,9 +1091,11 @@ bool ApplyPrivacyStrictRequestContextPreferences(
   AppendCEFEmbeddingTelemetryLine(
       [NSString stringWithFormat:
           @"phase=security_capability event=preferences_configured "
-           "policyVersion=%u passwordSaving=0 creditCardAutofill=0 "
-           "addressAutofill=0 sslErrorOverride=0",
-          kBrowserNetworkSecurityPolicyVersion]);
+           "policyVersion=%u passwordSaving=%d creditCardAutofill=%d "
+           "addressAutofill=%d sslErrorOverride=0",
+          kBrowserNetworkSecurityPolicyVersion,
+          actor == TatwoCEFBrowserActorHuman, actor == TatwoCEFBrowserActorHuman,
+          actor == TatwoCEFBrowserActorHuman]);
   return true;
 }
 
@@ -1081,13 +1106,13 @@ class TatwoPrivacyStrictRequestContextHandler final
       std::function<void(CefRefPtr<CefRequestContext>, bool)>;
 
   explicit TatwoPrivacyStrictRequestContextHandler(
-      Completion completion)
-      : completion_(std::move(completion)) {}
+      Completion completion, TatwoCEFBrowserActor actor = TatwoCEFBrowserActorAgent)
+      : completion_(std::move(completion)), actor_(actor) {}
 
   void OnRequestContextInitialized(
       CefRefPtr<CefRequestContext> request_context) override {
     const bool configured =
-        ApplyPrivacyStrictRequestContextPreferences(request_context);
+        ApplyPrivacyStrictRequestContextPreferences(request_context, actor_);
     if (completion_) {
       auto completion = std::move(completion_);
       completion(request_context, configured);
@@ -1098,15 +1123,33 @@ class TatwoPrivacyStrictRequestContextHandler final
 
  private:
   Completion completion_;
+  TatwoCEFBrowserActor actor_;
   IMPLEMENT_REFCOUNTING(TatwoPrivacyStrictRequestContextHandler);
 };
+
+BrowserRequestPolicySnapshot ActorRequestPolicy(TatwoCEFBrowserView *owner) {
+  BrowserRequestPolicySnapshot policy;
+  policy.host_deny_list = g_host_deny_list;
+  policy.human = owner && owner.browserActor == TatwoCEFBrowserActorHuman && !owner.agentControlled;
+  policy.blocks_third_party_cookies = !policy.human || owner.blocksThirdPartyCookies;
+  policy.ad_block = !owner || owner.adBlock;
+  return policy;
+}
+
+// Human navigation is provisional: OnBeforeResourceLoad must still obtain
+// private-network consent before any bytes are fetched, including DNS aliases.
+bool IsActorURLAllowed(const BrowserRequestPolicySnapshot &policy, NSString *url) {
+  if (!policy.human) return IsAllowedURLString(url);
+  NSString *scheme = SafeURLComponents(url).scheme.lowercaseString;
+  return ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) && CanonicalHost(url).length > 0;
+}
 
 bool IsDeniedByLocalHostList(
     const BrowserRequestPolicySnapshot &policy,
     NSString *url_string) {
   NSString *host = CanonicalHost(url_string);
   return !policy.host_deny_list ||
-         policy.host_deny_list->Blocks(host);
+         (policy.ad_block && policy.host_deny_list->Blocks(host));
 }
 
 bool IsMainFrameRequest(CefRefPtr<CefRequest> request) {
@@ -2113,6 +2156,7 @@ void InvalidateWebMCPForRendererTermination(
 bool IsActiveMountCallback(TatwoCEFBrowserView *view,
                            uint64_t expected_generation,
                            NSString *event);
+bool IsPermissionReplyLive(TatwoCEFBrowserView *view, uint64_t expected_mount, uint64_t expected_navigation_generation);
 void StartLoadingActiveMessagePump(TatwoCEFBrowserView *view,
                                    uint64_t expected_generation,
                                    NSString *reason);
@@ -2471,6 +2515,66 @@ int CompleteCEFHelperProcessTelemetry(NSString *role, int exit_code) {
   return exit_code;
 }
 
+#pragma mark - W60 Bounded renderer health (no page text or error_string)
+std::mutex g_w60_health_mutex;
+NSMutableArray<NSDictionary *> *g_w60_renderer_terminations;
+uint64_t g_w60_renderer_termination_count = 0;
+
+NSString *W60TerminationStatus(CefRequestHandler::TerminationStatus status) {
+  switch (status) {
+    case TS_ABNORMAL_TERMINATION: return @"TS_ABNORMAL_TERMINATION";
+    case TS_PROCESS_WAS_KILLED: return @"TS_PROCESS_WAS_KILLED";
+    case TS_PROCESS_CRASHED: return @"TS_PROCESS_CRASHED";
+    case TS_PROCESS_OOM: return @"TS_PROCESS_OOM";
+    case TS_LAUNCH_FAILED: return @"TS_LAUNCH_FAILED";
+    case TS_INTEGRITY_FAILURE: return @"TS_INTEGRITY_FAILURE";
+    default: return @"TS_OTHER";
+  }
+}
+
+void W60RecordRendererTermination(CefRefPtr<CefBrowser> browser,
+                                  CefRequestHandler::TerminationStatus status,
+                                  int code, uint64_t mount) {
+  NSString *host = @"unknown";
+  if (browser && browser->GetMainFrame()) {
+    NSURLComponents *url = [NSURLComponents componentsWithString:
+        FromCefString(browser->GetMainFrame()->GetURL())];
+    // Only a host, never userinfo/path/query/fragment or Chromium's error text.
+    if (url.host.length > 0) host = SanitizeTelemetryToken(url.host.lowercaseString, @"unknown");
+  }
+  NSString *reason = W60TerminationStatus(status);
+  uint64_t count;
+  {
+    std::lock_guard<std::mutex> lock(g_w60_health_mutex);
+    count = ++g_w60_renderer_termination_count;
+    if (!g_w60_renderer_terminations) g_w60_renderer_terminations = [NSMutableArray array];
+    [g_w60_renderer_terminations addObject:@{
+      @"status": reason, @"code": @(code), @"host": host,
+      @"mountGeneration": @(mount), @"time": @([[NSDate date] timeIntervalSince1970])
+    }];
+    if (g_w60_renderer_terminations.count > 10) [g_w60_renderer_terminations removeObjectAtIndex:0];
+  }
+  AppendCEFEmbeddingTelemetryLine([NSString stringWithFormat:
+      @"phase=renderer_terminated status=%@ statusCode=%d code=%d url=%@ mountGeneration=%llu terminationCallbackCount=%llu",
+      reason, static_cast<int>(status), code, host, mount, count]);
+}
+
+NSDictionary<NSString *, id> *W60ProcessDiagnostics() {
+  std::lock_guard<std::mutex> lock(g_w60_health_mutex);
+  return @{
+    @"launchCounts": @{
+      @"gpu": @(g_helper_role_launch_counts[0].load()),
+      @"renderer": @(g_helper_role_launch_counts[1].load()),
+      @"network": @(g_helper_role_launch_counts[2].load()),
+      @"utility": @(g_helper_role_launch_counts[3].load() + g_helper_role_launch_counts[4].load()),
+      @"other": @(g_helper_role_launch_counts[5].load())
+    },
+    @"terminationCallbackCount": @(g_w60_renderer_termination_count),
+    @"recentTerminations": g_w60_renderer_terminations ? [g_w60_renderer_terminations copy] : @[]
+  };
+}
+#pragma mark - W60 End
+
 void LogRendererTermination(CefRequestHandler::TerminationStatus status,
                             int error_code) {
   // Keep renderer diagnostics numeric and session-agnostic. In particular,
@@ -2630,107 +2734,112 @@ bool RunCEFMessagePumpWorkOnMainThread() {
   return result.did_run;
 }
 
-// CEF's pinned external-pump sample keeps a maximum 1000/30 ms timer even
-// after vendor scheduling goes idle. Without this, renderer IPC (including
-// Google identifier responses) can wait indefinitely for the next host action.
-// This timer is independent of vendor timer generations and uses the same
-// reentrancy/shutdown gate as every other main-thread pump invocation.
-void StartCEFMessagePumpIdleTimer() {
-  NSCAssert(NSThread.isMainThread, @"CEF timer must start on main thread");
-  if (g_message_pump_idle_timer) return;
-  g_message_pump_idle_timer = dispatch_source_create(
-      DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-  constexpr uint64_t interval = (1000 / 30) * NSEC_PER_MSEC;
-  dispatch_source_set_timer(g_message_pump_idle_timer,
-      dispatch_time(DISPATCH_TIME_NOW, interval), interval, NSEC_PER_MSEC);
-  dispatch_source_set_event_handler(g_message_pump_idle_timer, ^{
-    RunCEFMessagePumpWorkOnMainThread();
+#pragma mark - W60 Opt-in five-second runtime probe
+void W60StartRuntimePumpProbe() {
+  const char *enabled = getenv("TATWO_CEF_PUMP_PROBE");
+  if (!enabled || strcmp(enabled, "1") != 0) return;
+  static bool started = false;
+  if (started) return;
+  started = true;
+  const int64_t start = MonotonicMilliseconds();
+  const uint64_t work = g_message_pump_do_work_count.load();
+  __block uint64_t wakeups = 0;
+  CFRunLoopObserverRef observer = CFRunLoopObserverCreateWithHandler(
+      kCFAllocatorDefault, kCFRunLoopAfterWaiting, true, 0,
+      ^(CFRunLoopObserverRef, CFRunLoopActivity) { ++wakeups; });
+  if (!observer) return;
+  CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+  AppendCEFEmbeddingTelemetryLine(@"phase=w60_pump_probe event=begin requestedDurationMs=5000");
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+    CFRelease(observer);
+    AppendCEFEmbeddingTelemetryLine([NSString stringWithFormat:
+        @"phase=w60_pump_probe event=end pid=%d durationMs=%lld doWorkCount=%llu mainWakeups=%llu",
+        getpid(), MonotonicMilliseconds() - start,
+        g_message_pump_do_work_count.load() - work, wakeups]);
   });
-  dispatch_resume(g_message_pump_idle_timer);
+}
+#pragma mark - W60 End
+
+#pragma mark - W60 Scheduled pump (no loading or idle cadence)
+// Main-queue owned, one replaceable vendor deadline. Immediate requests and
+// host kicks are independent; a newer positive delay cannot erase either.
+dispatch_source_t g_w60_vendor_timer = nil;
+dispatch_source_t g_w60_overdue_timer = nil;
+
+void W60CancelVendorTimers() {
+  for (dispatch_source_t timer : {g_w60_vendor_timer, g_w60_overdue_timer}) {
+    if (timer) dispatch_source_cancel(timer);
+  }
+  g_w60_vendor_timer = nil;
+  g_w60_overdue_timer = nil;
+}
+
+void StartCEFMessagePumpIdleTimer() {
+  W60StartRuntimePumpProbe();
+  // Intentionally no idle timer. OnScheduleMessagePumpWork is authoritative.
 }
 
 void StopCEFMessagePumpIdleTimer() {
   NSCAssert(NSThread.isMainThread, @"CEF timer must stop on main thread");
-  if (!g_message_pump_idle_timer) return;
-  dispatch_source_cancel(g_message_pump_idle_timer);
-  g_message_pump_idle_timer = nil;
+  W60CancelVendorTimers();
 }
 
 void ScheduleCEFMessagePumpWork(int64_t delay_ms) {
-  const int64_t normalized_delay_ms = std::max<int64_t>(delay_ms, 0);
-  const bool cancels_pending_delayed = normalized_delay_ms > 0;
-  // Pinned CEF requires cancellation only for a positive-delay request.
-  // Immediate requests are independent "reasonably soon" calls and must not
-  // invalidate each other while queued on the main dispatch queue.
-  const uint64_t generation =
-      cancels_pending_delayed
-          ? g_message_pump_generation.fetch_add(
-                1, std::memory_order_relaxed) + 1
-          : g_message_pump_generation.load(std::memory_order_relaxed);
+  const int64_t delay = std::max<int64_t>(delay_ms, 0);
+  const uint64_t generation = delay > 0
+      ? g_message_pump_generation.fetch_add(1, std::memory_order_relaxed) + 1
+      : g_message_pump_generation.load(std::memory_order_relaxed);
+  const int64_t requested_at = MonotonicMilliseconds();
   g_message_pump_schedule_count.fetch_add(1, std::memory_order_relaxed);
-  g_message_pump_last_schedule_ms.store(
-      MonotonicMilliseconds(), std::memory_order_relaxed);
-  g_message_pump_last_requested_delay_ms.store(
-      delay_ms, std::memory_order_relaxed);
-  g_message_pump_last_normalized_delay_ms.store(
-      normalized_delay_ms, std::memory_order_relaxed);
-  g_message_pump_last_generation.store(
-      generation, std::memory_order_relaxed);
-  const uint64_t detail_event =
-      g_message_pump_detail_event_count.fetch_add(
-          1, std::memory_order_relaxed) + 1;
-  if (detail_event <= 64) {
-    AppendCEFEmbeddingTelemetryLine(
-        [NSString stringWithFormat:
-            @"phase=message_pump_detail event=schedule "
-             "detailSequence=%llu scheduleCount=%llu doWorkCount=%llu "
-             "requestedDelayMs=%lld normalizedDelayMs=%lld "
-             "generation=%llu cancelsPendingDelayed=%d",
-            detail_event,
-            g_message_pump_schedule_count.load(std::memory_order_relaxed),
-            g_message_pump_do_work_count.load(std::memory_order_relaxed),
-            delay_ms,
-            normalized_delay_ms,
-            generation,
-            cancels_pending_delayed ? 1 : 0]);
-  }
+  g_message_pump_last_schedule_ms.store(requested_at, std::memory_order_relaxed);
+  g_message_pump_last_requested_delay_ms.store(delay_ms, std::memory_order_relaxed);
+  g_message_pump_last_normalized_delay_ms.store(delay, std::memory_order_relaxed);
+  g_message_pump_last_generation.store(generation, std::memory_order_relaxed);
   MaybeLogMessagePumpSummary(@"schedule");
-  constexpr int64_t kNanosecondsPerMillisecond = 1000000;
-  constexpr int64_t kMaximumDispatchDelayMilliseconds =
-      std::numeric_limits<int64_t>::max() / kNanosecondsPerMillisecond;
-  if (normalized_delay_ms > kMaximumDispatchDelayMilliseconds) {
-    // dispatch_time accepts a signed nanosecond delta. An unrepresentable
-    // vendor delay must never be shortened; the generation increment above
-    // still cancels the previous request, while no premature timer is added.
-    return;
-  }
-  const int64_t delay_nanoseconds =
-      normalized_delay_ms * kNanosecondsPerMillisecond;
-  dispatch_block_t work = ^{
-        const bool can_run =
-            cancels_pending_delayed
-                ? CanRunScheduledMessagePump(
-                      generation,
-                      g_message_pump_generation.load(
-                          std::memory_order_relaxed),
-                      g_initialized.load(),
-                      g_shutdown.load())
-                : CanRunImmediateMessagePump(
-                      g_initialized.load(), g_shutdown.load());
-        if (!can_run) {
-          return;
-        }
-        RunCEFMessagePumpWorkOnMainThread();
-      };
-  if (normalized_delay_ms == 0) {
-    dispatch_async(dispatch_get_main_queue(), work);
-  } else {
-    dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, delay_nanoseconds),
-        dispatch_get_main_queue(),
-        work);
-  }
+  // Reserve room for the one-shot overdue safety net, without overflow or
+  // shortening a CEF deadline that cannot be represented by dispatch_time.
+  constexpr int64_t maximum = INT64_MAX / NSEC_PER_MSEC - 250;
+  const bool representable = delay <= maximum;
+  const dispatch_time_t deadline = representable
+      ? dispatch_time(DISPATCH_TIME_NOW, delay * NSEC_PER_MSEC) : DISPATCH_TIME_FOREVER;
+  const dispatch_time_t overdue = representable
+      ? dispatch_time(DISPATCH_TIME_NOW, (delay + 250) * NSEC_PER_MSEC) : DISPATCH_TIME_FOREVER;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (delay == 0) {
+      RunCEFMessagePumpWorkOnMainThread();
+      return;
+    }
+    if (generation != g_message_pump_generation.load(std::memory_order_relaxed)) return;
+    W60CancelVendorTimers();
+    if (!representable || !g_initialized.load() || g_shutdown.load() || g_shutdown_requested.load()) return;
+    dispatch_block_t deliver = ^{
+      if (generation != g_message_pump_generation.load(std::memory_order_relaxed) ||
+          !g_w60_vendor_timer) return;
+      const int64_t lateness = MonotonicMilliseconds() - requested_at - delay;
+      W60CancelVendorTimers(); // Clear before CEF: a reentrant schedule owns new timers.
+      if (lateness >= 250) {
+        AppendCEFEmbeddingTelemetryLine([NSString stringWithFormat:
+            @"phase=message_pump_overdue event=recover generation=%llu overdueMs=%lld",
+            generation, lateness]);
+      }
+      RunCEFMessagePumpWorkOnMainThread();
+    };
+    g_w60_vendor_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(g_w60_vendor_timer, deadline, DISPATCH_TIME_FOREVER, 0);
+    dispatch_source_set_event_handler(g_w60_vendor_timer, deliver);
+    dispatch_resume(g_w60_vendor_timer);
+    // No repeating watchdog. It exists only while a positive CEF request is
+    // pending, and may recover that request only >=250ms beyond its deadline.
+    g_w60_overdue_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(g_w60_overdue_timer, overdue, DISPATCH_TIME_FOREVER, 0);
+    dispatch_source_set_event_handler(g_w60_overdue_timer, ^{
+      if (MonotonicMilliseconds() - requested_at - delay >= 250) deliver();
+    });
+    dispatch_resume(g_w60_overdue_timer);
+  });
 }
+#pragma mark - W60 End
 
 void QueueImmediateCEFMessagePumpWorkOnMainQueue() {
   QueueImmediateMessagePumpWork(
@@ -3010,6 +3119,367 @@ class TatwoWebMCPPromiseReplyHandler final : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(TatwoWebMCPPromiseReplyHandler);
 };
 
+#pragma mark - W57c Dedicated password renderer channel
+// Never route these messages through WebMCP, DOM snapshots, diagnostics or telemetry.
+constexpr const char *kPasswordConfigureMessage = "tatwo.password.configure";
+constexpr const char *kPasswordFillMessage = "tatwo.password.fill";
+constexpr const char *kPasswordEventMessage = "tatwo.password.event";
+void W57cInvalidate(TatwoCEFBrowserView *view, bool reload, bool preserve_submission);
+void W57cLoadEnd(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, int status);
+bool W57cBrowserMessage(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame,
+                       CefRefPtr<CefProcessMessage> message);
+
+// Evaluated as a fixed factory. The callback and credentials are V8 arguments, not
+// source interpolation or globals. Mirrors EmbeddedBrowserPasswordFormMetadataExtractor's
+// password_form/action-origin checks without changing its metadata-only contract.
+constexpr const char *kW57cPasswordScript = R"W57C(
+(function(report, expectedOrigin) {
+  'use strict';
+  let active = true, nextID = 0, lastForm = null, lastTime = 0;
+  const forms = new Map();
+  const originOK = () => active && location.protocol === 'https:' && location.origin === expectedOrigin;
+  const tokens = e => String(e.autocomplete || '').toLowerCase().split(/\s+/);
+  const visible = e => e instanceof HTMLInputElement && e.isConnected && !e.disabled &&
+    !e.readOnly && e.type !== 'hidden' && !e.hidden && e.getClientRects().length > 0 &&
+    getComputedStyle(e).visibility === 'visible' && getComputedStyle(e).display !== 'none';
+  const usernameOK = e => visible(e) && ['text', 'email', 'tel'].includes(e.type) &&
+    !tokens(e).some(t => ['one-time-code', 'new-password', 'current-password'].includes(t));
+  const passwordOK = e => visible(e) && e.type === 'password' &&
+    !tokens(e).includes('new-password') && !tokens(e).includes('one-time-code');
+  const actionOK = form => {
+    try {
+      const action = new URL(form.action || location.href, document.baseURI);
+      return action.protocol === 'https:' && !action.username && !action.password &&
+        action.origin === expectedOrigin;
+    } catch (_) { return false; }
+  };
+  const fields = form => {
+    if (!form || !form.isConnected || !actionOK(form)) return null;
+    const inputs = Array.from(form.elements);
+    // Registration/reset forms never get a saved login or a save/update prompt.
+    if (inputs.some(e => e instanceof HTMLInputElement && tokens(e).includes('new-password'))) return null;
+    const passwords = inputs.filter(passwordOK);
+    if (passwords.length !== 1) return null;
+    const users = inputs.filter(usernameOK);
+    const username = users.find(e => tokens(e).includes('username')) ||
+      users.find(e => e.type === 'email') || users[0];
+    return username ? {username, password: passwords[0]} : null;
+  };
+  const submit = form => {
+    if (!originOK()) return;
+    const pair = fields(form);
+    if (!pair || !pair.password.value) return;
+    const now = performance.now();
+    if (lastForm === form && now - lastTime < 750) return; // Enter + submit coalescing, no secret cache.
+    lastForm = form; lastTime = now;
+    report('submitted', String(pair.username.value), String(pair.password.value));
+  };
+  const onSubmit = event => { if (event.isTrusted) submit(event.target); };
+  const onEnter = event => {
+    if (event.isTrusted && event.key === 'Enter' && !event.isComposing &&
+        event.target instanceof HTMLInputElement) submit(event.target.form);
+  };
+  document.addEventListener('submit', onSubmit, true);
+  document.addEventListener('keydown', onEnter, true);
+  return {
+    scan() {
+      if (!originOK()) return;
+      const passwordForms = Array.from(document.forms).filter(form =>
+        Array.from(form.elements).some(e => e instanceof HTMLInputElement && e.type === 'password'));
+      // This conservative completion signal rejects 200 responses that still show a login form.
+      report('scanned', passwordForms.length ? '1' : '0');
+      for (const form of passwordForms) {
+        const pair = fields(form);
+        if (!pair) continue;
+        const id = 'w57c-' + (++nextID);
+        forms.set(id, {form, ...pair, prefilled: String(pair.username.value)});
+        report('detected', id, id + '-username', id + '-password', String(pair.username.value));
+      }
+    },
+    fill(id, username, password) {
+      if (!originOK()) return false;
+      const item = forms.get(id);
+      if (!item || !item.form.isConnected || !actionOK(item.form)) return false;
+      const pair = fields(item.form);
+      if (!pair || pair.username !== item.username || pair.password !== item.password ||
+          pair.username.form !== item.form || pair.password.form !== item.form ||
+          pair.password.type !== 'password' || pair.username.type === 'hidden' ||
+          pair.password.value || String(pair.username.value) !== item.prefilled) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(pair.username, username);
+      setter.call(pair.password, password);
+      for (const element of [pair.username, pair.password]) {
+        element.dispatchEvent(new Event('input', {bubbles: true}));
+        element.dispatchEvent(new Event('change', {bubbles: true}));
+      }
+      forms.delete(id); // One approved fill, no submit.
+      return true;
+    },
+    stop() {
+      active = false; forms.clear(); lastForm = null;
+      document.removeEventListener('submit', onSubmit, true);
+      document.removeEventListener('keydown', onEnter, true);
+    }
+  };
+})
+)W57C";
+
+class W57cPasswordBinding final : public CefV8Handler {
+ public:
+  W57cPasswordBinding(CefRefPtr<CefFrame> frame, CefString generation,
+                     CefString token, CefString origin)
+      : frame_(frame), generation_(generation), token_(token), origin_(origin) {}
+  bool Execute(const CefString &, CefRefPtr<CefV8Value>, const CefV8ValueList &values,
+               CefRefPtr<CefV8Value> &retval, CefString &) override {
+    retval = CefV8Value::CreateUndefined();
+    if (!frame_ || !frame_->IsValid() || !frame_->IsMain() || values.empty() || values.size() > 5 ||
+        !values[0]->IsString()) return true;
+    const auto kind = values[0]->GetStringValue();
+    if (kind != "detected" && kind != "submitted" && kind != "scanned") return true;
+    auto message = CefProcessMessage::Create(kPasswordEventMessage);
+    auto args = message->GetArgumentList();
+    args->SetString(0, generation_);
+    args->SetString(1, token_);
+    args->SetString(2, origin_);
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (!values[i]->IsString() || values[i]->GetStringValue().ToString().size() > (i == 2 && kind == "submitted" ? 16384 : 4096)) return true;
+      args->SetString(3 + i, values[i]->GetStringValue());
+    }
+    frame_->SendProcessMessage(PID_BROWSER, message);
+    return true;
+  }
+ private:
+  CefRefPtr<CefFrame> frame_;
+  CefString generation_, token_, origin_;
+  IMPLEMENT_REFCOUNTING(W57cPasswordBinding);
+};
+
+class W57cPasswordRenderer {
+  struct Page {
+    CefRefPtr<CefV8Context> context;
+    CefRefPtr<CefV8Value> controller;
+    CefString generation, token, url;
+  };
+  std::map<int, Page> pages_;
+  void Call(Page &page, const char *name, const CefV8ValueList &args = {}) {
+    if (!page.context || !page.context->IsValid() || !page.context->Enter()) return;
+    auto function = page.controller->GetValue(name);
+    if (function && function->IsFunction())
+      function->ExecuteFunctionWithContext(page.context, page.controller, args);
+    page.context->Exit();
+  }
+ public:
+  void Release(CefRefPtr<CefBrowser> browser, CefRefPtr<CefV8Context> context = nullptr) {
+    if (!browser) return;
+    auto it = pages_.find(browser->GetIdentifier());
+    if (it == pages_.end() || (context && !it->second.context->IsSame(context))) return;
+    Call(it->second, "stop");
+    pages_.erase(it);
+  }
+  bool Receive(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+               CefProcessId source, CefRefPtr<CefProcessMessage> message) {
+    if (!message || (message->GetName() != kPasswordConfigureMessage &&
+                     message->GetName() != kPasswordFillMessage)) return false;
+    if (source != PID_BROWSER || !browser || !frame || !frame->IsMain() || !frame->IsValid()) return true;
+    auto args = message->GetArgumentList();
+    if (!args || args->GetSize() < 4) return true;
+    const auto generation = args->GetString(0), token = args->GetString(1);
+    if (message->GetName() == kPasswordConfigureMessage) {
+      Release(browser);
+      if (args->GetSize() != 6 || !args->GetBool(4) || token.empty() ||
+          args->GetString(3) != frame->GetURL()) return true; // human/agent state comes only from browser.
+      auto context = frame->GetV8Context();
+      if (!context || !context->IsValid() || !context->Enter()) return true;
+      CefRefPtr<CefV8Value> factory;
+      CefRefPtr<CefV8Exception> exception;
+      if (!context->Eval(kW57cPasswordScript, "tatwo-password-assist", 1, factory, exception) ||
+          !factory || !factory->IsFunction()) { context->Exit(); return true; }
+      CefV8ValueList input{
+        CefV8Value::CreateFunction("passwordAssist", new W57cPasswordBinding(frame, generation, token, args->GetString(2))),
+        CefV8Value::CreateString(args->GetString(2))
+      };
+      auto controller = factory->ExecuteFunctionWithContext(context, nullptr, input);
+      context->Exit();
+      if (!controller || !controller->IsObject()) return true;
+      auto &page = pages_[browser->GetIdentifier()];
+      page = {context, controller, generation, token, args->GetString(3)};
+      Call(page, "scan");
+      return true;
+    }
+    auto it = pages_.find(browser->GetIdentifier());
+    if (args->GetSize() != 7 || it == pages_.end()) return true;
+    auto &page = it->second;
+    auto context = frame->GetV8Context();
+    if (page.generation != generation || page.token != token || page.url != frame->GetURL() ||
+        !context || !page.context->IsSame(context)) return true;
+    Call(page, "fill", {CefV8Value::CreateString(args->GetString(4)),
+                        CefV8Value::CreateString(args->GetString(5)),
+                        CefV8Value::CreateString(args->GetString(6))});
+    return true;
+  }
+};
+#pragma mark - W57c End
+
+#pragma mark - W58 Agent-only credential channel (no WebMCP or source interpolation)
+constexpr const char *kAILoginConfigure = "tatwo.ai-login.configure";
+constexpr const char *kAILoginFill = "tatwo.ai-login.fill";
+constexpr const char *kAILoginEvent = "tatwo.ai-login.event";
+void W58Invalidate(TatwoCEFBrowserView *view, bool preserve_result);
+void W58LoadEnd(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, int status);
+bool W58BrowserMessage(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, CefRefPtr<CefProcessMessage> message);
+constexpr const char *kW58AgentLoginScript = R"W58(
+(function(expectedOrigin) {
+  'use strict';
+  let bound = null;
+  const originOK = () => location.protocol === 'https:' && location.origin === expectedOrigin;
+  const visible = e => e instanceof HTMLInputElement && e.isConnected && !e.disabled && !e.readOnly &&
+    !e.hidden && e.type !== 'hidden' && e.getClientRects().length > 0 &&
+    getComputedStyle(e).visibility === 'visible' && getComputedStyle(e).display !== 'none';
+  const tokens = e => String(e.autocomplete || '').toLowerCase().split(/\s+/);
+  const otp = () => Array.from(document.querySelectorAll('input')).some(e => visible(e) &&
+    (tokens(e).includes('one-time-code') || /(?:^|[-_])(otp|totp|2fa|verification[-_]?code)(?:$|[-_])/i.test(e.name || e.id || '')));
+  const actionOK = form => {
+    try {
+      const a = new URL(form.action || location.href, document.baseURI);
+      // GET would put a password into history/URL metadata. Never fill it.
+      return String(form.method).toLowerCase() === 'post' && a.protocol === 'https:' &&
+        a.origin === expectedOrigin && !a.username && !a.password;
+    } catch (_) { return false; }
+  };
+  const fields = form => {
+    if (!form || !form.isConnected || !actionOK(form)) return null;
+    const elements = Array.from(form.elements);
+    if (elements.some(e => tokens(e).includes('new-password') || tokens(e).includes('one-time-code'))) return null;
+    const pw = elements.filter(e => visible(e) && e.type === 'password');
+    const users = elements.filter(e => visible(e) && ['text','email','tel'].includes(e.type));
+    const user = users.find(e => tokens(e).includes('username')) || users.find(e => e.type === 'email') || users[0];
+    return pw.length === 1 && user && user.form === form && pw[0].form === form ? {user, password: pw[0]} : null;
+  };
+  return {
+    scan(completed) {
+      bound = null;
+      if (!originOK()) return {error:'ai_login_stale_page'};
+      if (otp() || /(?:^|\/)(?:2fa|totp|mfa|two-factor|challenge)(?:\/|$)/i.test(location.pathname))
+        return {error:'ai_login_two_factor_required'};
+      const forms = Array.from(document.forms);
+      if (completed) {
+        if (forms.some(f => Array.from(f.elements).some(e => visible(e) && e.type === 'password')))
+          return {error:'ai_login_rejected'};
+        return {formID:'', title:String(document.title || '').slice(0,200)};
+      }
+      const candidates = forms.map(form => ({form, pair:fields(form)})).filter(e => e.pair);
+      if (candidates.length !== 1) return {error: candidates.length ? 'ai_login_ambiguous_form' : 'ai_login_no_form'};
+      const {form, pair} = candidates[0];
+      if (pair.password.value) return {error:'ai_login_nonempty_form'};
+      bound = {form, ...pair, prefilled:String(pair.user.value)};
+      return {formID:'w58-login'};
+    },
+    fill(id, username, password) {
+      const item = bound;
+      bound = null; // Single use, including rejected and throwing attempts.
+      if (!originOK() || otp() || id !== 'w58-login' || !item) return false;
+      const pair = fields(item.form);
+      if (!pair || pair.user !== item.user || pair.password !== item.password || pair.password.value ||
+          String(pair.user.value) !== item.prefilled || (item.prefilled && item.prefilled !== username)) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      const submit = HTMLFormElement.prototype.requestSubmit;
+      if (typeof submit !== 'function') return false;
+      try {
+        setter.call(pair.user, username);
+        setter.call(pair.password, password);
+        for (const e of [pair.user,pair.password]) {
+          e.dispatchEvent(new Event('input',{bubbles:true}));
+          e.dispatchEvent(new Event('change',{bubbles:true}));
+        }
+        // Input handlers can detach fields/change action. Revalidate before submit.
+        const current = fields(item.form);
+        if (!originOK() || !current || current.user !== pair.user || current.password !== pair.password ||
+            pair.password.type !== 'password' || !item.form.checkValidity()) {
+          setter.call(pair.password, ''); return false;
+        }
+        submit.call(item.form);
+        // Native form submission has captured its entry list. Do not leave an AI
+        // password in the DOM while a cancelled/async submit waits or times out.
+        setter.call(pair.password, '');
+        return true;
+      } catch (_) { setter.call(pair.password, ''); return false; }
+    }
+  };
+})
+)W58";
+
+class W58AgentLoginRenderer {
+  struct Page {
+    CefRefPtr<CefV8Context> context;
+    CefRefPtr<CefV8Value> controller;
+    CefString generation, token, url;
+  };
+  std::map<int, Page> pages_;
+ public:
+  void Release(CefRefPtr<CefBrowser> browser, CefRefPtr<CefV8Context> context = nullptr) {
+    if (!browser) return;
+    auto it = pages_.find(browser->GetIdentifier());
+    if (it != pages_.end() && (!context || it->second.context->IsSame(context))) pages_.erase(it);
+  }
+  bool Receive(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+               CefProcessId source, CefRefPtr<CefProcessMessage> message) {
+    if (!message || (message->GetName() != kAILoginConfigure && message->GetName() != kAILoginFill)) return false;
+    if (source != PID_BROWSER || !browser || !frame || !frame->IsMain() || !frame->IsValid()) return true;
+    auto args = message->GetArgumentList();
+    if (!args || args->GetSize() < 5) return true;
+    const auto generation = args->GetString(0), token = args->GetString(1);
+    auto context = frame->GetV8Context();
+    if (message->GetName() == kAILoginConfigure) {
+      Release(browser);
+      if (args->GetSize() != 5 || args->GetInt(4) == 2 || token.empty()) return true;
+      if (args->GetString(3) != frame->GetURL() || !context || !context->IsValid() || !context->Enter()) return true;
+      CefRefPtr<CefV8Value> factory;
+      CefRefPtr<CefV8Exception> exception;
+      if (!context->Eval(kW58AgentLoginScript, "tatwo-ai-login", 1, factory, exception) ||
+          !factory || !factory->IsFunction()) { context->Exit(); return true; }
+      auto controller = factory->ExecuteFunctionWithContext(context, nullptr,
+        {CefV8Value::CreateString(args->GetString(2))});
+      if (!controller || !controller->IsObject()) { context->Exit(); return true; }
+      pages_[browser->GetIdentifier()] = {context, controller, generation, token, frame->GetURL()};
+      auto scan = controller->GetValue("scan");
+      auto result = scan && scan->IsFunction() ? scan->ExecuteFunctionWithContext(context, controller,
+        {CefV8Value::CreateBool(args->GetInt(4) == 1)}) : nullptr;
+      auto reply = CefProcessMessage::Create(kAILoginEvent);
+      auto out = reply->GetArgumentList();
+      out->SetString(0, generation); out->SetString(1, token);
+      out->SetString(2, args->GetInt(4) == 1 ? "complete" : "ready");
+      for (int i = 0; i < 3; ++i) {
+        auto value = result && result->IsObject() ? result->GetValue(i == 0 ? "formID" : i == 1 ? "error" : "title") : nullptr;
+        out->SetString(3+i, value && value->IsString() ? value->GetStringValue() : "");
+      }
+      if (!result || !result->IsObject()) out->SetString(4, "ai_login_no_form");
+      context->Exit();
+      frame->SendProcessMessage(PID_BROWSER, reply);
+      return true;
+    }
+    auto it = pages_.find(browser->GetIdentifier());
+    if (args->GetSize() != 7 || it == pages_.end()) return true;
+    auto page = it->second;
+    pages_.erase(it);
+    if (page.generation != generation || page.token != token || page.url != frame->GetURL() ||
+        !context || !page.context->IsSame(context) || !context->IsValid() || !context->Enter()) return true;
+    auto fill = page.controller->GetValue("fill");
+    auto result = fill && fill->IsFunction() ? fill->ExecuteFunctionWithContext(context, page.controller,
+      {CefV8Value::CreateString(args->GetString(4)), CefV8Value::CreateString(args->GetString(5)),
+       CefV8Value::CreateString(args->GetString(6))}) : nullptr;
+    const bool success = result && result->IsBool() && result->GetBoolValue();
+    context->Exit();
+    if (!success) {
+      auto reply = CefProcessMessage::Create(kAILoginEvent);
+      auto out = reply->GetArgumentList();
+      out->SetString(0, generation); out->SetString(1, token); out->SetString(2, "failed");
+      out->SetString(3, ""); out->SetString(4, "ai_login_form_changed"); out->SetString(5, "");
+      frame->SendProcessMessage(PID_BROWSER, reply);
+    }
+    return true;
+  }
+};
+#pragma mark - W58 End
 class TatwoWebMCPRenderProcessHandler final
     : public CefRenderProcessHandler {
  public:
@@ -3059,10 +3529,30 @@ class TatwoWebMCPRenderProcessHandler final
         "__tatwoWebMCP",
         CefV8Value::CreateBool(true),
         V8_PROPERTY_ATTRIBUTE_READONLY);
-    const bool context_installed = document->SetValue(
+    // W3C WebMCP surface is navigator.modelContext; document.modelContext stays as the
+    // TATWO-internal alias. When Chromium ships a native navigator.modelContext that
+    // refuses SetValue, take it over with defineProperty so pages always reach TATWO.
+    const bool document_installed = document->SetValue(
         "modelContext",
         model_context,
         V8_PROPERTY_ATTRIBUTE_READONLY);
+    CefRefPtr<CefV8Value> navigator =
+        global ? global->GetValue("navigator") : nullptr;
+    bool navigator_installed = navigator && navigator->IsObject() &&
+        navigator->SetValue(
+            "modelContext",
+            model_context,
+            V8_PROPERTY_ATTRIBUTE_READONLY);
+    if (!navigator_installed && document_installed) {
+      frame->ExecuteJavaScript(
+          "try{Object.defineProperty(navigator,'modelContext',"
+          "{value:document.modelContext,configurable:true,writable:false});}"
+          "catch(e){}",
+          frame->GetURL(),
+          0);
+      navigator_installed = true;  // best effort; the marker below lets pages verify
+    }
+    const bool context_installed = document_installed && navigator_installed;
     if (!register_installed || !unregister_installed ||
         !marker_installed || !context_installed) {
       return;
@@ -3077,6 +3567,12 @@ class TatwoWebMCPRenderProcessHandler final
       CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefFrame> frame,
       CefRefPtr<CefV8Context> context) override {
+#pragma mark - W57c Release password references with their document
+    password_renderer_.Release(browser, context);
+#pragma mark - W57c End
+#pragma mark - W58
+    ai_login_renderer_.Release(browser, context);
+#pragma mark - W58 End
     if (!browser || !frame || !frame->IsMain()) {
       return;
     }
@@ -3104,6 +3600,12 @@ class TatwoWebMCPRenderProcessHandler final
       CefRefPtr<CefFrame> frame,
       CefProcessId source_process,
       CefRefPtr<CefProcessMessage> message) override {
+#pragma mark - W57c Dedicated renderer dispatch before WebMCP
+    if (password_renderer_.Receive(browser, frame, source_process, message)) return true;
+#pragma mark - W57c End
+#pragma mark - W58
+    if (ai_login_renderer_.Receive(browser, frame, source_process, message)) return true;
+#pragma mark - W58 End
     if (source_process != PID_BROWSER || !browser || !frame ||
         !frame->IsMain() || !message ||
         message->GetName() != kWebMCPInvokeMessage) {
@@ -3323,6 +3825,12 @@ class TatwoWebMCPRenderProcessHandler final
   }
 
   std::map<std::string, Tool> tools_;
+#pragma mark - W57c Renderer-owned, never process-global credential state
+  W57cPasswordRenderer password_renderer_;
+#pragma mark - W57c End
+#pragma mark - W58
+  W58AgentLoginRenderer ai_login_renderer_;
+#pragma mark - W58 End
   IMPLEMENT_REFCOUNTING(TatwoWebMCPRenderProcessHandler);
 };
 
@@ -3389,6 +3897,16 @@ class TatwoBrowserProcessApp final : public CefApp,
     for (const char *switch_name : kDeniedHostSwitches) {
       command_line->RemoveSwitch(switch_name);
     }
+    // W60b: Chromium treats this as a soft process-reuse hint; site isolation
+    // can exceed it. The actual hard browser budget lives above the bridge.
+    command_line->RemoveSwitch("renderer-process-limit");
+    const int renderer_limit = g_renderer_process_limit.load();
+    if (renderer_limit > 0) {
+      command_line->AppendSwitchWithValue("renderer-process-limit",
+                                         std::to_string(renderer_limit));
+    }
+    // Do not enable process-per-site: it broadens same-site failure/contention
+    // sharing with unmeasured benefit here. Never disable site isolation.
     command_line->AppendSwitch("disable-background-networking");
     command_line->AppendSwitch("disable-breakpad");
     command_line->AppendSwitch("disable-component-update");
@@ -3422,9 +3940,9 @@ class TatwoBrowserProcessApp final : public CefApp,
     AppendCEFEmbeddingTelemetryLine(
         [NSString stringWithFormat:
             @"phase=helper_process event=launch role=%@ "
-             "restartCount=%llu",
+             "launchCount=%llu countScope=role launchMeaning=attempt_not_restart",
             helper.token,
-            launch_count - 1]);
+            launch_count]);
   }
 
   void OnScheduleMessagePumpWork(int64_t delay_ms) override {
@@ -3619,7 +4137,7 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
           request->GetResourceType());
     }
     if (URLHasCredentials(request_url) ||
-        !IsAllowedURLString(request_url) ||
+        !IsActorURLAllowed(policy_, request_url) ||
         local_deny) {
       if (is_main_frame) {
         LogBrowserNavigationTrace(
@@ -3650,7 +4168,7 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
     if (is_main_frame) {
       LogBrowserNavigationTrace(@"main_resource_allowed", 0, true);
     }
-    if (URLHostIsIPAddress(request_url)) {
+    if (URLHostIsIPAddress(request_url) && IsAllowedURLString(request_url)) {
       return RV_CONTINUE;
     }
 
@@ -3663,10 +4181,31 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
     }
     __weak TatwoCEFBrowserView *weak_owner = owner_;
     const ResourceErrorContext error_context = error_context_;
+    const bool human = policy_.human;
     dispatch_async(
         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
           const PublicAddressResult result =
               ResolvePublicAddressResult(request_url);
+          if (human && (result == PublicAddressResult::kNonPublic ||
+                        !IsAllowedURLString(request_url))) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+              TatwoCEFBrowserView *owner = weak_owner;
+              if (!owner || !IsActiveMountCallback(owner, error_context.mount_generation, @"private_network_request") ||
+                  !ActorRequestPolicy(owner).human ||
+                  !error_context.epoch->IsCurrent(error_context.generation) ||
+                  !owner.onPrivateNetworkRequested) {
+                CompletePendingResourceDecision(decision_id, false);
+                return;
+              }
+              owner.onPrivateNetworkRequested(CanonicalHost(request_url), ^(BOOL allowed) {
+                const bool current = IsActiveMountCallback(weak_owner, error_context.mount_generation, @"private_network_decision") &&
+                    ActorRequestPolicy(weak_owner).human &&
+                    error_context.epoch->IsCurrent(error_context.generation);
+                CompletePendingResourceDecision(decision_id, allowed && current);
+              });
+            });
+            return;
+          }
           const bool allow = result == PublicAddressResult::kPublic;
           if (!allow && is_main_frame) {
             const bool dns_failure = result == PublicAddressResult::kDNSFailure;
@@ -3690,7 +4229,7 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
     const bool local_deny =
         IsDeniedByLocalHostList(policy_, redirect_url);
     if (URLHasCredentials(redirect_url) ||
-        !IsAllowedURLString(redirect_url) ||
+        !IsActorURLAllowed(policy_, redirect_url) ||
         local_deny) {
       if (IsMainFrameRequest(request)) {
         PublishResourceError(owner_, error_context_,
@@ -3715,6 +4254,31 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
   IMPLEMENT_REFCOUNTING(TatwoResourceRequestHandler);
 };
 
+// Metadata callbacks are bound to the exact native mount and navigation.
+class TatwoFaviconCallback final : public CefDownloadImageCallback {
+ public:
+  TatwoFaviconCallback(TatwoCEFBrowserView *owner, uint64_t mount,
+                       uint64_t generation, NSString *url)
+      : owner_(owner), mount_(mount), generation_(generation), url_(url) {}
+  void OnDownloadImageFinished(const CefString &, int status, CefRefPtr<CefImage> image) override {
+    TatwoCEFBrowserView *owner = owner_;
+    if (!IsActiveMountCallback(owner, mount_, @"favicon") ||
+        owner.navigationGeneration != generation_ || ![owner.currentURLString isEqualToString:url_] ||
+        status >= 400 || !image || image->IsEmpty()) return;
+    int width = 0, height = 0;
+    auto png = image->GetAsPNG(1.0, true, width, height);
+    if (!png || png->GetSize() > 256 * 1024) return;
+    NSMutableData *data = [NSMutableData dataWithLength:png->GetSize()];
+    png->GetData(data.mutableBytes, data.length, 0);
+    if (owner.pageMetadataHandler) owner.pageMetadataHandler(url_, generation_, nil, data);
+  }
+ private:
+  __weak TatwoCEFBrowserView *owner_;
+  uint64_t mount_, generation_;
+  NSString *url_;
+  IMPLEMENT_REFCOUNTING(TatwoFaviconCallback);
+};
+
 class TatwoClient final : public CefClient,
                           public CefDevToolsMessageObserver,
                           public CefDisplayHandler,
@@ -3722,6 +4286,14 @@ class TatwoClient final : public CefClient,
                           public CefLifeSpanHandler,
                           public CefLoadHandler,
                           public CefPermissionHandler,
+#pragma mark - W57d
+                          public CefDialogHandler,
+#pragma mark - W57d End
+#pragma mark - W57a
+                          public CefContextMenuHandler,
+                          public CefFindHandler,
+                          public CefKeyboardHandler,
+#pragma mark - W57a end
                           public CefRequestHandler {
  public:
   explicit TatwoClient(TatwoCEFBrowserView *owner,
@@ -3736,6 +4308,179 @@ class TatwoClient final : public CefClient,
     return this;
   }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+
+#pragma mark - W57d
+  CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser, FileDialogMode mode,
+      const CefString &title, const CefString &default_file_path,
+      const std::vector<CefString> &accept_filters,
+      const std::vector<CefString> &accept_extensions,
+      const std::vector<CefString> &accept_descriptions,
+      CefRefPtr<CefFileDialogCallback> callback) override;
+  void OnFullscreenModeChange(CefRefPtr<CefBrowser> browser, bool fullscreen) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!IsActiveMountCallback(owner_, mount_generation_, @"fullscreen")) return;
+    if (fullscreen && (!ActorRequestPolicy(owner_).human || !owner_.onFullscreenModeChange ||
+        !owner_.window || owner_.isHiddenOrHasHiddenAncestor)) {
+      browser->GetHost()->ExitFullscreen(true);
+      return;
+    }
+    if (owner_.onFullscreenModeChange) owner_.onFullscreenModeChange(fullscreen);
+  }
+  void W57dCancel();
+  void W57dDownloadUpdate(CefRefPtr<CefDownloadItem> item);
+  CefRefPtr<CefFileDialogCallback> file_dialog_callback_;
+  uint64_t file_dialog_serial_ = 0;
+  uint64_t web_features_serial_ = 0;
+  bool pdf_print_pending_ = false;
+  NSString *pdf_download_url_;
+  NSString *pdf_download_path_;
+  uint32_t pdf_download_id_ = 0;
+  void (^pdf_download_completion_)(NSString * _Nullable) = nil;
+#pragma mark - W57d End
+
+#pragma mark - W57a
+  CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
+  CefRefPtr<CefFindHandler> GetFindHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent &event,
+                    CefEventHandle os_event, bool *is_keyboard_shortcut) override {
+#pragma mark - W57d
+    // Synthetic agent key events never invoke host menus or native dialogs.
+    if (os_event && ActorRequestPolicy(owner_).human && event.type == KEYEVENT_RAWKEYDOWN) {
+      if (event.windows_key_code == 27 && browser->GetHost()->IsFullscreen()) {
+        [owner_ exitContentFullscreen];
+        return true; // Fullscreen has priority even when a form field has focus.
+      }
+      if ((event.modifiers & EVENTFLAG_COMMAND_DOWN) &&
+          !(event.modifiers & (EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN))) {
+        const bool shift = event.modifiers & EVENTFLAG_SHIFT_DOWN;
+        NSString *kind = nil;
+        if (event.windows_key_code == 80) kind = shift ? @"printPDF" : @"print";
+        else if (!shift) {
+          switch (event.windows_key_code) {
+            case 76: kind = @"focusAddress"; break;
+            case 84: kind = @"newTab"; break;
+            case 87: kind = @"closeTab"; break;
+            case 82: kind = @"reload"; break;
+          }
+        }
+        if (kind && owner_.onDailyShortcut) {
+          if (browser->GetHost()->IsFullscreen()) [owner_ exitContentFullscreen];
+          if (is_keyboard_shortcut) *is_keyboard_shortcut = true;
+          owner_.onDailyShortcut(kind);
+          return true; // Do not send host shortcuts to page JavaScript.
+        }
+      }
+    }
+#pragma mark - W57d End
+    if (!ActorRequestPolicy(owner_).human || event.type != KEYEVENT_RAWKEYDOWN) return false;
+    if (event.windows_key_code == 27 && event.modifiers == 0 && !event.focus_on_editable_field) {
+      // W57a-fix: the host decides (close the find bar first, else stop loading).
+      if (owner_.onDailyShortcut) { owner_.onDailyShortcut(@"escape"); return true; }
+      browser->StopLoad(); return true;
+    }
+    if (!(event.modifiers & EVENTFLAG_COMMAND_DOWN) ||
+        (event.modifiers & (EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN))) return false;
+    const int key = event.windows_key_code;
+    const bool shift = event.modifiers & EVENTFLAG_SHIFT_DOWN;
+    const bool shortcut = (key == 84 && shift) || key == 187 ||
+        (!shift && (key == 219 || key == 221 || key == 70 || key == 189 || (key >= 48 && key <= 57)));
+#pragma mark - W57d
+    // Keep W57a's browser shortcuts ahead of app-wide menu equivalents.
+    // Other app commands go to AppKit before JS, with no sendEvent recursion.
+    // Unclaimed editing keys and Tab retain Chromium's normal behavior.
+    if (!shortcut && os_event &&
+        [NSApp.mainMenu performKeyEquivalent:(__bridge NSEvent *)os_event]) return true;
+#pragma mark - W57d End
+    if (!shortcut || !os_event) return false;
+    // Native CEF input does not necessarily reach SwiftUI key equivalents. The callback
+    // enters the same focus-scoped actions as the hidden Buttons; no menu recursion.
+    if (!owner_.onDailyShortcut) return false;
+    NSString *kind = nil;
+    if (key == 84) kind = @"reopen";
+    else if (key == 219) kind = @"back";
+    else if (key == 221) kind = @"forward";
+    else if (key == 70) kind = @"find";
+    else if (key == 187) kind = @"zoomIn";
+    else if (key == 189) kind = @"zoomOut";
+    else if (key == 48) kind = @"zoomReset";
+    else kind = [NSString stringWithFormat:@"tab%d", key - 48];
+    owner_.onDailyShortcut(kind);
+    return true;
+  }
+  void OnFindResult(CefRefPtr<CefBrowser> browser, int identifier, int count,
+                    const CefRect &selection, int active, bool final_update) override {
+    if (ActorRequestPolicy(owner_).human && owner_.onFindResult)
+      owner_.onFindResult(count, active);
+  }
+  void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model) override {
+    model->Clear();
+    if (!owner_ || owner_.browserActor == TatwoCEFBrowserActorAgent || owner_.agentControlled) return;
+    if (!params->GetLinkUrl().empty()) {
+      model->AddItem(26501, "在新分頁開啟"); model->AddItem(26502, "拷貝連結");
+    }
+    if (params->GetMediaType() == CM_MEDIATYPE_IMAGE) {
+      model->AddItem(26503, "拷貝圖片網址"); model->AddItem(26504, "另存圖片…");
+    }
+    if (params->IsEditable()) {
+      model->AddItem(26505, "剪下"); model->AddItem(26506, "拷貝");
+      model->AddItem(26507, "貼上"); model->AddItem(26508, "全選");
+    } else if (!params->GetSelectionText().empty()) {
+      model->AddItem(26506, "拷貝");
+    }
+    if (!params->GetSelectionText().empty()) {
+      NSString *title = [NSString stringWithFormat:@"用 %@ 搜尋", owner_.contextSearchEngineTitle ?: @"Google"];
+      model->AddItem(26509, ToCefString(title));
+    }
+    model->AddSeparator();
+    model->AddItem(26510, "返回"); model->SetEnabled(26510, browser->CanGoBack());
+    model->AddItem(26511, "前進"); model->SetEnabled(26511, browser->CanGoForward());
+    model->AddItem(26512, "重新載入");
+#pragma mark - W57d
+    model->AddSeparator();
+    model->AddItem(26513, "列印…");
+    model->AddItem(26514, "列印備援：PDF → 系統預覽");
+    NSString *page = FromCefString(browser->GetMainFrame()->GetURL());
+    if ([[NSURL URLWithString:page].path.pathExtension.lowercaseString isEqualToString:@"pdf"])
+      model->AddItem(26515, "下載 PDF 並用系統預覽開啟");
+#pragma mark - W57d End
+  }
+  bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefContextMenuParams> params, int command, EventFlags flags) override {
+#pragma mark - W57d
+    if (command >= 26513 && command <= 26515) {
+      if (ActorRequestPolicy(owner_).human && owner_.onDailyShortcut)
+        owner_.onDailyShortcut(command == 26513 ? @"print" : command == 26514 ? @"printPDF" : @"openPDF");
+      return true;
+    }
+#pragma mark - W57d End
+    if (!ActorRequestPolicy(owner_).human || !owner_.onContextMenuAction) return true;
+    NSString *kind = nil, *value = @"";
+    switch (command) {
+      case 26501: kind = @"open"; value = FromCefString(params->GetLinkUrl()); break;
+      case 26502: kind = @"copyURL"; value = FromCefString(params->GetLinkUrl()); break;
+      case 26503: kind = @"copyURL"; value = FromCefString(params->GetSourceUrl()); break;
+      case 26504: kind = @"download"; value = FromCefString(params->GetSourceUrl()); break;
+      case 26505: kind = @"cut"; break;
+      case 26506: kind = @"copy"; value = FromCefString(params->GetSelectionText()); break;
+      case 26507: kind = @"paste"; break;
+      case 26508: kind = @"selectAll"; break;
+      case 26509: kind = @"search"; value = FromCefString(params->GetSelectionText()); break;
+      case 26510: kind = @"back"; break;
+      case 26511: kind = @"forward"; break;
+      case 26512: kind = @"reload"; break;
+      default: return false;
+    }
+    if ([kind isEqualToString:@"open"]) {
+      auto policy = ActorRequestPolicy(owner_);
+      if (URLHasCredentials(value) || !IsActorURLAllowed(policy, value) || IsDeniedByLocalHostList(policy, value)) return true;
+    }
+    owner_.onContextMenuAction(kind, value);
+    return true;
+  }
+#pragma mark - W57a end
 
   void InvalidateResourceErrors() { resource_epoch_->Advance(); }
   void DetachOwner() { InvalidateResourceErrors(); owner_ = nil; }
@@ -3811,6 +4556,7 @@ class TatwoClient final : public CefClient,
   bool CanDownload(CefRefPtr<CefBrowser> browser,
                    const CefString &url,
                    const CefString &request_method) override {
+    if (ActorRequestPolicy(owner_).human) return true;
     PublishVisibleError(owner_,
                         kDownloadBlockedError,
                         TatwoCEFBrowserErrorKindSecurity,
@@ -3819,10 +4565,50 @@ class TatwoClient final : public CefClient,
     return false;
   }
 
+  bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefDownloadItem> item, const CefString &suggested_name,
+      CefRefPtr<CefBeforeDownloadCallback> callback) override {
+    if (!ActorRequestPolicy(owner_).human) return true;
+    NSString *name = FromCefString(suggested_name).lastPathComponent;
+    if (!name.length || [name isEqualToString:@"."] || [name isEqualToString:@".."]) name = @"download";
+    // Exclusive reservation prevents overwriting existing files or following a
+    // pre-existing symlink. CEF may write only this newly reserved destination.
+    NSString *root = NSSearchPathForDirectoriesInDomains(NSDownloadsDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *path = [root stringByAppendingPathComponent:name];
+    int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+      name = [NSString stringWithFormat:@"%@-%@", NSUUID.UUID.UUIDString, name];
+      path = [root stringByAppendingPathComponent:name];
+      fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    }
+    if (fd < 0) return true;
+    close(fd);
+#pragma mark - W57d
+    if (pdf_download_completion_ && !pdf_download_path_ &&
+        [pdf_download_url_ isEqualToString:FromCefString(item->GetOriginalUrl())]) {
+      pdf_download_id_ = item->GetId();
+      pdf_download_path_ = path;
+    }
+#pragma mark - W57d End
+    callback->Continue(ToCefString(path), false);
+    return true;
+  }
+
   void OnDownloadUpdated(
       CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefDownloadItem> download_item,
       CefRefPtr<CefDownloadItemCallback> callback) override {
+#pragma mark - W57d
+    W57dDownloadUpdate(download_item);
+#pragma mark - W57d End
+    if (ActorRequestPolicy(owner_).human) {
+      NSString *filename = FromCefString(download_item->GetFullPath()).lastPathComponent;
+      if (!filename.length) filename = FromCefString(download_item->GetSuggestedFileName()).lastPathComponent;
+      NSString *identifier = [NSString stringWithFormat:@"%d-%u", browser->GetIdentifier(), download_item->GetId()];
+      if (owner_.onDownloadProgress) owner_.onDownloadProgress(identifier, filename,
+          download_item->GetReceivedBytes(), download_item->GetTotalBytes(), download_item->IsComplete());
+      return;
+    }
     callback->Cancel();
     PublishVisibleError(owner_,
                         kDownloadBlockedError,
@@ -3850,12 +4636,11 @@ class TatwoClient final : public CefClient,
     if (IsMainFrameRequest(request) && !is_redirect) {
       InvalidateResourceErrors();
     }
-    BrowserRequestPolicySnapshot policy;
-    policy.host_deny_list = g_host_deny_list;
+    BrowserRequestPolicySnapshot policy = ActorRequestPolicy(owner_);
     const bool local_deny =
         IsDeniedByLocalHostList(policy, request_url);
     if (URLHasCredentials(request_url) ||
-        !IsAllowedURLString(request_url) ||
+        !IsActorURLAllowed(policy, request_url) ||
         local_deny) {
       if (frame && frame->IsMain()) {
         LogBrowserNavigationTrace(
@@ -3891,11 +4676,16 @@ class TatwoClient final : public CefClient,
                         WindowOpenDisposition target_disposition,
                         bool user_gesture) override {
     NSString *url = FromCefString(target_url);
-    BrowserRequestPolicySnapshot policy;
-    policy.host_deny_list = g_host_deny_list;
+    BrowserRequestPolicySnapshot policy = ActorRequestPolicy(owner_);
     const bool allow = user_gesture && !URLHasCredentials(url) &&
-        IsAllowedURLString(url) && !IsDeniedByLocalHostList(policy, url);
+        IsActorURLAllowed(policy, url) && !IsDeniedByLocalHostList(policy, url);
     if (!allow) LogBrowserLifecycle(@"popup_blocked");
+#pragma mark - W57a
+    if (policy.human) {
+      if (allow && owner_.onPopupRequested) owner_.onPopupRequested(url);
+      return true; // handled: background registry tab, no native popup or opener navigation
+    }
+#pragma mark - W57a end
     // Allowed new-window requests still pass through OnBeforePopup. A rejected
     // popup must not replace the opener's valid document with an error overlay.
     return !allow;
@@ -3909,7 +4699,7 @@ class TatwoClient final : public CefClient,
       bool is_download,
       const CefString &request_initiator,
       bool &disable_default_handling) override {
-    if (is_download) {
+    if (is_download && !ActorRequestPolicy(owner_).human) {
       disable_default_handling = true;
       PublishVisibleError(owner_,
                           kDownloadBlockedError,
@@ -3917,8 +4707,7 @@ class TatwoClient final : public CefClient,
                           ERR_BLOCKED_BY_CLIENT,
                           TatwoCEFBrowserPhaseBlockedBySecurity);
     }
-    BrowserRequestPolicySnapshot policy;
-    policy.host_deny_list = g_host_deny_list;
+    BrowserRequestPolicySnapshot policy = ActorRequestPolicy(owner_);
     return new TatwoResourceRequestHandler(
         owner_,
         FromCefString(request_initiator),
@@ -3987,6 +4776,22 @@ class TatwoClient final : public CefClient,
       const CefString &requesting_origin,
       uint32_t requested_permissions,
       CefRefPtr<CefMediaAccessCallback> callback) override {
+    if (ActorRequestPolicy(owner_).human && owner_.onPermissionRequested) {
+      NSMutableArray<NSString *> *names = [NSMutableArray array];
+      if (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE) [names addObject:@"相機"];
+      if (requested_permissions & CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE) [names addObject:@"麥克風"];
+      if (requested_permissions & ~(CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE | CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE)) { callback->Cancel(); return true; }
+      __weak TatwoCEFBrowserView *weak_owner = owner_;
+      const uint64_t mount = mount_generation_;
+      const uint64_t generation = owner_.navigationGeneration;
+      owner_.onPermissionRequested(FromCefString(requesting_origin), [names componentsJoinedByString:@"／"], ^(BOOL decision) {
+        TatwoCEFBrowserView *owner = weak_owner;
+        const bool allowed = decision && IsPermissionReplyLive(owner, mount, generation);
+        callback->Continue(allowed ? requested_permissions : 0);
+        ScheduleImmediateCEFMessagePumpWork(@"permission_decision");
+      });
+      return true;
+    }
     callback->Cancel();
     PublishVisibleError(owner_,
                         kPermissionBlockedError,
@@ -4002,6 +4807,24 @@ class TatwoClient final : public CefClient,
       const CefString &requesting_origin,
       uint32_t requested_permissions,
       CefRefPtr<CefPermissionPromptCallback> callback) override {
+    if (ActorRequestPolicy(owner_).human && owner_.onPermissionRequested) {
+      NSMutableArray<NSString *> *names = [NSMutableArray array];
+      if (requested_permissions & CEF_PERMISSION_TYPE_CAMERA_STREAM) [names addObject:@"相機"];
+      if (requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM) [names addObject:@"麥克風"];
+      if (requested_permissions & CEF_PERMISSION_TYPE_GEOLOCATION) [names addObject:@"位置"];
+      if (requested_permissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) [names addObject:@"通知"];
+      if (requested_permissions & ~(CEF_PERMISSION_TYPE_CAMERA_STREAM | CEF_PERMISSION_TYPE_MIC_STREAM | CEF_PERMISSION_TYPE_GEOLOCATION | CEF_PERMISSION_TYPE_NOTIFICATIONS)) { callback->Continue(CEF_PERMISSION_RESULT_DENY); return true; }
+      __weak TatwoCEFBrowserView *weak_owner = owner_;
+      const uint64_t mount = mount_generation_;
+      const uint64_t generation = owner_.navigationGeneration;
+      owner_.onPermissionRequested(FromCefString(requesting_origin), [names componentsJoinedByString:@"／"], ^(BOOL decision) {
+        TatwoCEFBrowserView *owner = weak_owner;
+        const bool allowed = decision && IsPermissionReplyLive(owner, mount, generation);
+        callback->Continue(allowed ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+        ScheduleImmediateCEFMessagePumpWork(@"permission_decision");
+      });
+      return true;
+    }
     callback->Continue(CEF_PERMISSION_RESULT_DENY);
     PublishVisibleError(owner_,
                         kPermissionBlockedError,
@@ -4058,9 +4881,36 @@ class TatwoClient final : public CefClient,
           http_status_code,
           false);
       PublishMainFrameLoadEnd(owner, frame, http_status_code);
+#pragma mark - W57c Scan only after human main_frame_load_end
+      W57cLoadEnd(owner, frame, http_status_code);
+#pragma mark - W57c End
+#pragma mark - W58
+      W58LoadEnd(owner, frame, http_status_code);
+#pragma mark - W58 End
       RequestBrowserCompositorDisplay(
           owner, browser, @"main_frame_load_end");
     }
+  }
+
+  void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
+    TatwoCEFBrowserView *owner = owner_;
+    if (!IsActiveMountCallback(owner, mount_generation_, @"title") || !owner.pageMetadataHandler) return;
+    NSString *url = owner.currentURLString;
+    if (url.length) owner.pageMetadataHandler(url, owner.navigationGeneration, FromCefString(title), nil);
+  }
+
+  void OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
+                         const std::vector<CefString> &urls) override {
+    TatwoCEFBrowserView *owner = owner_;
+    if (!IsActiveMountCallback(owner, mount_generation_, @"favicon_url") ||
+        !owner.pageMetadataHandler || urls.empty() || !owner.currentURLString.length) return;
+    NSString *imageURL = FromCefString(urls.front());
+    const auto policy = ActorRequestPolicy(owner);
+    if (URLHasCredentials(imageURL) || !IsActorURLAllowed(policy, imageURL) ||
+        IsDeniedByLocalHostList(policy, imageURL)) return;
+    // Use this browser's secured request context, not URLSession or a global fetch.
+    browser->GetHost()->DownloadImage(urls.front(), true, 32, false,
+        new TatwoFaviconCallback(owner, mount_generation_, owner.navigationGeneration, owner.currentURLString));
   }
 
   void OnAddressChange(CefRefPtr<CefBrowser> browser,
@@ -4123,9 +4973,19 @@ class TatwoClient final : public CefClient,
             owner_, mount_generation_, @"renderer_terminated")) {
       return;
     }
+#pragma mark - W60
+    W60RecordRendererTermination(browser, status, error_code, mount_generation_);
+    W57dInvalidate(owner_); // Only the active mount may revoke current UI work.
+#pragma mark - W60 End
     StopLoadingActiveMessagePump(
         owner_, mount_generation_, @"renderer_terminated");
     LogRendererTermination(status, error_code);
+#pragma mark - W57c Renderer failure revokes pending credentials
+    W57cInvalidate(owner_, false, false);
+#pragma mark - W57c End
+#pragma mark - W58
+    W58Invalidate(owner_, false);
+#pragma mark - W58 End
     InvalidateWebMCPForRendererTermination(owner_);
     InvalidateSecurityDocumentEpoch(
         owner_, @"renderer_terminated");
@@ -4196,6 +5056,10 @@ class TatwoClient final : public CefClient,
 };
 
 struct BrowserState {
+#pragma mark - W57a
+  std::string find_text;
+  bool find_match_case = false;
+#pragma mark - W57a end
   CefRefPtr<CefBrowserHost> agent_pointer_host;
   CefMouseEvent agent_pointer_event;
   CefRefPtr<CefBrowserHost> agent_key_host;
@@ -4236,6 +5100,16 @@ struct BrowserState {
   NSUInteger close_retry_attempt = 0;
   bool document_epoch_valid = false;
   bool navigation_in_flight = false;
+#pragma mark - W57c Navigation-bound password capability (no values)
+  NSString *password_assist_token;
+  bool password_assist_scan_pending = false;
+  int password_assist_status = 0;
+#pragma mark - W57c End
+#pragma mark - W58 Native metadata only; secret lifetime ends at renderer dispatch
+  NSString *ai_login_token, *ai_login_form, *ai_login_error, *ai_login_title, *ai_login_origin;
+  NSString *ai_login_phase = @"idle";
+  bool ai_login_awaiting_load = false;
+#pragma mark - W58 End
   NSMutableDictionary<NSString *, NSDictionary *> *webmcp_tools;
   NSMutableDictionary<NSString *, NSDictionary *> *pending_webmcp_tools;
   NSMutableArray<TatwoCEFBrowserView *> *popup_views;
@@ -4256,6 +5130,181 @@ BrowserState *State(TatwoCEFBrowserView *view) {
       ? nullptr
       : static_cast<BrowserState *>(view->_cefState);
 }
+
+#pragma mark - W57c Browser-side credential gates
+bool W57cHumanPage(TatwoCEFBrowserView *view, BrowserState *state) {
+  return NSThread.isMainThread && view && state && state->browser && !state->close_requested &&
+      view.browserActor == TatwoCEFBrowserActorHuman && !view.agentControlled &&
+      view.passwordAssistEnabled;
+}
+
+void W57cInvalidate(TatwoCEFBrowserView *view, bool reload, bool preserve_submission) {
+  BrowserState *state = State(view);
+  if (!state) return;
+  state->password_assist_token = nil;
+  state->password_assist_scan_pending = false;
+  if (state->browser && state->browser->GetMainFrame()) {
+    auto message = CefProcessMessage::Create(kPasswordConfigureMessage);
+    auto args = message->GetArgumentList();
+    args->SetString(0, std::to_string(state->navigation_generation));
+    args->SetString(1, "");
+    args->SetString(2, "");
+    args->SetString(3, "");
+    args->SetBool(4, false);
+    args->SetBool(5, false);
+    state->browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
+  }
+  if (view.onPasswordAssistInvalidated) view.onPasswordAssistInvalidated(reload, preserve_submission);
+}
+
+void W57cLoadEnd(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, int status) {
+  BrowserState *state = State(view);
+  if (!W57cHumanPage(view, state) || !frame || !frame->IsMain() ||
+      state->navigation_generation == 0 || state->navigation_in_flight) return;
+  NSString *url = FromCefString(frame->GetURL());
+  NSString *origin = OriginForURLString(url);
+  if (origin.length == 0 || ![origin hasPrefix:@"https://"] ||
+      ![OriginForURLString(state->committed_url) isEqualToString:origin]) {
+    W57cInvalidate(view, false, false);
+    return;
+  }
+  // Duplicate CEF load-end notifications cannot reinstall listeners or repeat a prompt.
+  if (state->password_assist_token.length) return;
+  state->password_assist_token = NSUUID.UUID.UUIDString;
+  state->password_assist_scan_pending = true;
+  state->password_assist_status = status;
+  auto message = CefProcessMessage::Create(kPasswordConfigureMessage);
+  auto args = message->GetArgumentList();
+  args->SetString(0, std::to_string(state->navigation_generation));
+  args->SetString(1, ToCefString(state->password_assist_token));
+  args->SetString(2, ToCefString(origin));
+  args->SetString(3, frame->GetURL());
+  args->SetBool(4, true); // Never sent for agent actor or agentControlled.
+  args->SetBool(5, true);
+  frame->SendProcessMessage(PID_RENDERER, message);
+}
+
+bool W57cBrowserMessage(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame,
+                       CefRefPtr<CefProcessMessage> message) {
+  if (!message || message->GetName() != kPasswordEventMessage) return false;
+  BrowserState *state = State(view);
+  auto args = message->GetArgumentList();
+  if (!W57cHumanPage(view, state) || !frame || !frame->IsMain() || !args ||
+      args->GetSize() < 5 || state->navigation_in_flight || !state->password_assist_token.length ||
+      args->GetString(0).ToString() != std::to_string(state->navigation_generation) ||
+      args->GetString(1) != ToCefString(state->password_assist_token)) return true;
+  NSString *origin = FromCefString(args->GetString(2));
+  if (![origin isEqualToString:OriginForURLString(state->committed_url)] ||
+      ![origin isEqualToString:OriginForURLString(FromCefString(frame->GetURL()))]) return true;
+  const auto kind = args->GetString(3);
+  if (kind == "scanned" && args->GetSize() == 5) {
+    if (!state->password_assist_scan_pending) return true;
+    state->password_assist_scan_pending = false;
+    if (view.onPasswordAssistPageLoaded) view.onPasswordAssistPageLoaded(
+        origin, state->navigation_generation,
+        state->password_assist_status >= 200 && state->password_assist_status < 300,
+        args->GetString(4) != "0");
+  } else if (kind == "detected" && args->GetSize() == 8 && !state->password_assist_scan_pending) {
+    for (size_t i = 4; i < 8; ++i)
+      if (args->GetString(i).ToString().size() > 4096) return true;
+    if (view.onLoginFormDetected) view.onLoginFormDetected(
+        origin, FromCefString(args->GetString(4)), FromCefString(args->GetString(5)),
+        FromCefString(args->GetString(6)), FromCefString(args->GetString(7)));
+  } else if (kind == "submitted" && args->GetSize() == 6) {
+    if (args->GetString(4).ToString().size() > 4096 ||
+        args->GetString(5).ToString().size() > 16384) return true;
+    if (view.onCredentialSubmitted) view.onCredentialSubmitted(
+        origin, FromCefString(args->GetString(4)), FromCefString(args->GetString(5)));
+  }
+  return true;
+}
+#pragma mark - W57c End
+
+#pragma mark - W58 Native agent gates and next-load result
+bool W58AgentPage(TatwoCEFBrowserView *view, BrowserState *state) {
+  return NSThread.isMainThread && view && state && state->browser && !state->close_requested &&
+    view.browserActor == TatwoCEFBrowserActorAgent;
+}
+void W58Invalidate(TatwoCEFBrowserView *view, bool preserve_result) {
+  auto state = State(view);
+  if (!state) return;
+  state->ai_login_token = nil; state->ai_login_form = nil;
+  if (!preserve_result || !state->ai_login_awaiting_load) {
+    state->ai_login_awaiting_load = false;
+    state->ai_login_phase = @"idle"; state->ai_login_error = nil; state->ai_login_title = nil;
+    state->ai_login_origin = nil;
+  }
+  if (state->browser && state->browser->GetMainFrame()) {
+    auto message = CefProcessMessage::Create(kAILoginConfigure);
+    auto args = message->GetArgumentList();
+    for (int i = 0; i < 4; ++i) args->SetString(i, "");
+    args->SetInt(4, 2);
+    state->browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
+  }
+}
+bool W58Scan(TatwoCEFBrowserView *view, bool completed) {
+  auto state = State(view);
+  if (!W58AgentPage(view, state) || state->navigation_in_flight || state->navigation_generation == 0) return false;
+  auto frame = state->browser->GetMainFrame();
+  NSString *origin = OriginForURLString(state->committed_url);
+  if (!frame || !frame->IsValid() || ![origin hasPrefix:@"https://"] ||
+      ![origin isEqualToString:OriginForURLString(FromCefString(frame->GetURL()))]) return false;
+  if (completed && ![origin isEqualToString:state->ai_login_origin]) return false;
+  if (!completed) state->ai_login_origin = origin;
+  state->ai_login_token = NSUUID.UUID.UUIDString;
+  state->ai_login_form = nil;
+  state->ai_login_phase = completed ? @"checking" : @"preparing";
+  auto message = CefProcessMessage::Create(kAILoginConfigure);
+  auto args = message->GetArgumentList();
+  args->SetString(0, std::to_string(state->navigation_generation));
+  args->SetString(1, ToCefString(state->ai_login_token));
+  args->SetString(2, ToCefString(origin)); args->SetString(3, frame->GetURL());
+  args->SetInt(4, completed ? 1 : 0);
+  frame->SendProcessMessage(PID_RENDERER, message);
+  return true;
+}
+void W58LoadEnd(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, int status) {
+  auto state = State(view);
+  if (!W58AgentPage(view, state) || !frame || !frame->IsMain() || !state->ai_login_awaiting_load ||
+      state->ai_login_token.length) return;
+  if (![OriginForURLString(FromCefString(frame->GetURL())) isEqualToString:state->ai_login_origin]) {
+    state->ai_login_error = @"ai_login_origin_changed_do_not_replay"; state->ai_login_phase = @"failed";
+    state->ai_login_awaiting_load = false;
+    return;
+  }
+  if (status < 200 || status >= 300 || !W58Scan(view, true)) {
+    state->ai_login_error = @"ai_login_load_failed"; state->ai_login_phase = @"failed";
+    state->ai_login_awaiting_load = false;
+  }
+}
+bool W58BrowserMessage(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, CefRefPtr<CefProcessMessage> message) {
+  if (!message || message->GetName() != kAILoginEvent) return false;
+  auto state = State(view);
+  auto args = message->GetArgumentList();
+  if (!W58AgentPage(view, state) || !frame || !frame->IsMain() || !args || args->GetSize() != 6 ||
+      state->navigation_in_flight || !state->ai_login_token.length ||
+      args->GetString(0).ToString() != std::to_string(state->navigation_generation) ||
+      args->GetString(1) != ToCefString(state->ai_login_token) ||
+      ![OriginForURLString(state->committed_url) isEqualToString:OriginForURLString(FromCefString(frame->GetURL()))]) return true;
+  for (size_t i = 2; i < 6; ++i) if (args->GetString(i).ToString().size() > 4096) return true;
+  NSString *phase = FromCefString(args->GetString(2));
+  if (([phase isEqualToString:@"ready"] && ![state->ai_login_phase isEqualToString:@"preparing"]) ||
+      ([phase isEqualToString:@"complete"] && ![state->ai_login_phase isEqualToString:@"checking"])) return true;
+  NSString *error = FromCefString(args->GetString(4));
+  NSSet *errors = [NSSet setWithArray:@[@"ai_login_stale_page", @"ai_login_two_factor_required",
+    @"ai_login_rejected", @"ai_login_ambiguous_form", @"ai_login_no_form", @"ai_login_nonempty_form", @"ai_login_form_changed"]];
+  if (error.length) {
+    state->ai_login_error = [errors containsObject:error] ? error : @"ai_login_failed";
+    state->ai_login_phase = @"failed"; state->ai_login_awaiting_load = false;
+  } else if ([phase isEqualToString:@"ready"] && args->GetString(3) == "w58-login") {
+    state->ai_login_form = @"w58-login"; state->ai_login_phase = @"ready";
+  } else if ([phase isEqualToString:@"complete"]) {
+    state->ai_login_title = FromCefString(args->GetString(5));
+    state->ai_login_phase = @"complete"; state->ai_login_awaiting_load = false;
+  }
+  return true;
+}
+#pragma mark - W58 End
 
 BrowserState *CreateBrowserState(TatwoCEFBrowserView *view) {
   BrowserState *state = new BrowserState();
@@ -4286,6 +5335,13 @@ bool TatwoClient::OnBeforePopup(
   TatwoCEFBrowserView *opener = owner_;
   BrowserState *parent = State(opener);
   NSString *url = FromCefString(target_url);
+  if (ActorRequestPolicy(opener).human) {
+    BrowserRequestPolicySnapshot human_policy = ActorRequestPolicy(opener);
+    if (parent && !parent->close_requested && !URLHasCredentials(url) &&
+        IsActorURLAllowed(human_policy, url) && !IsDeniedByLocalHostList(human_policy, url) &&
+        opener.onPopupRequested) opener.onPopupRequested(url);
+    return true; // Swift owns new tabs; never spawn an unmanaged native window.
+  }
   const bool blank = url.length == 0 || [url isEqualToString:@"about:blank"];
   BrowserRequestPolicySnapshot policy;
   policy.host_deny_list = g_host_deny_list;
@@ -5264,6 +6320,12 @@ bool TatwoClient::OnProcessMessageReceived(
     return false;
   }
   const CefString message_name = message->GetName();
+#pragma mark - W57c Consume credentials before generic WebMCP handling
+  if (W57cBrowserMessage(owner, frame, message)) return true;
+#pragma mark - W57c End
+#pragma mark - W58
+  if (W58BrowserMessage(owner, frame, message)) return true;
+#pragma mark - W58 End
   CefRefPtr<CefListValue> arguments = message->GetArgumentList();
   if (message_name == kWebMCPCapabilityMessage) {
     if (arguments && arguments->GetBool(0)) {
@@ -5489,6 +6551,16 @@ uint64_t BeginNavigationFrameTelemetry(TatwoCEFBrowserView *view,
     return 0;
   }
   const uint64_t navigation_generation = ++state->navigation_generation;
+#pragma mark - W57d
+  W57dInvalidate(view);
+#pragma mark - W57d End
+#pragma mark - W57c Revoke old document before navigation, retain only submitted form navigation
+  W57cInvalidate(view, [reason isEqualToString:@"reload"],
+                 [reason isEqualToString:@"renderer_navigation"]);
+#pragma mark - W57c End
+#pragma mark - W58
+  W58Invalidate(view, [reason isEqualToString:@"renderer_navigation"]);
+#pragma mark - W58 End
   state->navigation_in_flight = true;
   if (state->client) {
     state->client->InvalidateResourceErrors();
@@ -5505,6 +6577,22 @@ uint64_t BeginNavigationFrameTelemetry(TatwoCEFBrowserView *view,
           state->mount_generation,
           navigation_generation]);
   return navigation_generation;
+}
+
+bool IsActiveMountCallback(TatwoCEFBrowserView *view,
+                           uint64_t expected_generation,
+                           NSString *event);
+
+// W45-fix: a late human permission reply is only honoured while the mount is live,
+// the page has not navigated, close has not been requested and the actor is still human.
+bool IsPermissionReplyLive(TatwoCEFBrowserView *view,
+                           uint64_t expected_mount,
+                           uint64_t expected_navigation_generation) {
+  if (!IsActiveMountCallback(view, expected_mount, @"permission_decision")) return false;
+  BrowserState *state = State(view);
+  if (state == nullptr || state->close_requested) return false;
+  return view.navigationGeneration == expected_navigation_generation &&
+         ActorRequestPolicy(view).human;
 }
 
 bool IsActiveMountCallback(TatwoCEFBrowserView *view,
@@ -5531,180 +6619,26 @@ bool IsActiveMountCallback(TatwoCEFBrowserView *view,
   return false;
 }
 
-void ArmLoadingActiveMessagePumpTimer(TatwoCEFBrowserView *view,
-                                      BrowserState *state,
-                                      uint64_t mount_generation,
-                                      uint64_t pump_generation);
-
+#pragma mark - W60 Loading lifecycle compatibility (no timer)
 void StopLoadingActiveMessagePump(TatwoCEFBrowserView *view,
                                   uint64_t expected_generation,
                                   NSString *reason) {
-  NSCAssert(NSThread.isMainThread,
-            @"CEF loading-active message pump must stop on the main thread");
-  if (!IsActiveMountCallback(
-          view, expected_generation, @"loading_active_pump_stop")) {
-    return;
-  }
+  NSCAssert(NSThread.isMainThread, @"CEF loading lifecycle is main-thread owned");
+  if (!IsActiveMountCallback(view, expected_generation, @"loading_active_pump_stop")) return;
   BrowserState *state = State(view);
-  NSTimer *timer = state->loading_active_pump_timer;
-  const bool was_active = state->loading_active_pump_gate.Stop();
-  if (timer != nil) {
-    [timer invalidate];
-    state->loading_active_pump_timer = nil;
-  }
-  if (!was_active && timer == nil) {
-    return;
-  }
-  AppendCEFEmbeddingTelemetryLine(
-      [NSString stringWithFormat:
-          @"phase=message_pump_loading_fallback event=stop "
-           "reason=%@ mountGeneration=%llu pumpGeneration=%llu "
-           "tickCount=%llu",
-          SanitizeTelemetryToken(reason, @"unknown"),
-          state->mount_generation,
-          state->loading_active_pump_gate.generation(),
-          state->loading_active_pump_gate.tick_count()]);
+  state->loading_active_pump_gate.Stop();
+  [state->loading_active_pump_timer invalidate];
+  state->loading_active_pump_timer = nil;
 }
 
 void StartLoadingActiveMessagePump(TatwoCEFBrowserView *view,
                                    uint64_t expected_generation,
                                    NSString *reason) {
-  NSCAssert(NSThread.isMainThread,
-            @"CEF loading-active message pump must start on the main thread");
-  if (!IsActiveMountCallback(
-          view, expected_generation, @"loading_active_pump_start")) {
-    return;
-  }
-  BrowserState *state = State(view);
-  if (!HasActiveBrowserPumpWork(state) || state->close_requested ||
-      !g_initialized.load() || g_shutdown.load()) {
-    return;
-  }
-  const bool was_active = state->loading_active_pump_gate.active();
-  const uint64_t pump_generation =
-      state->loading_active_pump_gate.Start();
-  if (!was_active) {
-    AppendCEFEmbeddingTelemetryLine(
-        [NSString stringWithFormat:
-            @"phase=message_pump_loading_fallback event=start "
-             "reason=%@ intervalMs=%lld mountGeneration=%llu "
-             "pumpGeneration=%llu tickCount=%llu",
-            SanitizeTelemetryToken(reason, @"unknown"),
-            kCEFLoadingActivePumpIntervalMilliseconds,
-            state->mount_generation,
-            pump_generation,
-            state->loading_active_pump_gate.tick_count()]);
-  }
-  ArmLoadingActiveMessagePumpTimer(
-      view, state, state->mount_generation, pump_generation);
+  // Call sites keep their lifecycle boundary, but must never start polling.
+  // Host API kicks and CEF scheduling, not isLoading, drive the message loop.
+  if (!IsActiveMountCallback(view, expected_generation, @"loading_active_pump_start")) return;
 }
-
-void ArmLoadingActiveMessagePumpTimer(TatwoCEFBrowserView *view,
-                                      BrowserState *state,
-                                      uint64_t mount_generation,
-                                      uint64_t pump_generation) {
-  NSCAssert(NSThread.isMainThread,
-            @"CEF loading-active message pump timer must arm on the main thread");
-  if (view == nil || state == nullptr || State(view) != state ||
-      state->loading_active_pump_timer != nil ||
-      !state->loading_active_pump_gate.CanTick(
-          pump_generation,
-          HasActiveBrowserPumpWork(state),
-          state->close_requested,
-          g_initialized.load(),
-          g_shutdown.load())) {
-    return;
-  }
-
-  __weak TatwoCEFBrowserView *weak_view = view;
-  NSTimeInterval interval =
-      static_cast<NSTimeInterval>(
-          kCEFLoadingActivePumpIntervalMilliseconds) /
-      1000.0;
-  NSTimer *timer =
-      [NSTimer timerWithTimeInterval:interval
-                             repeats:NO
-                               block:^(NSTimer *fired_timer) {
-        TatwoCEFBrowserView *active_view = weak_view;
-        if (!IsActiveMountCallback(
-                active_view,
-                mount_generation,
-                @"loading_active_pump_tick")) {
-          return;
-        }
-        BrowserState *active_state = State(active_view);
-        if (active_state->loading_active_pump_timer == fired_timer) {
-          active_state->loading_active_pump_timer = nil;
-        }
-        if (!active_state->loading_active_pump_gate.CanTick(
-                pump_generation,
-                HasActiveBrowserPumpWork(active_state),
-                active_state->close_requested,
-                g_initialized.load(),
-                g_shutdown.load())) {
-          const uint64_t stale_count =
-              g_loading_pump_stale_tick_drop_count.fetch_add(
-                  1, std::memory_order_relaxed) + 1;
-          AppendCEFEmbeddingTelemetryLine(
-              [NSString stringWithFormat:
-                  @"phase=message_pump_loading_fallback "
-                   "event=stale_tick_dropped mountGeneration=%llu "
-                   "expectedPumpGeneration=%llu activePumpGeneration=%llu "
-                   "staleTickDrops=%llu",
-                  mount_generation,
-                  pump_generation,
-                  active_state->loading_active_pump_gate.generation(),
-                  stale_count]);
-          if (active_state->loading_active_pump_gate.generation() == pump_generation) {
-            StopLoadingActiveMessagePump(
-                active_view, mount_generation, @"startup_or_loading_idle");
-          }
-          return;
-        }
-
-        active_state->loading_active_pump_gate.RecordTick();
-        const uint64_t tick_count =
-            active_state->loading_active_pump_gate.tick_count();
-        if (tick_count <= 64 || tick_count % 30 == 0) {
-          AppendCEFEmbeddingTelemetryLine(
-              [NSString stringWithFormat:
-                  @"phase=message_pump_loading_fallback event=tick "
-                   "intervalMs=%lld mountGeneration=%llu "
-                   "pumpGeneration=%llu tickCount=%llu",
-                  kCEFLoadingActivePumpIntervalMilliseconds,
-                  mount_generation,
-                  pump_generation,
-                  tick_count]);
-        }
-        RunCEFMessagePumpWorkOnMainThread();
-
-        if (!IsActiveMountCallback(
-                active_view,
-                mount_generation,
-                @"loading_active_pump_rearm")) {
-          return;
-        }
-        active_state = State(active_view);
-        if (active_state->loading_active_pump_gate.CanTick(
-                pump_generation,
-                HasActiveBrowserPumpWork(active_state),
-                active_state->close_requested,
-                g_initialized.load(),
-                g_shutdown.load())) {
-          ArmLoadingActiveMessagePumpTimer(
-              active_view,
-              active_state,
-              mount_generation,
-              pump_generation);
-        } else if (active_state->loading_active_pump_gate.generation() == pump_generation) {
-          StopLoadingActiveMessagePump(
-              active_view, mount_generation, @"startup_or_loading_idle");
-        }
-      }];
-  state->loading_active_pump_timer = timer;
-  [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
-  [NSRunLoop.mainRunLoop addTimer:timer forMode:NSEventTrackingRunLoopMode];
-}
+#pragma mark - W60 End
 
 void CompleteBrowserClose(TatwoCEFBrowserView *view, BrowserState *state);
 
@@ -6530,6 +7464,9 @@ bool TatwoClient::DoClose(CefRefPtr<CefBrowser> browser) {
 }
 
 void TatwoClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
+#pragma mark - W57d
+  W57dInvalidate(owner_);
+#pragma mark - W57d End
   CancelPendingBrowserOperations();
   CancelPendingWebMCPInvocations(@"webmcp_browser_closed");
   TatwoCEFBrowserView *owner = owner_;
@@ -6541,6 +7478,118 @@ void TatwoClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     }
   }
 }
+
+#pragma mark - W57d
+bool W57dCurrent(TatwoCEFBrowserView *view, uint64_t generation) {
+  return view && view.browserActor == TatwoCEFBrowserActorHuman && !view.agentControlled &&
+      view.window && !view.isHiddenOrHasHiddenAncestor && BrowserInputIsCurrent(view, generation);
+}
+
+void TatwoClient::W57dCancel() {
+  ++web_features_serial_; // Revoke even if a page becomes human again before an old reply.
+  ++file_dialog_serial_;
+  auto file_callback = file_dialog_callback_;
+  file_dialog_callback_ = nullptr;
+  auto pdf_completion = pdf_download_completion_;
+  pdf_download_completion_ = nil;
+  pdf_download_url_ = nil;
+  pdf_download_path_ = nil;
+  pdf_print_pending_ = false;
+  if (file_callback) file_callback->Cancel();
+  if (pdf_completion) pdf_completion(nil);
+}
+
+void W57dInvalidate(TatwoCEFBrowserView *view) {
+  // Revoke Swift presentation first; cancelling CEF may invoke a PDF completion inline.
+  if (view.onWebFeaturesInvalidated) view.onWebFeaturesInvalidated();
+  auto *state = State(view);
+  if (state && state->client) state->client->W57dCancel();
+  [view exitContentFullscreen];
+}
+
+bool TatwoClient::OnFileDialog(CefRefPtr<CefBrowser> browser, FileDialogMode mode,
+    const CefString &title, const CefString &default_file_path,
+    const std::vector<CefString> &accept_filters,
+    const std::vector<CefString> &accept_extensions,
+    const std::vector<CefString> &accept_descriptions,
+    CefRefPtr<CefFileDialogCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  const uint64_t generation = owner_.navigationGeneration;
+  if (!W57dCurrent(owner_, generation) || !owner_.onFileDialog || file_dialog_callback_ ||
+      mode < FILE_DIALOG_OPEN || mode >= FILE_DIALOG_NUM_VALUES) {
+    callback->Cancel();
+    return true; // Never fall through to CEF's default picker, especially for agents.
+  }
+  file_dialog_callback_ = callback;
+  const uint64_t serial = web_features_serial_;
+  const uint64_t dialog_serial = ++file_dialog_serial_;
+  NSMutableArray<NSString *> *filters = [NSMutableArray array];
+  for (const auto &filter : accept_filters) [filters addObject:FromCefString(filter)];
+  CefRefPtr<TatwoClient> client = this;
+  owner_.onFileDialog(mode, FromCefString(title), FromCefString(default_file_path),
+      filters, mode == FILE_DIALOG_OPEN_MULTIPLE, ^(NSArray<NSString *> *paths) {
+    // Swift's native sheet replies on main; a stale/duplicate response cannot select files.
+    dispatch_block_t reply = ^{
+      if (client->web_features_serial_ != serial || client->file_dialog_serial_ != dialog_serial ||
+          !client->file_dialog_callback_) return;
+      auto pending = client->file_dialog_callback_;
+      client->file_dialog_callback_ = nullptr;
+      // Consume before Continue, which may synchronously reenter CEF.
+      std::vector<CefString> selected;
+      if (W57dCurrent(client->owner_, generation) &&
+          (mode == FILE_DIALOG_OPEN_MULTIPLE || paths.count == 1)) {
+        for (NSString *path in paths) {
+          if (![path isKindOfClass:NSString.class] || !path.isAbsolutePath) { selected.clear(); break; }
+          selected.push_back(ToCefString(path));
+        }
+      }
+      if (selected.empty()) pending->Cancel();
+      else pending->Continue(selected);
+      ScheduleImmediateCEFMessagePumpWork(@"file_dialog_reply");
+    };
+    if (NSThread.isMainThread) reply();
+    else dispatch_async(dispatch_get_main_queue(), reply);
+  });
+  return true;
+}
+
+// Only a completed regular .pdf reserved by this browser can be offered to Preview.
+bool W57dIsPDF(NSString *path) {
+  if (![path.pathExtension.lowercaseString isEqualToString:@"pdf"]) return false;
+  int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
+  if (fd < 0) return false;
+  struct stat info {};
+  char header[5] {};
+  const bool valid = fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == getuid() &&
+      read(fd, header, sizeof(header)) == sizeof(header) && std::string(header, 5) == "%PDF-";
+  close(fd);
+  return valid;
+}
+
+void TatwoClient::W57dDownloadUpdate(CefRefPtr<CefDownloadItem> item) {
+  if (!pdf_download_completion_ || !pdf_download_path_ || item->GetId() != pdf_download_id_ ||
+      (!item->IsComplete() && !item->IsCanceled() && item->IsInProgress())) return;
+  auto completion = pdf_download_completion_;
+  NSString *path = pdf_download_path_;
+  pdf_download_completion_ = nil;
+  pdf_download_path_ = nil;
+  pdf_download_url_ = nil;
+  const bool current = W57dCurrent(owner_, owner_.navigationGeneration);
+  completion(current && item->IsComplete() &&
+      [path isEqualToString:FromCefString(item->GetFullPath())] && W57dIsPDF(path) ? path : nil);
+}
+
+// CefPrintHandler is Linux-only in the pinned SDK; macOS uses the native Print().
+class W57dPDFPrintCallback final : public CefPdfPrintCallback {
+ public:
+  explicit W57dPDFPrintCallback(std::function<void(bool)> completion)
+      : completion_(std::move(completion)) {}
+  void OnPdfPrintFinished(const CefString &path, bool ok) override { completion_(ok); }
+ private:
+  std::function<void(bool)> completion_;
+  IMPLEMENT_REFCOUNTING(W57dPDFPrintCallback);
+};
+#pragma mark - W57d End
 
 class TatwoLambdaCompletion final : public CefCompletionCallback {
  public:
@@ -7199,7 +8248,152 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
          (terminal_tick_count & 0xffff);
 }
 
+@interface TatwoCEFBrowserView ()
+@property(atomic, readwrite) BOOL agentControlled;
+@property(atomic, readwrite) BOOL humanPreferencesDeferred;
+@end
+
 @implementation TatwoCEFBrowserView
+@synthesize browserActor = _browserActor;
+@synthesize agentControlled = _agentControlled;
+#pragma mark - W57c Native assist setting and fill
+@synthesize passwordAssistEnabled = _passwordAssistEnabled;
+- (void)setPasswordAssistEnabled:(BOOL)enabled {
+  if (!NSThread.isMainThread || _passwordAssistEnabled == enabled) return;
+  _passwordAssistEnabled = enabled;
+  W57cInvalidate(self, false, false);
+  BrowserState *state = State(self);
+  if (enabled && state && state->browser && !state->is_loading && state->http_status_code > 0)
+    W57cLoadEnd(self, state->browser->GetMainFrame(), (int)state->http_status_code);
+}
+
+- (void)fillCredentialUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g {
+  BrowserState *state = State(self);
+  if (!W57cHumanPage(self, state) || self.browserActor != TatwoCEFBrowserActorHuman ||
+      self.agentControlled || state->navigation_in_flight || g == 0 ||
+      state->navigation_generation != g || !state->password_assist_token.length ||
+      state->password_assist_scan_pending || !p.length || !f.length ||
+      [u lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 4096 ||
+      [p lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 16384 || f.length > 128) return;
+  auto frame = state->browser->GetMainFrame();
+  NSString *origin = OriginForURLString(state->committed_url);
+  if (!frame || !frame->IsValid() || ![origin hasPrefix:@"https://"] ||
+      ![origin isEqualToString:OriginForURLString(FromCefString(frame->GetURL()))]) return;
+  auto message = CefProcessMessage::Create(kPasswordFillMessage);
+  auto args = message->GetArgumentList();
+  args->SetString(0, std::to_string(g));
+  args->SetString(1, ToCefString(state->password_assist_token));
+  args->SetString(2, ToCefString(origin));
+  args->SetString(3, frame->GetURL());
+  args->SetString(4, ToCefString(f));
+  args->SetString(5, ToCefString(u));
+  args->SetString(6, ToCefString(p));
+  frame->SendProcessMessage(PID_RENDERER, message);
+  // No payload in source strings or logs; the host kick's reason is constant.
+  ScheduleImmediateCEFMessagePumpWork(@"password_assist");
+}
+#pragma mark - W57c End
+#pragma mark - W58 Native-only AI login API
+- (BOOL)prepareAgentLogin {
+  W58Invalidate(self, false);
+  return W58Scan(self, false);
+}
+- (void)cancelAgentLogin { W58Invalidate(self, false); }
+- (NSDictionary *)agentLoginState {
+  auto state = State(self);
+  if (!W58AgentPage(self, state)) return @{@"phase": @"failed", @"error": @"ai_login_human_tab_denied"};
+  // Strip query/fragment and URL credentials; no page forms or values are exported.
+  NSURLComponents *url = [NSURLComponents componentsWithString:self.currentURLString ?: @""];
+  url.query = nil; url.fragment = nil; url.user = nil; url.password = nil;
+  return @{@"phase": state->ai_login_phase ?: @"idle", @"formID": state->ai_login_form ?: @"",
+    @"generation": @(state->navigation_generation), @"error": state->ai_login_error ?: @"",
+    @"finalURL": url.string ?: @"", @"title": state->ai_login_title ?: @""};
+}
+- (BOOL)fillCredentialForAgentUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g {
+  auto state = State(self);
+  if (!W58AgentPage(self, state) || self.browserActor != TatwoCEFBrowserActorAgent ||
+      state->navigation_in_flight || g == 0 || state->navigation_generation != g ||
+      ![state->ai_login_phase isEqualToString:@"ready"] || !state->ai_login_form.length ||
+      ![state->ai_login_form isEqualToString:f] || !state->ai_login_token.length || !p.length ||
+      [u lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 4096 ||
+      [p lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 16384) return NO;
+  auto frame = state->browser->GetMainFrame();
+  NSString *origin = OriginForURLString(state->committed_url);
+  if (!frame || !frame->IsValid() || ![origin hasPrefix:@"https://"] ||
+      ![origin isEqualToString:OriginForURLString(FromCefString(frame->GetURL()))]) return NO;
+  auto message = CefProcessMessage::Create(kAILoginFill);
+  auto args = message->GetArgumentList();
+  args->SetString(0, std::to_string(g)); args->SetString(1, ToCefString(state->ai_login_token));
+  args->SetString(2, ToCefString(origin)); args->SetString(3, frame->GetURL());
+  args->SetString(4, ToCefString(f)); args->SetString(5, ToCefString(u)); args->SetString(6, ToCefString(p));
+  state->ai_login_form = nil; state->ai_login_phase = @"submitted"; state->ai_login_awaiting_load = true;
+  frame->SendProcessMessage(PID_RENDERER, message);
+  ScheduleImmediateCEFMessagePumpWork(@"ai_login");
+  return YES;
+}
+#pragma mark - W58 End
+- (void)beginAgentInteraction {
+  if (!NSThread.isMainThread || self.agentControlled) return;
+  self.agentControlled = YES;
+#pragma mark - W57d
+  W57dInvalidate(self);
+#pragma mark - W57d End
+#pragma mark - W57c Agent takeover invalidates queued Island replies and renderer listeners
+  W57cInvalidate(self, false, false);
+#pragma mark - W57c End
+  self.humanPreferencesDeferred = NO;
+  BrowserState *state = State(self);
+  if (state) {
+    state->client->InvalidateResourceErrors();
+    if (state->request_context_security_ready &&
+        !ApplyPrivacyStrictRequestContextPreferences(state->request_context, TatwoCEFBrowserActorAgent)) {
+      state->request_context_security_blocked = true;
+      [self closeBrowser]; // Never dispatch agent input with human-only credentials prefs.
+    }
+  }
+}
+
+
+- (BOOL)restoreHumanInteraction {
+  if (!NSThread.isMainThread || (!self.agentControlled && !self.humanPreferencesDeferred) ||
+      self.browserActor != TatwoCEFBrowserActorHuman) return NO;
+  BrowserState *state = State(self);
+  if (!state || state->close_requested || !state->request_context_security_ready ||
+      state->request_context_security_blocked) return NO;
+  // Preferences belong to the context: never enable credentials for an agent sibling.
+  bool agent_sibling = false;
+  for (TatwoCEFBrowserView *other in g_live_browser_views.allObjects) {
+    BrowserState *sibling = State(other);
+    if (other != self && sibling && !sibling->close_completed && sibling->request_context &&
+        sibling->request_context->IsSame(state->request_context) &&
+        (other.agentControlled || other.browserActor == TatwoCEFBrowserActorAgent)) {
+      agent_sibling = true;
+      break;
+    }
+  }
+  if (!self.agentControlled && agent_sibling) return NO; // Wait without per-keystroke telemetry.
+  // App bridge has waited for agent methods to finish and the quiet period.
+  // Complete pending callbacks under the strict actor before changing prefs.
+  if (state->client) {
+    state->client->CancelPendingBrowserOperations();
+    state->client->CancelPendingWebMCPInvocations(@"human_takeover");
+    state->client->InvalidateResourceErrors();
+  }
+  // Existing resource handlers retain their strict snapshot; subsequent requests
+  // obtain a new ActorRequestPolicy snapshot. Never promote an in-flight handler.
+  self.agentControlled = NO;
+  if (!agent_sibling && !ApplyPrivacyStrictRequestContextPreferences(state->request_context, TatwoCEFBrowserActorHuman)) {
+    self.agentControlled = YES; // fail closed while native close drains
+    state->request_context_security_blocked = true;
+    [self closeBrowser];
+    return NO;
+  }
+  self.humanPreferencesDeferred = agent_sibling;
+  AppendCEFEmbeddingTelemetryLine([NSString stringWithFormat:
+      @"phase=actor_recovery actor=human prefs=%@", agent_sibling ? @"strict_shared_context" : @"human"]);
+  return YES;
+}
+
 
 - (nullable instancetype)initForPopupWithFrame:(NSRect)frame
                                         opener:(TatwoCEFBrowserView *)opener
@@ -7208,6 +8402,11 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   BrowserState *parent = State(opener);
   if (!self || !parent || !parent->request_context ||
       !parent->request_context_security_ready || parent->close_requested) return nil;
+  // W45-fix: a popup inherits its opener's actor and resource policy; without this the
+  // snapshot read adBlock/cookie defaults (NO) and skipped the host deny list.
+  _browserActor = opener.browserActor;
+  _blocksThirdPartyCookies = opener.blocksThirdPartyCookies;
+  _adBlock = opener.adBlock;
   BrowserState *state = CreateBrowserState(self);
   state->request_context = parent->request_context;
   state->request_context_security_ready = true;
@@ -7234,6 +8433,14 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
                     persistentProfile:(nullable NSString *)persistentProfile
                             initialURL:(NSString *)initialURL
                                  error:(NSError * _Nullable * _Nullable)error {
+  return [self initWithFrame:frame persistentProfile:persistentProfile initialURL:initialURL actor:TatwoCEFBrowserActorAgent error:error];
+}
+
+- (nullable instancetype)initWithFrame:(NSRect)frame
+                    persistentProfile:(nullable NSString *)persistentProfile
+                            initialURL:(NSString *)initialURL
+                                 actor:(TatwoCEFBrowserActor)actor
+                                 error:(NSError * _Nullable * _Nullable)error {
   self = [super initWithFrame:frame];
   if (self == nil) {
     return nil;
@@ -7245,15 +8452,17 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
     }
     return nil;
   }
-  BrowserRequestPolicySnapshot initial_policy;
-  initial_policy.host_deny_list = g_host_deny_list;
+  _browserActor = actor;
+  _blocksThirdPartyCookies = YES;
+  _adBlock = YES;
+  BrowserRequestPolicySnapshot initial_policy = ActorRequestPolicy(self);
   const bool initial_local_deny =
       IsDeniedByLocalHostList(initial_policy, initialURL);
   // Only the exact inert constructor URL is allowed here. Do not relax the
   // public navigation/resource URL policy for about:, data:, file:, or variants.
   const bool initial_blank = [initialURL isEqualToString:@"about:blank"];
   if (!initial_blank && (URLHasCredentials(initialURL) ||
-      !IsAllowedURLString(initialURL) ||
+      !IsActorURLAllowed(initial_policy, initialURL) ||
       initial_local_deny)) {
     if (error != nullptr) {
       *error = MakeError(
@@ -7314,6 +8523,11 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
                   TatwoCEFBrowserPhaseBlockedBySecurity);
               return;
             }
+            // An agent can be queued while the human context is initializing.
+            // Reapply the stricter policy before publishing readiness.
+            if (owner.agentControlled && configured) {
+              configured = ApplyPrivacyStrictRequestContextPreferences(request_context, TatwoCEFBrowserActorAgent);
+            }
             if (!configured) {
               active_state->request_context_security_blocked = true;
               PublishVisibleError(
@@ -7328,7 +8542,7 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
             active_state->request_context_security_blocked = false;
             [owner startBrowserIfReady];
             PublishState(owner);
-          });
+          }, actor);
   state->request_context =
       CefRequestContext::CreateContext(
           context_settings,
@@ -7364,20 +8578,31 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
                    sharingContextWith:(TatwoCEFBrowserView *)source
                            initialURL:(NSString *)initialURL
                                 error:(NSError * _Nullable * _Nullable)error {
+  return [self initWithFrame:frame sharingContextWith:source initialURL:initialURL actor:TatwoCEFBrowserActorAgent error:error];
+}
+
+- (nullable instancetype)initWithFrame:(NSRect)frame
+                   sharingContextWith:(TatwoCEFBrowserView *)source
+                           initialURL:(NSString *)initialURL
+                                actor:(TatwoCEFBrowserActor)actor
+                                 error:(NSError * _Nullable * _Nullable)error {
   self = [super initWithFrame:frame];
   if (!self) return nil;
   if (!g_initialized.load() || g_shutdown.load() ||
-      g_shutdown_requested.load() || !source.canShareRequestContext) {
+      g_shutdown_requested.load() || !source.canShareRequestContext ||
+      source.browserActor != actor || (source.agentControlled && actor == TatwoCEFBrowserActorHuman)) {
     if (error) *error = MakeError(20, @"Chromium request context unavailable");
     return nil;
   }
-  BrowserRequestPolicySnapshot initial_policy;
-  initial_policy.host_deny_list = g_host_deny_list;
+  _browserActor = actor;
+  _blocksThirdPartyCookies = YES;
+  _adBlock = YES;
+  BrowserRequestPolicySnapshot initial_policy = ActorRequestPolicy(self);
   const bool initial_local_deny =
       IsDeniedByLocalHostList(initial_policy, initialURL);
   const bool initial_blank = [initialURL isEqualToString:@"about:blank"];
   if (!initial_blank && (URLHasCredentials(initialURL) ||
-      !IsAllowedURLString(initialURL) || initial_local_deny)) {
+      !IsActorURLAllowed(initial_policy, initialURL) || initial_local_deny)) {
     if (error) *error = MakeError(
         21, ResourceBlockMessage(initial_policy, initialURL));
     return nil;
@@ -7845,13 +9070,17 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
     PublishState(self);
     return;
   }
-  BrowserRequestPolicySnapshot policy;
-  policy.host_deny_list = g_host_deny_list;
+  if (dispatchGate) [self beginAgentInteraction];
+  BrowserRequestPolicySnapshot policy = ActorRequestPolicy(self);
   const bool local_deny =
       IsDeniedByLocalHostList(policy, urlString);
-  if (URLHasCredentials(urlString) ||
-      !IsAllowedURLString(urlString) ||
-      local_deny) {
+  // W56-fix: the exact inert about:blank is allowed on the load path too (new tabs are
+  // created with it); anything else still goes through the actor/network policy.
+  const bool inert_blank = [urlString isEqualToString:@"about:blank"];
+  if (!inert_blank &&
+      (URLHasCredentials(urlString) ||
+       !IsActorURLAllowed(policy, urlString) ||
+       local_deny)) {
     LogBrowserNavigationTrace(
         @"host_navigation_blocked", ERR_BLOCKED_BY_CLIENT, false);
     PublishVisibleError(self,
@@ -7896,6 +9125,112 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   }
   ScheduleImmediateCEFMessagePumpWork(@"navigation");
 }
+
+#pragma mark - W57a
+- (void)stopLoading {
+  auto *state = State(self);
+  if (ActorRequestPolicy(self).human && state && state->browser) state->browser->StopLoad();
+}
+- (void)findText:(NSString *)text forward:(BOOL)forward matchCase:(BOOL)matchCase {
+  auto *state = State(self);
+  if (!ActorRequestPolicy(self).human || !state || !state->browser) return;
+  if (!text.length) { [self stopFinding]; return; }
+  const std::string query = ToCefString(text).ToString();
+  const bool next = state->find_text == query && state->find_match_case == matchCase;
+  state->find_text = query; state->find_match_case = matchCase;
+  state->browser->GetHost()->Find(ToCefString(text), forward, matchCase, next);
+}
+- (void)stopFinding {
+  auto *state = State(self);
+  if (!ActorRequestPolicy(self).human || !state || !state->browser) return;
+  state->find_text.clear();
+  state->browser->GetHost()->StopFinding(true);
+  if (self.onFindResult) self.onFindResult(0, 0);
+}
+- (double)zoomLevel {
+  auto *state = State(self);
+  return state && state->browser ? state->browser->GetHost()->GetZoomLevel() : 0;
+}
+- (void)setZoomLevel:(double)level {
+  auto *state = State(self);
+  if (ActorRequestPolicy(self).human && state && state->browser && std::isfinite(level))
+    state->browser->GetHost()->SetZoomLevel(std::min(5.0, std::max(-5.0, level)));
+}
+- (void)performContextEdit:(NSString *)kind {
+  auto *state = State(self);
+  if (!ActorRequestPolicy(self).human || !state || !state->browser) return;
+  auto frame = state->browser->GetFocusedFrame();
+  if (!frame) return;
+  if ([kind isEqualToString:@"cut"]) frame->Cut();
+  else if ([kind isEqualToString:@"copy"]) frame->Copy();
+  else if ([kind isEqualToString:@"paste"]) frame->Paste();
+  else if ([kind isEqualToString:@"selectAll"]) frame->SelectAll();
+}
+- (void)downloadImageURL:(NSString *)url {
+  auto *state = State(self);
+  auto policy = ActorRequestPolicy(self);
+  if (policy.human && state && state->browser && !URLHasCredentials(url) &&
+      IsActorURLAllowed(policy, url) && !IsDeniedByLocalHostList(policy, url))
+    state->browser->GetHost()->StartDownload(ToCefString(url));
+}
+#pragma mark - W57a end
+
+#pragma mark - W57d
+- (void)cancelWebFeatures { W57dInvalidate(self); }
+- (void)exitContentFullscreen {
+  auto *state = State(self);
+  if (state && state->browser && state->browser->GetHost()->IsFullscreen())
+    state->browser->GetHost()->ExitFullscreen(true);
+  if (self.onFullscreenModeChange) self.onFullscreenModeChange(NO);
+}
+- (void)printPage {
+  auto *state = State(self);
+  if (!W57dCurrent(self, self.navigationGeneration) || !state || !state->browser) return;
+  state->browser->GetHost()->Print();
+  ScheduleImmediateCEFMessagePumpWork(@"print");
+}
+- (void)printToPDFWithCompletion:(void (^)(NSString * _Nullable))completion {
+  auto *state = State(self);
+  if (!W57dCurrent(self, self.navigationGeneration) || !state || !state->client ||
+      state->client->pdf_print_pending_) { completion(nil); return; }
+  // mkdtemp reserves a private directory, so another process cannot preplant the file.
+  NSString *pattern = [NSTemporaryDirectory() stringByAppendingPathComponent:@"browser-print-XXXXXX"];
+  std::vector<char> buffer(pattern.fileSystemRepresentation,
+                           pattern.fileSystemRepresentation + strlen(pattern.fileSystemRepresentation) + 1);
+  char *directory = mkdtemp(buffer.data());
+  if (!directory) { completion(nil); return; }
+  NSString *path = [[NSString stringWithUTF8String:directory] stringByAppendingPathComponent:@"page.pdf"];
+  CefRefPtr<TatwoClient> client = state->client;
+  client->pdf_print_pending_ = true;
+  const uint64_t serial = client->web_features_serial_;
+  const uint64_t generation = self.navigationGeneration;
+  __weak TatwoCEFBrowserView *weak_view = self;
+  CefPdfPrintSettings settings;
+  settings.print_background = true;
+  state->browser->GetHost()->PrintToPDF(ToCefString(path), settings,
+      new W57dPDFPrintCallback([weak_view, client, serial, generation, path, completion](bool ok) {
+        const bool current = client->web_features_serial_ == serial;
+        if (current) client->pdf_print_pending_ = false;
+        completion(ok && current && W57dCurrent(weak_view, generation) && W57dIsPDF(path) ? path : nil);
+      }));
+  ScheduleImmediateCEFMessagePumpWork(@"print_pdf");
+}
+- (void)downloadCurrentPDFWithCompletion:(void (^)(NSString * _Nullable))completion {
+  auto *state = State(self);
+  NSString *url = self.currentURLString;
+  const auto policy = ActorRequestPolicy(self);
+  if (!W57dCurrent(self, self.navigationGeneration) || !state || !state->client ||
+      state->client->pdf_download_completion_ ||
+      ![[NSURL URLWithString:url].path.pathExtension.lowercaseString isEqualToString:@"pdf"] ||
+      URLHasCredentials(url) || !IsActorURLAllowed(policy, url) || IsDeniedByLocalHostList(policy, url)) {
+    completion(nil); return;
+  }
+  state->client->pdf_download_url_ = url;
+  state->client->pdf_download_completion_ = [completion copy];
+  state->browser->GetHost()->StartDownload(ToCefString(url));
+  ScheduleImmediateCEFMessagePumpWork(@"pdf_download");
+}
+#pragma mark - W57d End
 
 - (void)goBack {
   BrowserState *state = State(self);
@@ -7965,6 +9300,15 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
 
 - (void)closeBrowserWithCompletion:
     (nullable TatwoCEFBrowserCloseHandler)completion {
+#pragma mark - W57d
+  W57dInvalidate(self);
+#pragma mark - W57d End
+#pragma mark - W57c Drop credentials on tab teardown
+  W57cInvalidate(self, false, false);
+#pragma mark - W57c End
+#pragma mark - W58
+  W58Invalidate(self, false);
+#pragma mark - W58 End
   [self releaseAgentPointer];
   [self releaseAgentKey];
   BrowserState *state = State(self);
@@ -8006,6 +9350,10 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
 @end
 
 @implementation TatwoCEFRuntime
+
+#pragma mark - W60
++ (NSDictionary<NSString *, id> *)processDiagnostics { return W60ProcessDiagnostics(); }
+#pragma mark - W60 End
 
 + (uint64_t)messagePumpGateRepeatedKickProbe:(uint32_t)kicks {
   return TatwoCEFMessagePumpGateRepeatedKickProbe(kicks);
@@ -8064,6 +9412,13 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
          !g_shutdown_requested.load(std::memory_order_acquire) &&
          g_webmcp_renderer_hook_active.load(
              std::memory_order_acquire);
+}
+
++ (void)configureRendererProcessLimit:(NSInteger)limit {
+  NSAssert(NSThread.isMainThread, @"CEF configuration belongs to the main thread");
+  if (!g_initialized.load() && limit >= 0 && limit <= 8) {
+    g_renderer_process_limit.store(static_cast<int>(limit));
+  }
 }
 
 + (BOOL)initializeWithRootCachePath:(NSString *)rootCachePath
@@ -8134,6 +9489,9 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   g_webmcp_renderer_hook_active.store(
       false, std::memory_order_release);
   CefSettings settings;
+#pragma mark - W57d
+  CefString(&settings.user_agent).FromASCII(W57dUserAgent());
+#pragma mark - W57d End
   settings.no_sandbox = false;
   settings.multi_threaded_message_loop = false;
   settings.external_message_pump = true;

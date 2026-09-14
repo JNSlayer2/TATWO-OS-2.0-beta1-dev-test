@@ -11,6 +11,8 @@ final class ComputerUseController {
     private var pendingOwner: UUID?
     private var target: NSRunningApplication?
     private var granted: ComputerUseSession.Grant?
+    var consentPolicyProvider: (UUID) -> ComputerUseConsentPolicy = { _ in .askOncePerSession }
+    private var cachedPolicy: ComputerUseConsentPolicy?
     private var consentCache: ComputerUseConsentCache?
     private var userInputMonitor: Any?
     private var localInputMonitor: Any?
@@ -23,6 +25,7 @@ final class ComputerUseController {
         granted = nil
         target = nil
         consentCache = nil
+        cachedPolicy = nil
         removeInputMonitors()
         ComputerUsePointerOverlay.shared.hide()
         if let alert = pendingConsent as? NSAlert, let parent = alert.window.sheetParent {
@@ -41,6 +44,10 @@ final class ComputerUseController {
     private func checkContext(_ grant: ComputerUseSession.Grant,
                               _ current: @MainActor () -> Bool) throws {
         try session.validate(grant)
+        guard cachedPolicy == consentPolicyProvider(grant.owner) else {
+            stop(ifCurrent: grant)
+            throw ComputerUseFailure("computer_consent_required")
+        }
         guard current() else { stop(ifCurrent: grant); throw ComputerUseFailure("computer_context_changed") }
     }
 
@@ -518,23 +525,21 @@ final class ComputerUseController {
     }
 
 
-    private func start(caller: UUID, scope: String, requestedTarget: ComputerUseTarget,
-                       contextIsCurrent: @escaping @MainActor () -> Bool) async throws -> [String: Any] {
-        // Settings › Computer Use master switch (2026-09-11).
-        guard ComputerUseSettings.isEnabled else { throw ComputerUseFailure("computer_use_disabled_in_settings") }
-        let resolved = try requestedTarget.resolve()
+    /// Preserve consent only across an internal same-owner/scope target switch.
+    private func prepareStart(caller: UUID, scope: String, lane: ComputerUseSession.Lane,
+                              policy: ComputerUseConsentPolicy) throws -> (epoch: UInt64, reuse: Bool) {
         guard pendingConsent == nil, nativeCall.pendingID == nil else {
             throw ComputerUseFailure("computer_busy_or_no_chat_window")
         }
-        if let granted, granted.lane != .externalApplication || granted.owner != caller || granted.scope != scope {
+        if let granted, granted.lane != lane || granted.owner != caller || granted.scope != scope {
             throw ComputerUseFailure("computer_busy_or_invalid_target")
         }
         let now = ProcessInfo.processInfo.systemUptime
         let startEpoch = session.currentEpoch
-        if consentCache?.isCurrent(owner: caller, scope: scope, epoch: startEpoch, now: now) != true {
+        if cachedPolicy != policy || consentCache?.isCurrent(owner: caller, scope: scope, epoch: startEpoch, now: now) != true {
             stop()
         }
-        let reuse = consentCache?.permits(requestedTarget.bundleIdentifier, owner: caller, scope: scope,
+        let reuse = consentCache?.isCurrent(owner: caller, scope: scope,
                                          epoch: startEpoch, now: now) == true
         // Switch through the existing stop/authorize epoch fences. Do not revive old tokens.
         // Cache survives this internal switch only, never public Stop or user input.
@@ -549,15 +554,34 @@ final class ComputerUseController {
         target = nil
         removeInputMonitors()
         consentCache?.epoch = switchEpoch
+        return (switchEpoch, reuse)
+    }
+
+    private func reserveConsent(caller: UUID, epoch: UInt64) -> (epoch: UInt64, token: AnyObject) {
+        let token = NSObject()
+        pendingConsent = token
+        pendingOwner = caller
+        return (epoch, token)
+    }
+
+    private func start(caller: UUID, scope: String, requestedTarget: ComputerUseTarget,
+                       contextIsCurrent: @escaping @MainActor () -> Bool) async throws -> [String: Any] {
+        // Settings › Computer Use master switch (2026-09-11).
+        guard ComputerUseSettings.isEnabled else { throw ComputerUseFailure("computer_use_disabled_in_settings") }
+        let resolved = try requestedTarget.resolve()
+        let policy = consentPolicyProvider(caller)
+        let (switchEpoch, reuse) = try prepareStart(caller: caller, scope: scope, lane: .externalApplication, policy: policy)
         var consent: (epoch: UInt64, token: AnyObject)?
+        var operationEpoch = switchEpoch
         do {
-            if !reuse {
+            if policy == .askOncePerSession && !reuse {
                 consent = try await confirmConsent(caller: caller,
                     message: "允許此聊天操作「\(resolved.name)」？", detail: ComputerUseTarget.consentDetail,
                     button: "允許操作",
                     islandDetail: "會看到畫面與文字並點擊、輸入、捲動；付款、對外發送、刪除前先問你。全程在背景，不動你的滑鼠。",
                     contextIsCurrent: contextIsCurrent)
             }
+            if consent == nil { consent = reserveConsent(caller: caller, epoch: switchEpoch) }
             defer { if let consent { finishConsent(consent.token) } }
             let epoch = consent?.epoch ?? switchEpoch
             guard contextIsCurrent(), AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {
@@ -577,26 +601,28 @@ final class ComputerUseController {
                 }
                 app = opened.value
             }
-            guard contextIsCurrent(), session.currentEpoch == epoch, !app.isTerminated,
+            guard contextIsCurrent(), consentPolicyProvider(caller) == policy, session.currentEpoch == epoch, !app.isTerminated,
                   app.bundleIdentifier == requestedTarget.bundleIdentifier,
                   app.bundleURL?.standardizedFileURL == resolved.url.standardizedFileURL else {
                 throw ComputerUseFailure("computer_consent_cancelled")
             }
             let grant = try session.authorize(owner: caller, scope: scope, pid: app.processIdentifier,
-                                             expectedEpoch: epoch, expiresAt: consentCache?.expiresAt)
+                                             expectedEpoch: epoch, expiresAt: .greatestFiniteMagnitude)
+            operationEpoch = grant.epoch
             var cache = consentCache ?? ComputerUseConsentCache(owner: caller, scope: scope,
                 epoch: grant.epoch, expiresAt: grant.expiresAt)
             cache.epoch = grant.epoch
             cache.apps.insert(requestedTarget.bundleIdentifier)
             consentCache = cache
+            cachedPolicy = policy
             target = app
             granted = grant
-            installInputMonitors(for: grant)
+            if policy.clearOnHumanInput { installInputMonitors(for: grant) }
             ComputerUsePointerOverlay.shared.show(appName: app.localizedName ?? resolved.name)
             var started: [String: Any] = ["sessionID": grant.id.uuidString,
                     "bundleIdentifier": requestedTarget.bundleIdentifier,
                     "appName": app.localizedName ?? resolved.name,
-                    "expiresInSeconds": max(0, Int(grant.expiresAt - ProcessInfo.processInfo.systemUptime)),
+                    "expiresInSeconds": NSNull(), "leaseBoundary": "session_stop_or_epoch",
                     "next": "computer_batch_or_action"]
             // Return the first observation with the grant: one model round trip less per task.
             if let first = try? await observeWithRetry(grant, target: requestedTarget, contextIsCurrent: contextIsCurrent) {
@@ -606,7 +632,8 @@ final class ComputerUseController {
             }
             return started
         } catch {
-            stop()
+            // A cancelled start must not revoke a newer start after actor re-entry.
+            if session.currentEpoch == operationEpoch { stop() }
             throw error
         }
     }
@@ -615,31 +642,57 @@ final class ComputerUseController {
     /// the same consent sheet. A browser token cannot be used in the App lane.
     func startBrowser(caller: UUID, scope: String,
                       contextIsCurrent: @escaping @MainActor () -> Bool) async throws -> [String: Any] {
-        let consent = try await confirmConsent(
-            caller: caller, message: "允許此聊天操作自己的內建瀏覽器？",
-            detail: "只授權這條聊天自己的 TATWO 瀏覽器分頁，畫面與文字會送給此聊天模型。只用測試資料；不含付款、對外發送、帳號設定或其他 App。授權最多 15 分鐘，停止、切換聊天／Space 或自行操作鍵鼠即撤回。若需同時操作文字編輯，必須另行取得跨 App 授權。",
-            button: "允許測試操作",
-            islandDetail: "只授權這條聊天自己的 TATWO 瀏覽器分頁；付款、對外發送、帳號設定前先問你。",
-            contextIsCurrent: contextIsCurrent)
-        defer { finishConsent(consent.token) }
-        let epoch = consent.epoch
-        guard contextIsCurrent(), session.currentEpoch == epoch else {
-            throw ComputerUseFailure("computer_consent_cancelled")
+        let policy = consentPolicyProvider(caller)
+        let (switchEpoch, reuse) = try prepareStart(caller: caller, scope: scope, lane: .builtInBrowser, policy: policy)
+        var consent: (epoch: UInt64, token: AnyObject)?
+        var operationEpoch = switchEpoch
+        do {
+            if policy == .askOncePerSession && !reuse {
+                consent = try await confirmConsent(
+                    caller: caller, message: "允許此聊天操作自己的內建瀏覽器？",
+                    detail: "授權這條聊天自己的 TATWO 瀏覽器分頁，畫面與文字會送給此聊天模型。停止、切換聊天／Space 或自行操作鍵鼠即撤回；不含付款、對外發送、帳號設定或其他 App。",
+                    button: "允許測試操作",
+                    islandDetail: "只授權這條聊天自己的 TATWO 瀏覽器分頁；付款、對外發送、帳號設定前先問你。",
+                    contextIsCurrent: contextIsCurrent)
+            }
+            if consent == nil { consent = reserveConsent(caller: caller, epoch: switchEpoch) }
+            defer { if let consent { finishConsent(consent.token) } }
+            let epoch = consent?.epoch ?? switchEpoch
+            guard contextIsCurrent(), consentPolicyProvider(caller) == policy, session.currentEpoch == epoch else {
+                throw ComputerUseFailure("computer_consent_cancelled")
+            }
+            guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {
+                throw ComputerUseFailure("computer_system_permissions_required:enable_TATWO_Accessibility_and_Screen_Recording")
+            }
+            let app = NSRunningApplication.current
+            let grant = try session.authorize(owner: caller, scope: scope, pid: app.processIdentifier,
+                                              expectedEpoch: epoch, lane: .builtInBrowser,
+                                              expiresAt: .greatestFiniteMagnitude)
+            operationEpoch = grant.epoch
+            consentCache = ComputerUseConsentCache(owner: caller, scope: scope, epoch: grant.epoch,
+                                                   expiresAt: grant.expiresAt)
+            cachedPolicy = policy
+            target = app
+            granted = grant
+            if policy.clearOnHumanInput { installInputMonitors(for: grant) }
+            return ["sessionID": grant.id.uuidString, "target": "built_in_browser",
+                    "callerThreadID": caller.uuidString, "expiresInSeconds": NSNull(),
+                    "leaseBoundary": "session_stop_or_epoch",
+                    "next": "browser_open_or_browser_read", "grantsOtherApps": false,
+                    "unsupported": ["sensitive_actions", "cross_app_control"]]
+        } catch {
+            // A cancelled start must not revoke a newer start after actor re-entry.
+            if session.currentEpoch == operationEpoch { stop() }
+            throw error
         }
-        let app = NSRunningApplication.current
-        let grant = try session.authorize(owner: caller, scope: scope, pid: app.processIdentifier,
-                                          expectedEpoch: epoch, lane: .builtInBrowser)
-        target = app
-        granted = grant
-        installInputMonitors(for: grant)
-        return ["sessionID": grant.id.uuidString, "target": "built_in_browser",
-                "callerThreadID": caller.uuidString, "expiresInSeconds": 900,
-                "next": "browser_open_or_browser_read", "grantsOtherApps": false,
-                "unsupported": ["sensitive_actions", "cross_app_control"]]
     }
 
     func requireBrowserGrant(caller: UUID, scope: String, token: String) throws -> ComputerUseSession.Grant {
         let grant = try session.require(owner: caller, scope: scope, token: token, lane: .builtInBrowser)
+        guard cachedPolicy == consentPolicyProvider(caller) else {
+            stop(ifCurrent: grant)
+            throw ComputerUseFailure("computer_consent_required")
+        }
         guard granted == grant, grant.pid == getpid(), target?.processIdentifier == getpid(),
               target?.isTerminated == false else { throw ComputerUseFailure("browser_target_unavailable") }
         guard AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else {

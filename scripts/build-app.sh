@@ -44,8 +44,9 @@ prepare_cef_runtime
 
 # SwiftPM jobs does not cap the release frontend's internal codegen threads.
 # Keep both layers bounded on the 16 GiB delivery host.
-swift build -c release --product TatwoCEFHelper --scratch-path .build-sol --jobs 2 -Xswiftc -num-threads -Xswiftc 2
-swift build -c release --product Tatwo2 --scratch-path .build-sol --jobs 2 -Xswiftc -num-threads -Xswiftc 2
+JOBS="${TATWO2_BUILD_JOBS:-2}"
+swift build -c release --product TatwoCEFHelper --scratch-path .build-sol --jobs "$JOBS" -Xswiftc -num-threads -Xswiftc "$JOBS"
+swift build -c release --product Tatwo2 --scratch-path .build-sol --jobs "$JOBS" -Xswiftc -num-threads -Xswiftc "$JOBS"
 BIN_PATH="$(swift build -c release --show-bin-path --scratch-path .build-sol)"
 
 mkdir -p "$OUT"
@@ -83,6 +84,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$RELEASE_VERSION</string>
   <key>CFBundleExecutable</key><string>tatwo2</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLName</key><string>ai.tatwo.tatwo2</string>
+    <key>CFBundleURLSchemes</key><array><string>http</string><string>https</string></array>
+    <key>CFBundleTypeRole</key><string>Viewer</string>
+    <key>LSHandlerRank</key><string>Default</string>
+  </dict></array>
+  <key>TatwoBrowserWorkspaceEnabled</key><true/>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>TatwoCEFApplication</string>

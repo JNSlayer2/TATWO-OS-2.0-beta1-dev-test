@@ -42,7 +42,7 @@ set -euo pipefail
 
 ROLE="secondary"
 NAME="$(hostname -s 2>/dev/null || echo device)"
-PRIMARY_HOST="ssh-mac-mini.tatwo214.com"
+PRIMARY_HOST="${TATWO_PRIMARY_SSH_HOST:-}"
 REPO="$HOME/tatwo-ultrawork"
 REPO_URL="https://github.com/tatwo214/tatwo-ultrawork.git"
 BRANCH="release/tatwo-os"
@@ -96,6 +96,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --dry-run) DRY=1; shift;;
   -h|--help) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
   *) echo "未知參數 $1" >&2; exit 1;; esac; done
+
+[ -n "$PRIMARY_HOST" ] || { echo "請設定 TATWO_PRIMARY_SSH_HOST" >&2; exit 2; }
 
 APP_SUPPORT="${TATWO_APP_SUPPORT:-$HOME/Library/Application Support/Tatwo Ultrawork}"
 [ -n "$SKILLS_ROOT" ] || SKILLS_ROOT="$APP_SUPPORT/skills"

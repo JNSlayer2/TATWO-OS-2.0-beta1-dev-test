@@ -60,11 +60,11 @@ final class ComputerUseSession: @unchecked Sendable {
                    now: TimeInterval = ProcessInfo.processInfo.systemUptime) throws -> Grant {
         try locked {
             guard epoch == expectedEpoch else { throw ComputerUseFailure("computer_consent_cancelled") }
-            guard grant == nil, pid > 1, (expiresAt ?? (now + 900)) > now else { throw ComputerUseFailure("computer_busy_or_invalid_target") }
+            guard grant == nil, pid > 1, (expiresAt ?? .greatestFiniteMagnitude) > now else { throw ComputerUseFailure("computer_busy_or_invalid_target") }
             epoch &+= 1
             targetClosedUntil = 0
             let value = Grant(id: UUID(), owner: owner, scope: scope, pid: pid,
-                              lane: lane, epoch: epoch, expiresAt: min(expiresAt ?? (now + 900), now + 900))
+                              lane: lane, epoch: epoch, expiresAt: expiresAt ?? .greatestFiniteMagnitude)
             grant = value
             return value
         }

@@ -80,10 +80,28 @@ else
   run_grok=0
 fi
 
+resolve_gateway_label() {
+  if [ -n "${MODEL_GATEWAY_LABEL:-}" ]; then
+    printf '%s\n' "$MODEL_GATEWAY_LABEL"
+    return
+  fi
+  local current="com.tatwo.codex-model-gateway" registered
+  # Read-only legacy discovery: never embed an owner's name or re-register a service.
+  registered="$(launchctl list 2>/dev/null | awk '$3 ~ /^com\.[^.]+\.codex-model-gateway$/ {print $3}' || true)"
+  if printf '%s\n' "$registered" | grep -Fxq "$current"; then
+    printf '%s\n' "$current"
+  elif [ -n "$registered" ] && [ "$(printf '%s\n' "$registered" | wc -l | tr -d ' ')" -eq 1 ]; then
+    printf '%s\n' "$registered"
+  else
+    printf '%s\n' "$current"
+  fi
+}
+
+label="$(resolve_gateway_label)"
 model_gateway_server="${MODEL_GATEWAY_SERVER:-}"
 if [ -z "$model_gateway_server" ] && command -v launchctl >/dev/null 2>&1; then
   model_gateway_server="$(
-    launchctl print "gui/$(id -u)/${MODEL_GATEWAY_LABEL:-com.layer2.codex-model-gateway}" 2>/dev/null |
+    launchctl print "gui/$(id -u)/$label" 2>/dev/null |
       awk '/server\.js/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print; exit}' || true
   )"
 fi
@@ -117,7 +135,6 @@ else
   add_check "local_grok_shim" true "~/.local/bin/grok absent; PATH should still prefer ~/.codex/bin/grok"
 fi
 
-label="${MODEL_GATEWAY_LABEL:-com.layer2.codex-model-gateway}"
 expected_grok_command="${GROK_ISOLATED_BIN:-$HOME/.codex/bin/grok-isolated}"
 active_grok_command=""
 if command -v launchctl >/dev/null 2>&1; then

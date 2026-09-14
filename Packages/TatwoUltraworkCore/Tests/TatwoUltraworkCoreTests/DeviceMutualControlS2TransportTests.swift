@@ -19,7 +19,7 @@ final class DeviceMutualControlS2TransportTests: XCTestCase {
       paramSlots: [
         TatwoMutualControlParamSlotV1(
           name: "path",
-          constraint: .pathPrefix(["/Users/shared/inbox", "/tmp/mutual-control"]))
+          constraint: .pathPrefix(["/Users/example/inbox", "/tmp/mutual-control"]))
       ],
       resourceLimits: TatwoMutualControlResourceLimitsV1(
         timeoutSec: 30,
@@ -36,7 +36,7 @@ final class DeviceMutualControlS2TransportTests: XCTestCase {
       paramSlots: [
         TatwoMutualControlParamSlotV1(
           name: "path",
-          constraint: .pathPrefix(["/Users/shared/inbox"]))
+          constraint: .pathPrefix(["/Users/example/inbox"]))
       ],
       resourceLimits: TatwoMutualControlResourceLimitsV1(
         timeoutSec: 60,
@@ -138,7 +138,7 @@ final class DeviceMutualControlS2TransportTests: XCTestCase {
   func testHighRiskWithoutHumanGateTokenRejected() throws {
     let inv = invocation(
       templateID: "fs.trash_path",
-      params: ["path": "/Users/shared/inbox/old"],
+      params: ["path": "/Users/example/inbox/old"],
       approvalID: nil)
     let (validation, limits, _) = try validate(
       invocation: inv, descriptor: deleteDescriptor())
@@ -151,7 +151,7 @@ final class DeviceMutualControlS2TransportTests: XCTestCase {
       accepted: true,
       requiresHumanGate: true,
       resolvedExecutable: "/usr/bin/trash",
-      resolvedArgv: ["/Users/shared/inbox/old"],
+      resolvedArgv: ["/Users/example/inbox/old"],
       templateID: "fs.trash_path",
       riskLevel: .highRisk,
       highRiskCategory: .delete,
@@ -356,7 +356,7 @@ final class DeviceMutualControlS2TransportTests: XCTestCase {
   func testHighRiskHappyPathWithHumanGateToken() throws {
     let inv = invocation(
       templateID: "fs.trash_path",
-      params: ["path": "/Users/shared/inbox/old"],
+      params: ["path": "/Users/example/inbox/old"],
       approvalID: "human-gate-token-42")
     let (validation, limits, digest) = try validate(
       invocation: inv, descriptor: deleteDescriptor())

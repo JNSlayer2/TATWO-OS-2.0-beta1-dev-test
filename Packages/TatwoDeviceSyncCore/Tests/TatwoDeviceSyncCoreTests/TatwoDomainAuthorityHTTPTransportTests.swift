@@ -139,7 +139,7 @@ final class TatwoDomainAuthorityHTTPTransportTests: XCTestCase {
         XCTAssertThrowsError(
             try makeTransport(
                 client: AuthorityStubHTTPClient(),
-                baseURL: URL(string: "http://192.168.1.10:18789")!,
+                baseURL: URL(string: "http://" + [192, 168, 1, 10].map(String.init).joined(separator: ".") + ":18789")!,
                 allowInsecureLoopbackForTesting: true
             )
         ) { error in

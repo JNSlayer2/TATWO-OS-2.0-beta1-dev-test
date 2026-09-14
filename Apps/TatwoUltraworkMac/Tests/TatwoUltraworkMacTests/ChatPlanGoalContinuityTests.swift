@@ -542,8 +542,8 @@ final class ChatPlanGoalContinuityTests: XCTestCase {
             ],
             projects: [
                 TatwoNativeChatProject(
-                    name: "chenyawei",
-                    workdir: "/Users/chenyawei",
+                    name: "example",
+                    workdir: "/Users/example",
                     threads: [
                         TatwoNativeChatThread(
                             id: importedID,
@@ -553,8 +553,8 @@ final class ChatPlanGoalContinuityTests: XCTestCase {
                             lastPreview: "must not become a Tatwo project")
                     ]),
                 TatwoNativeChatProject(
-                    name: "realtime-voice-chat-18",
-                    workdir: "/Users/chenyawei/Documents/codex/2026-07-26/realtime-voice-chat-18",
+                    name: "example-project",
+                    workdir: "/Users/example/Documents/example-project",
                     threads: [
                         TatwoNativeChatThread(
                             title: "即時語音聊天介面",
@@ -569,7 +569,7 @@ final class ChatPlanGoalContinuityTests: XCTestCase {
 
         XCTAssertEqual(merged.projects.map(\.name), ["Tatwo UI loop fixture"])
         XCTAssertEqual(merged.projects.map(\.workdir), ["/tmp/tatwo2-fixture"])
-        XCTAssertFalse(merged.projects.contains { $0.workdir.contains("chenyawei") })
+        XCTAssertFalse(merged.projects.contains { $0.workdir.contains("example") })
         XCTAssertEqual(
             Set(merged.threads.map(\.id)),
             Set([

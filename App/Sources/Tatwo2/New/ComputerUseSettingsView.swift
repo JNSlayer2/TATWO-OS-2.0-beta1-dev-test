@@ -54,7 +54,7 @@ struct ComputerUseSettingsView: View {
                     .frame(width: 10)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("啟用 Computer Use").font(.system(size: 13, weight: .semibold))
-                    Text("關閉後 AI 不能操作任何 App；每個 App 仍會先問你同意")
+                    Text("關閉後 AI 不能操作任何 App；macOS 系統權限仍須由你授予")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }

@@ -168,7 +168,7 @@ final class TatwoDocProjectionV1Tests: XCTestCase {
       body: fixtureBody,
       sourceRevision: fixtureRevision,
       // Private path used only for scope check; must not leak into header.
-      sourcePathForScopeCheck: "/Users/someone/Library/Application Support/secret/os.md")
+      sourcePathForScopeCheck: "/Users/example/Library/Application Support/secret/os.md")
     let doc = try TatwoDocProjectionV1.projectOne(source)
     XCTAssertFalse(TatwoDocProjectionV1.containsPrivateAbsolutePath(doc.header))
     XCTAssertFalse(doc.header.contains("/Users/"))
@@ -177,7 +177,7 @@ final class TatwoDocProjectionV1Tests: XCTestCase {
     XCTAssertFalse(doc.header.contains("someone"))
     // Rendered file must also stay clean of the private path.
     let rendered = doc.renderedFileText
-    XCTAssertFalse(rendered.contains("/Users/someone"))
+    XCTAssertFalse(rendered.contains("/Users/example"))
     XCTAssertFalse(TatwoDocProjectionV1.containsPrivateAbsolutePath(doc.header))
   }
 

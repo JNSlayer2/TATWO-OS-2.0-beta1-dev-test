@@ -21,15 +21,15 @@ final class TatwoAppVersionAlignmentPlannerTests: XCTestCase {
         )
         XCTAssertEqual(
             plan.rsyncDestination,
-            "/Users/guest/Applications/.TatwoUltrawork-alignment-staging.app"
+            "/Users/example/Applications/.TatwoUltrawork-alignment-staging.app"
         )
         XCTAssertEqual(
             plan.stagingPath,
-            "/Users/guest/Applications/.TatwoUltrawork-alignment-staging.app"
+            "/Users/example/Applications/.TatwoUltrawork-alignment-staging.app"
         )
         XCTAssertEqual(
             plan.rollbackBackupPath,
-            "/Users/guest/Applications/.TatwoUltrawork-alignment-backups/TatwoUltrawork-previous.app"
+            "/Users/example/Applications/.TatwoUltrawork-alignment-backups/TatwoUltrawork-previous.app"
         )
         XCTAssertEqual(
             plan.steps.map(\.kind),
@@ -79,7 +79,7 @@ final class TatwoAppVersionAlignmentPlannerTests: XCTestCase {
             configuration: .init(
                 primarySSHHost: "localhost",
                 primaryAppPath: "/srv/tatwo/TatwoUltrawork.app",
-                localAppPath: "/Users/guest/Applications/TatwoUltrawork.app"
+                localAppPath: "/Users/example/Applications/TatwoUltrawork.app"
             ),
             localRole: .secondary
         )
@@ -94,7 +94,7 @@ final class TatwoAppVersionAlignmentPlannerTests: XCTestCase {
         .init(
             primarySSHHost: "builder@mini.lan",
             primaryAppPath: "/srv/tatwo/TatwoUltrawork.app",
-            localAppPath: "/Users/guest/Applications/TatwoUltrawork.app"
+            localAppPath: "/Users/example/Applications/TatwoUltrawork.app"
         )
     }
 }

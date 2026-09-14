@@ -1,6 +1,7 @@
 // 來源：Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/ChatPageModel.swift；只保留 chat 畫面 Binding 欄位與本地假資料入口
 import SwiftUI
 import AppKit
+import Combine
 
 
 @MainActor
@@ -27,6 +28,8 @@ final class ChatPageModel: ObservableObject {
     let isLive: Bool
     private(set) var live: (any LiveEngineAPI)?
     private var localLive: ChatLiveEngine?
+    /// True while any local chat thread is running (used by the window-close confirmation gate).
+    var hasRunningWork: Bool { localLive?.hasRunningWork ?? false }
     private var pendingPR = PullRequestService.PendingPR()
     private var preparingPR = false
     private var localSelectedThreadID: UUID?
@@ -127,8 +130,8 @@ final class ChatPageModel: ObservableObject {
     @Published var requestOpenBrowserPanel = false
     @Published private(set) var requestedBrowserAgentURL: String?
     private var pendingBrowserAgentNavigation: BrowserAgentNavigation?
-    /// 每條討論串自己的瀏覽器分頁組（key＝討論串 id 小寫）；見 BrowserLaneRegistry.swift
-    @Published var browserLanesBySession: [String: BrowserLaneSnapshot] = [:]
+    private(set) var browserTabRegistry: BrowserTabRegistry = BrowserTabRegistry()
+    private var browserRegistryObservation: AnyCancellable?
     @Published var activePlanArtifact: TatwoPlanArtifactV1?
     @Published var planInspectorRequest: UUID?
     /// 2026-09-11 使用者回饋：提醒遺留太久 → 顯示 4–10 秒（依字數）後自動收掉；換成新提醒就重新計時。
@@ -692,18 +695,18 @@ final class ChatPageModel: ObservableObject {
             && environment["TATWO2_SELFTEST"] != "1"
         // 匯出（金樣）模式給兩台假設備，讓設定頁「設備」卡看得到清單的長相
         let fixtureDevices: [DeviceRecord] = [
-            DeviceRecord(id: "fixture-macbook", name: "MacBook（出門用）", host: "192.168.0.225", user: "chenyawei", sshPort: 22,
+            DeviceRecord(id: "fixture-macbook", name: "MacBook（範例）", host: "192.0.2.10", user: "example", sshPort: 22,
                          publicKeyFingerprint: "SHA256:qJ3v9nQb1xKfP2wYzR8tL4mH7cD0eA5sV6uB9nC1xYz", addedAt: Date(timeIntervalSinceReferenceDate: 799_000_000),
                          lastSeenAt: Date(timeIntervalSinceReferenceDate: 800_000_000), workdirMap: [:]),
-            DeviceRecord(id: "fixture-studio", name: "工作室 Studio", host: "ssh-studio.tatwo214.com", user: "layer2", sshPort: 22,
+            DeviceRecord(id: "fixture-studio", name: "工作室 Studio（範例）", host: "device.example", user: "example", sshPort: 22,
                          publicKeyFingerprint: "SHA256:aB8cD3eF6gH9iJ2kL5mN8oP1qR4sT7uV0wX3yZ6aB9c", addedAt: Date(timeIntervalSinceReferenceDate: 798_500_000),
                          lastSeenAt: Date(timeIntervalSinceReferenceDate: 799_900_000), workdirMap: [:]),
         ]
         if liveMode { self.devices = deviceRegistry.list() } else { self.devices = fixtureDevices }
         if !liveMode {
             self.gitHubAccounts = [
-                GitHubAccountRecord(username: "tatwo214", displayName: "tatwo214（刺青與 OS）", addedAt: Date(timeIntervalSinceReferenceDate: 799_000_000), scopes: ["repo", "workflow"], isDefault: true, folderMappings: [], mcpAlwaysOn: true),
-                GitHubAccountRecord(username: "JNSlayer2", displayName: "JNSlayer2（幼兒園研發部）", addedAt: Date(timeIntervalSinceReferenceDate: 799_500_000), scopes: ["repo"], isDefault: false, folderMappings: ["\(NSHomeDirectory())/Library/Application Support/tatwo2/repos/jns"], mcpAlwaysOn: false),
+                GitHubAccountRecord(username: "octocat", displayName: "octocat（範例帳號）", addedAt: Date(timeIntervalSinceReferenceDate: 799_000_000), scopes: ["repo", "workflow"], isDefault: true, folderMappings: [], mcpAlwaysOn: true),
+                GitHubAccountRecord(username: "demo", displayName: "demo（範例帳號）", addedAt: Date(timeIntervalSinceReferenceDate: 799_500_000), scopes: ["repo"], isDefault: false, folderMappings: ["\(NSHomeDirectory())/Library/Application Support/tatwo2/repos/demo"], mcpAlwaysOn: false),
             ]
             self.gitHubHelperInstalled = true
         }
@@ -731,6 +734,16 @@ final class ChatPageModel: ObservableObject {
             ]
         }
         self.isLive = liveMode
+        browserTabRegistry = liveMode ? .shared : BrowserTabRegistry()
+        browserTabRegistry.titleProvider = { [weak self] sessionID in
+            for project in self?.document.projects ?? [] {
+                if let thread = project.threads.first(where: { $0.id.uuidString.lowercased() == sessionID.lowercased() }) {
+                    return (thread.title, project.name)
+                }
+            }
+            return ("（已不存在的討論串）", "")
+        }
+        browserRegistryObservation = browserTabRegistry.changes.sink { [weak self] in self?.objectWillChange.send() }
         if let (engine, store) = botCoreFixture {
             self.live = engine
             self.localLive = engine
@@ -794,7 +807,7 @@ final class ChatPageModel: ObservableObject {
                                                                            RemoteThreadRow(id: UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!, title: "GitHub MCP 真帳號測試", statusLine: "好", isRunning: false)]),
                                                 RemoteProjectRow(id: UUID(uuidString: "00000000-0000-0000-0000-0000000000A2")!, name: "一般",
                                                                  threads: [RemoteThreadRow(id: UUID(uuidString: "00000000-0000-0000-0000-0000000000B3")!, title: "PO 文 bot", statusLine: "乒", isRunning: false)])]),
-                RemoteSidebarSection(deviceID: "fixture-studio", deviceName: "工作室 Studio", isOnline: false, lastSeenAt: now.addingTimeInterval(-3_600 * 5), projects: []),
+                RemoteSidebarSection(deviceID: "fixture-studio", deviceName: "工作室 Studio（範例）", isOnline: false, lastSeenAt: now.addingTimeInterval(-3_600 * 5), projects: []),
             ]
         }
         if !liveMode, let first = OSDocuments.list().first {
@@ -830,6 +843,13 @@ final class ChatPageModel: ObservableObject {
             engine.userPermissionPreset = permissionPreset
             self.botStore = BotStore(root: root)
             self.document = engine.document
+            do {
+                try browserTabRegistry.migrateLegacyBookmarks(
+                    at: TatwoRuntimeLayout.applicationSupportRoot().appendingPathComponent("browser-bookmarks-v1.json"),
+                    sessionIDs: Set(document.projects.flatMap { $0.threads.map { $0.id.uuidString.lowercased() } }))
+            } catch {
+                IslandNotice.shared.info(title: "舊書籤尚未遷移", detail: error.localizedDescription)
+            }
             self.selectedThreadID = engine.doc.selectedThreadID
             loadActivePlanCanvas()
             self.localSelectedThreadID = engine.doc.selectedThreadID
@@ -922,7 +942,7 @@ final class ChatPageModel: ObservableObject {
                 var lanes = TatwoBrowserLaneState()
                 lanes = TatwoBrowserLaneReducer.reduce(state: lanes, action: .open(id: TatwoBrowserLaneID(rawValue: "fx-1"), binding: .unboundReadOnly, title: "TradingView"), now: Date(timeIntervalSinceReferenceDate: 800_000_000))
                 let snap = BrowserLaneSnapshot(laneState: lanes, laneURLs: ["fx-1": URL(string: "https://tw.tradingview.com/symbols/BTCUSD/")!], updatedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
-                browserLanesBySession[threadID.uuidString.lowercased()] = snap
+                browserTabRegistry.storeLanes(snap, for: threadID.uuidString.lowercased())
             }
         }
         self.selectedThreadID = threadID
@@ -1461,6 +1481,32 @@ final class ChatPageModel: ObservableObject {
         // local Stop. That UI liveness state is not permission for new tools.
         guard (localLive as? ChatLiveEngine)?.acceptsBrowserAgentRequests(caller) == true else { return nil }
         return computerUseScope(caller)
+    }
+
+    /// Semantic page tools have their own effect/Island gate, not an AX/input grant.
+    /// Keep the same local, selected, running Chat boundary; read-only callers may
+    /// discover tools and the WebMCP policy rejects every non-read-only invocation.
+    func webMCPRequestScope(_ caller: UUID) -> String? {
+        guard localLive?.acceptsBrowserAgentRequests(caller) == true,
+              isLive, mode == .chat, selectedRemote == nil, selectedThreadID == caller,
+              let record = live?.threadRecord(caller), !record.isArchived,
+              record.parentThreadID == nil, record.deviceID == nil,
+              botIDForBridge(threadID: caller) == nil else { return nil }
+        let domain = botLibraryForBridge?.snapshot.spaceWorkspace.selectedDomainID ?? "none"
+        let workdir = record.cwdOverride ?? live?.projectRecord(record.projectID)?.workdir ?? NSHomeDirectory()
+        return "\(caller.uuidString)|\(record.projectID?.uuidString ?? "none")|\(domain)|\(workdir)"
+    }
+
+    /// W58 semantic login only. Local selected Bot conversations may use their own accounts;
+    /// this does not widen Computer Use or WebMCP. Read-only is rejected by the login policy.
+    func aiVaultRequestScope(_ caller: UUID) -> String? {
+        guard localLive?.acceptsBrowserAgentRequests(caller) == true,
+              isLive, mode == .chat, selectedRemote == nil, selectedThreadID == caller,
+              let record = live?.threadRecord(caller), !record.isArchived,
+              record.parentThreadID == nil, record.deviceID == nil else { return nil }
+        let domain = botLibraryForBridge?.snapshot.spaceWorkspace.selectedDomainID ?? "none"
+        let workdir = record.cwdOverride ?? live?.projectRecord(record.projectID)?.workdir ?? NSHomeDirectory()
+        return "\(caller.uuidString)|\(record.projectID?.uuidString ?? "none")|\(domain)|\(workdir)|\(botIDForBridge(threadID: caller) ?? "none")"
     }
 
     func queueBrowserAgentNavigation(_ navigation: BrowserAgentNavigation) {

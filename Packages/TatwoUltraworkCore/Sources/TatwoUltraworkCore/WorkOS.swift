@@ -3043,9 +3043,9 @@ public enum WorkOSFactory {
     ]
 
     return WorkOSShowLoopsProjection(
-      sourceURL: "https://github.com/JNSlayer2/show-loops",
+      sourceURL: "https://example.com/show-loops",
       sourceStatus:
-        "optional_external_repo_not_accessible_or_private; using local show-loops-compatible projection",
+        "example_reference_only; using local show-loops-compatible projection",
       projectionStyle: "show-loops-compatible-plan-loops-goal-cycle",
       readOnly: true,
       visualizerCanPromoteRunState: false,

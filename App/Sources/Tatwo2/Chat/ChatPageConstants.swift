@@ -67,9 +67,10 @@ enum ChatRunMode: RawRepresentable, CaseIterable, Identifiable, Hashable {
         return rawValue
     }
 
-    /// Browser is a design-only work space; it stays hidden unless explicitly previewed.
+    /// Shipped browser bundles enable this surface; unbundled previews remain opt-in.
     static var browserPreviewEnabled: Bool {
         ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] == "1"
+            || Bundle.main.object(forInfoDictionaryKey: "TatwoBrowserWorkspaceEnabled") as? Bool == true
     }
 
     static func previewFilteredModes(_ modes: [ChatRunMode], enabled: Bool) -> [ChatRunMode] {

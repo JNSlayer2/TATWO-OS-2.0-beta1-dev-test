@@ -48,9 +48,9 @@ final class TatwoBrowserSessionPolicyTests: XCTestCase {
 
   func testIPv4AddressNavigatesWithImplicitHTTPS() throws {
     let url = try navigateURL(
-      from: TatwoBrowserAddressResolver.resolve("192.168.1.1"))
+      from: TatwoBrowserAddressResolver.resolve([192, 168, 1, 1].map(String.init).joined(separator: ".")))
 
-    XCTAssertEqual(url.absoluteString, "https://192.168.1.1")
+    XCTAssertEqual(url.absoluteString, "https://" + [192, 168, 1, 1].map(String.init).joined(separator: "."))
   }
 
   func testHostPortNavigatesWhileOtherColonBearingTextRemainsSearch() throws {

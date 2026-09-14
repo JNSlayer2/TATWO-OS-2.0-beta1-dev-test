@@ -15,7 +15,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     enabled: Bool = true,
     executable: String = "/bin/ls",
     argvTemplate: [String] = ["-la", "{path}"],
-    pathRoots: [String] = ["/Users/shared/inbox", "/tmp/mutual-control"]
+    pathRoots: [String] = ["/Users/example/inbox", "/tmp/mutual-control"]
   ) -> TatwoDeviceCapabilityDescriptorV1 {
     TatwoDeviceCapabilityDescriptorV1(
       templateID: "fs.list_dir",
@@ -46,7 +46,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
       paramSlots: [
         TatwoMutualControlParamSlotV1(
           name: "path",
-          constraint: .pathPrefix(["/Users/shared/inbox"]))
+          constraint: .pathPrefix(["/Users/example/inbox"]))
       ],
       resourceLimits: TatwoMutualControlResourceLimitsV1(
         timeoutSec: 60,
@@ -134,12 +134,12 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     let descriptor = listDirDescriptor()
     let inv = invocation(
       templateID: "fs.list_dir",
-      params: ["path": "/Users/shared/inbox/report"])
+      params: ["path": "/Users/example/inbox/report"])
     let result = try validateSigned(invocation: inv, descriptor: descriptor)
     XCTAssertTrue(result.accepted, result.detail ?? "")
     XCTAssertFalse(result.requiresHumanGate)
     XCTAssertEqual(result.resolvedExecutable, "/bin/ls")
-    XCTAssertEqual(result.resolvedArgv, ["-la", "/Users/shared/inbox/report"])
+    XCTAssertEqual(result.resolvedArgv, ["-la", "/Users/example/inbox/report"])
     XCTAssertNil(result.errorCode)
     XCTAssertNotNil(result.invokeCanonicalDigest)
   }
@@ -156,9 +156,9 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     // `;` / `$()` / spaces / quotes are literal argv bytes — not shell-interpreted.
     // Path must still satisfy pathPrefix whitelist.
     let descriptor = listDirDescriptor(
-      pathRoots: ["/Users/shared/inbox"])
+      pathRoots: ["/Users/example/inbox"])
     // Use a path under root that embeds metacharacter-looking segments as path components.
-    let path = "/Users/shared/inbox/file;rm -rf"
+    let path = "/Users/example/inbox/file;rm -rf"
     let result = try validateSigned(
       invocation: invocation(templateID: "fs.list_dir", params: ["path": path]),
       descriptor: descriptor)
@@ -173,8 +173,8 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     let result = try validateSigned(
       invocation: invocation(
         templateID: "fs.list_dir",
-        params: ["path": "/Users/shared/inbox-evil/secret"]),
-      descriptor: listDirDescriptor(pathRoots: ["/Users/shared/inbox"]))
+        params: ["path": "/Users/example/inbox-evil/secret"]),
+      descriptor: listDirDescriptor(pathRoots: ["/Users/example/inbox"]))
     XCTAssertFalse(result.accepted)
     XCTAssertEqual(result.errorCode, .paramInvalid)
   }
@@ -213,7 +213,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
   // MARK: - Injection attempts
 
   func testNULInjectionRejected() throws {
-    let nulPath = "/Users/shared/inbox/a\u{0}b"
+    let nulPath = "/Users/example/inbox/a\u{0}b"
     let result = try validateSigned(
       invocation: invocation(templateID: "fs.list_dir", params: ["path": nulPath]),
       descriptor: listDirDescriptor())
@@ -222,7 +222,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
   }
 
   func testNewlineInjectionRejected() throws {
-    let path = "/Users/shared/inbox/a\nb"
+    let path = "/Users/example/inbox/a\nb"
     let result = try validateSigned(
       invocation: invocation(templateID: "fs.list_dir", params: ["path": path]),
       descriptor: listDirDescriptor())
@@ -445,7 +445,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     let result = TatwoMutualControlValidatorV1.validate(
       invocation: invocation(
         templateID: "fs.list_dir",
-        params: ["path": "/Users/shared/inbox/a"]),
+        params: ["path": "/Users/example/inbox/a"]),
       manifest: empty,
       pinnedIdentity: trust.localIdentity,
       requireSignature: true)
@@ -467,7 +467,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     let noApproval = TatwoMutualControlValidatorV1.validate(
       invocation: invocation(
         templateID: "fs.trash_path",
-        params: ["path": "/Users/shared/inbox/old"],
+        params: ["path": "/Users/example/inbox/old"],
         capabilityVersion: 2),
       manifest: manifest,
       pinnedIdentity: trust.localIdentity,
@@ -481,7 +481,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     let withApproval = TatwoMutualControlValidatorV1.validate(
       invocation: invocation(
         templateID: "fs.trash_path",
-        params: ["path": "/Users/shared/inbox/old"],
+        params: ["path": "/Users/example/inbox/old"],
         capabilityVersion: 2,
         approvalID: "approval-once-1"),
       manifest: manifest,
@@ -665,7 +665,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     let descriptor = deleteDescriptor()
     let inv = invocation(
       templateID: "fs.trash_path",
-      params: ["path": "/Users/shared/inbox/old"])
+      params: ["path": "/Users/example/inbox/old"])
     let validation = try validateSigned(invocation: inv, descriptor: descriptor)
     XCTAssertEqual(validation.errorCode, .highRiskNoApproval)
     let receipt = try TatwoMutualControlReceiptV1.makeRejected(
@@ -685,7 +685,7 @@ final class DeviceMutualControlS1Tests: XCTestCase {
     XCTAssertEqual(receipt.rejectCode, .highRiskNoApproval)
     XCTAssertEqual(receipt.riskLevel, .highRisk)
     XCTAssertEqual(receipt.highRiskCategory, .delete)
-    XCTAssertEqual(receipt.actualArgv, ["/Users/shared/inbox/old"])
+    XCTAssertEqual(receipt.actualArgv, ["/Users/example/inbox/old"])
   }
 
   func testPurposeMismatchFleetRedirect() throws {

@@ -161,7 +161,7 @@ final class TatwoDevicePressureMonitorTests: XCTestCase {
     XCTAssertTrue(result.reasonCodes.contains("sensor_unavailable:data_volume_free_gib"))
     XCTAssertTrue(result.reasonCodes.contains(
       "sensor_unavailable_reason:data_volume_free_gib:sensor_timeout_inflight_limit"))
-    XCTAssertFalse(result.reasonCodes.contains { $0.contains("/Users") || $0.contains("layer2") })
+    XCTAssertFalse(result.reasonCodes.contains { $0.contains("/Users") || $0.contains("example") })
 
     let receipt = try TatwoHostPressureReceiptV1.make(
       snapshot: snapshot,
@@ -170,7 +170,7 @@ final class TatwoDevicePressureMonitorTests: XCTestCase {
     let encoded = String(data: try JSONEncoder().encode(receipt), encoding: .utf8) ?? ""
     XCTAssertTrue(encoded.contains("sensor_timeout_inflight_limit"))
     XCTAssertFalse(encoded.contains("/Users"))
-    XCTAssertFalse(encoded.contains("layer2"))
+    XCTAssertFalse(encoded.contains("example"))
   }
 
   func testUnavailableSensorDiagnosticsAreCanonicalAndReceiptTamperEvident() throws {

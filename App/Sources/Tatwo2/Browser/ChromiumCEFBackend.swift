@@ -1924,10 +1924,12 @@ enum TatwoCEFProfileLocationResolver {
             throw TatwoCEFProfileLeaseError.invalidProfilePath
         }
 
+        BrowserEngineStartupTelemetry.shared.leaseAcquired()
         do {
             try prepareDirectories(for: location)
             return lease
         } catch {
+            BrowserEngineStartupTelemetry.shared.failed()
             if let lease {
                 leaseRegistry.release(lease)
             }
@@ -2079,8 +2081,28 @@ enum TatwoCEFContainerTeardownContract {
     }
 }
 
+// W57c: the password channel is deliberately not an Agent bridge capability.
+extension TatwoCEFBrowserView: BrowserAILoginTarget {
+    var aiLoginIsAgent: Bool { browserActor == .agent }
+    var aiLoginOrigin: String? { currentURLString }
+    var aiLoginState: BrowserAILoginState {
+        let state = agentLoginState
+        return BrowserAILoginState(phase: state["phase"] as? String ?? "idle",
+            formID: state["formID"] as? String ?? "", generation: (state["generation"] as? NSNumber)?.uint64Value ?? 0,
+            error: state["error"] as? String ?? "", finalURL: state["finalURL"] as? String ?? "",
+            title: state["title"] as? String ?? "")
+    }
+}
+
+extension TatwoCEFBrowserView: BrowserPasswordAssistBridge {
+    var passwordAssistIsHuman: Bool { browserActor == .human && !agentControlled }
+    var passwordAssistOrigin: String? { currentURLString }
+}
+
 @MainActor
 final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到 CEF 視圖（原 private）
+    private var passwordAssist: BrowserPasswordAssist?
+    private var webFeatures: BrowserWebFeatures?
     private(set) var browserView: TatwoCEFBrowserView?
     private(set) var mountIdentity: EmbeddedChromiumBrowserMountIdentity?
     private var profileLease: TatwoCEFProfileLeaseRegistry.Lease?
@@ -2098,6 +2120,10 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
         profileLease: TatwoCEFProfileLeaseRegistry.Lease?
     ) {
         self.browserView = browserView
+        webFeatures = BrowserWebFeatures(browser: browserView, container: self)
+        if browserView.browserActor == .human {
+            passwordAssist = BrowserPasswordAssist(bridge: browserView)
+        }
         self.mountIdentity = mountIdentity
         self.profileLease = profileLease
         closeRequested = false
@@ -2124,6 +2150,7 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { browserView?.cancelWebFeatures() }
         logEmbeddingSnapshot(
             phase: "container_did_move_to_window",
             force: true)
@@ -2187,7 +2214,8 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
         }
         lastGeometrySyncUptime =
             ProcessInfo.processInfo.systemUptime
-        browserView.frame = bounds
+        // W57d fullscreen keeps the native browser in a same-window overlay.
+        if browserView.superview === self { browserView.frame = bounds }
         browserView.needsLayout = true
         logEmbeddingSnapshot(phase: phase, force: forceLog)
     }
@@ -2259,7 +2287,14 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
         ])
     }
 
+    func requestPDF(download: Bool = false) { webFeatures?.requestPDF(download: download) }
+
     func close(completion: (() -> Void)? = nil) {
+        browserView?.cancelWebFeatures()
+        webFeatures?.invalidate()
+        webFeatures = nil
+        passwordAssist?.invalidate()
+        passwordAssist = nil
         if closeCompleted {
             completion?()
             return
@@ -2406,12 +2441,23 @@ struct EmbeddedChromiumNavigationStateProjector {
 final class TatwoCEFTabHostView: NSView {
     @MainActor
     private final class Entry {
+        var memorySlot: UUID?
         let container = TatwoCEFContainerView(frame: .zero)
         var projector = EmbeddedChromiumNavigationStateProjector()
         var state: EmbeddedBrowserNavigationState = .blank
+        var historyGeneration: UInt64?
+        var zoomGeneration: UInt64?
+        var metadata: (url: String, generation: UInt64, title: String?, favicon: Data?)?
     }
 
     let mountIdentity: EmbeddedChromiumBrowserMountIdentity
+    var onTabPopupRequested: ((String, URL) -> Void)?
+    var onIdle: (() -> Void)?
+    var isIdle: Bool { entries.isEmpty && closingCount == 0 }
+    var onDailyShortcut: ((String, String) -> Void)?
+    var onFindResult: ((String, Int, Int) -> Void)?
+    var onPageMetadataChange: ((String, String, String?, Data?) -> Void)?
+    var onPopupRequested: (URL) -> Void = { _ in }
     var onNavigationStateChange: (String, EmbeddedBrowserNavigationState) -> Void
     private var entries: [String: Entry] = [:]
     private var profileLease: TatwoCEFProfileLeaseRegistry.Lease?
@@ -2420,11 +2466,13 @@ final class TatwoCEFTabHostView: NSView {
     private var selectedTabID: String?
     private var selectedURL: URL?
     private var selectedAgentNavigation: BrowserAgentNavigation?
+    private var selectedIsAgentTab = false
     private var openTabIDs: Set<String> = []
     private var failedTabIDs: Set<String> = []
     private var lastCommandID: UUID?
     private var pendingCommand: EmbeddedBrowserCommand?
     private var geometryDragInProgress = false
+    private var humanInputMonitor: Any?
 
     init(
         mountIdentity: EmbeddedChromiumBrowserMountIdentity,
@@ -2433,21 +2481,96 @@ final class TatwoCEFTabHostView: NSView {
         self.mountIdentity = mountIdentity
         self.onNavigationStateChange = onNavigationStateChange
         super.init(frame: .zero)
+        // W60: a not-yet-mounted tab shows the app palette, never system gray.
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(TatwoActivePalette.current.canvasBase).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = NSColor(TatwoActivePalette.current.canvasBase).cgColor
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let humanInputMonitor { NSEvent.removeMonitor(humanInputMonitor) }
+        humanInputMonitor = nil
+        guard window != nil else { return }
+        humanInputMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { [weak self] event in
+            MainActor.assumeIsolated { self?.recoverHumanInput(event) }
+            return event
+        }
+    }
+
+    private func recoverHumanInput(_ event: NSEvent) {
+        guard event.window === window, !isHiddenOrHasHiddenAncestor,
+              let selectedTabID, let entry = entries[selectedTabID],
+              let browser = entry.container.browserView,
+              !entry.container.isHiddenOrHasHiddenAncestor else { return }
+        guard let source = event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) else {
+            if browser.agentControlled { NSLog("phase=actor_recovery result=ignored reason=missing_event_source") }
+            return // Unknown/synthetic input must not grant human authority.
+        }
+        guard source != Int64(getpid()) else { return }
+        let target: NSView?
+        if event.type == .keyDown { target = window?.firstResponder as? NSView }
+        else if let parent = entry.container.superview {
+            target = entry.container.hitTest(parent.convert(event.locationInWindow, from: nil))
+        } else { target = nil }
+        guard let target, target === entry.container || target.isDescendant(of: entry.container),
+              browser.browserActor == .agent || browser.agentControlled || browser.humanPreferencesDeferred else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard event.timestamp.isFinite, now >= event.timestamp, now - event.timestamp <= 1 else { return }
+        // Invalidate queued navigation immediately, but retain strict actor/prefs until idle.
+        BrowserAgentBridge.shared.revokeRequests()
+        pendingCommand = nil
+        browser.cancelAgentLogin()
+        guard browser.browserActor == .human else { return }
+        humanRecoveryGeneration &+= 1
+        restoreHumanWhenIdle(tabID: selectedTabID, humanInputAt: event.timestamp,
+                             generation: humanRecoveryGeneration)
+    }
+
+    private var humanRecoveryGeneration: UInt64 = 0
+    private func restoreHumanWhenIdle(tabID: String, humanInputAt: TimeInterval, generation: UInt64) {
+        guard generation == humanRecoveryGeneration, selectedTabID == tabID,
+              window != nil, !isHiddenOrHasHiddenAncestor,
+              let browser = entries[tabID]?.container.browserView,
+              browser.agentControlled || browser.humanPreferencesDeferred else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let actions = BrowserAgentBridge.shared.agentActionState
+        if BrowserActorRecovery.shouldRestore(agentControlled: browser.agentControlled || browser.humanPreferencesDeferred,
+            inFlight: actions.inFlight, lastAgentActionAt: actions.lastAgentActionAt,
+            humanInputAt: humanInputAt, now: now) {
+            _ = browser.restoreHumanInteraction()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.restoreHumanWhenIdle(tabID: tabID, humanInputAt: humanInputAt, generation: generation)
+            }
+        }
     }
 
     required init?(coder: NSCoder) { return nil }
 
     func update(
         tabID: String?, initialURL: URL?, initialAgentNavigation: BrowserAgentNavigation? = nil,
+        isAgentTab: Bool = false,
         openTabIDs: Set<String>,
         command: EmbeddedBrowserCommand?, isGeometryDragInProgress: Bool
     ) {
         guard !isClosing else { return }
+        layer?.backgroundColor = NSColor(TatwoActivePalette.current.canvasBase).cgColor
         let selectionChanged = selectedTabID != tabID
-        if selectionChanged { pendingCommand = nil }
+        if selectionChanged {
+            pendingCommand = nil
+            if let selectedTabID { entries[selectedTabID]?.container.browserView?.stopFinding() }
+        }
         selectedTabID = tabID
+        if tabID == nil { BrowserNativeMemoryBudget.shared.cancelWait(owner: self) }
         selectedURL = initialURL
         selectedAgentNavigation = initialAgentNavigation
+        selectedIsAgentTab = isAgentTab
         self.openTabIDs = openTabIDs
         geometryDragInProgress = isGeometryDragInProgress
         if let command, command.id != lastCommandID {
@@ -2474,6 +2597,7 @@ final class TatwoCEFTabHostView: NSView {
                 window?.makeFirstResponder(nil)
             }
             // Real native visibility also scopes BrowserAgentBridge discovery.
+            if hidden, !entry.container.isHidden { entry.container.browserView?.cancelWebFeatures() }
             entry.container.isHidden = hidden
             entry.container.setGeometryDragInProgress(geometryDragInProgress)
         }
@@ -2493,12 +2617,21 @@ final class TatwoCEFTabHostView: NSView {
         // Do not race an old context's asynchronous native close with a new
         // root context at the same profile path.
         guard !entries.isEmpty || closingCount == 0 else { return }
+        // W58 actor is fixed at construction, not inferred from takeover or a login argument.
+        // Existing human tabs are never converted into agent tabs to satisfy browser_login.
+        let agentMount = selectedIsAgentTab
+        let sameActorEntries = entries.values.filter { $0.container.browserView?.browserActor == (agentMount ? .agent : .human) }
         let source = entries.values.compactMap { $0.container.browserView }
-            .first { $0.canShareRequestContext }
-        if !entries.isEmpty && source == nil {
+            .first { $0.canShareRequestContext && $0.browserActor == (agentMount ? .agent : .human) &&
+                (agentMount || !$0.agentControlled) }
+        // A different actor may remain alive while the last context in this group closes.
+        guard source != nil || closingCount == 0 else { return }
+        if !sameActorEntries.isEmpty && source == nil {
             // The first context's actual readiness callback resumes this work.
             // A failed source is not readiness and must not cause a retry loop.
-            if entries.values.allSatisfy({ $0.state.visibleError != nil }) {
+            if sameActorEntries.contains(where: { $0.container.browserView?.agentControlled == true }) {
+                fail(tabID, message: "請先結束這個人用分頁的 AI 操作，再開啟人用分頁")
+            } else if sameActorEntries.allSatisfy({ $0.state.visibleError != nil }) {
                 fail(tabID, message: "瀏覽器未能就緒，請重新載入")
             }
             return
@@ -2513,6 +2646,13 @@ final class TatwoCEFTabHostView: NSView {
             initialURL = requestedURL
             initialNavigation = selectedAgentNavigation
         }
+        guard let memorySlot = BrowserNativeMemoryBudget.shared.acquire(owner: self, retry: { [weak self] in
+            self?.ensureSelectedTab()
+        }) else { return }
+        var slotTransferred = false
+        defer {
+            if !slotTransferred { BrowserNativeMemoryBudget.shared.release(memorySlot) }
+        }
         do {
             if let initialNavigation {
                 guard initialNavigation.url.absoluteString == initialURL.absoluteString,
@@ -2523,12 +2663,16 @@ final class TatwoCEFTabHostView: NSView {
             // Agent URLs enter only the gate-aware load path below. Context
             // construction is host setup, not an input enqueue: keep it outside
             // the session lock and never give it an unguarded remote URL.
-            let startupURL = initialNavigation == nil ? initialURL.absoluteString : "about:blank"
+            let startupURL = "about:blank"
             let create: @MainActor () throws -> TatwoCEFBrowserView
             if let source {
                 create = {
-                    try TatwoCEFBrowserView(frame: .zero, sharingContextWith: source,
-                                           initialURL: startupURL)
+                    if agentMount {
+                        return try TatwoCEFBrowserView(frame: .zero, sharingContextWith: source,
+                                                      initialURL: startupURL, actor: .agent)
+                    }
+                    return try TatwoCEFBrowserView(frame: .zero, sharingContextWith: source,
+                                           initialURL: startupURL, actor: .human)
                 }
             } else {
                 guard let location = try TatwoCEFProfileLocationResolver.resolve(
@@ -2538,20 +2682,40 @@ final class TatwoCEFTabHostView: NSView {
                     fail(tabID, message: "瀏覽器安裝或資料目錄無效，無法啟動")
                     return
                 }
-                profileLease = try TatwoCEFProfileLocationResolver.prepareForRuntime(location)
-                try TatwoCEFRuntime.initialize(
-                    withRootCachePath: location.rootCachePath,
-                    helperExecutablePath: location.helperExecutablePath,
-                    logFilePath: location.logFilePath,
-                    bundledDenyListPath: BrowserBundledHostDenyList.verifiedResourceURL().path)
+                if profileLease == nil {
+                    profileLease = try TatwoCEFProfileLocationResolver.prepareForRuntime(location)
+                }
+                do {
+                    TatwoCEFRuntime.configureRendererProcessLimit(BrowserMemorySettings.load().limit() ?? 0)
+                    try TatwoCEFRuntime.initialize(
+                        withRootCachePath: location.rootCachePath,
+                        helperExecutablePath: location.helperExecutablePath,
+                        logFilePath: location.logFilePath,
+                        bundledDenyListPath: BrowserBundledHostDenyList.verifiedResourceURL().path)
+                    BrowserEngineStartupTelemetry.shared.initialized()
+                } catch {
+                    BrowserEngineStartupTelemetry.shared.failed()
+                    throw error
+                }
                 // Profile I/O and runtime setup above must never hold the
                 // Computer Use dispatch lock. Revalidate after they finish.
                 create = {
-                    try TatwoCEFBrowserView(frame: .zero, persistentProfile: location.persistentProfilePath,
-                                           initialURL: startupURL)
+                    if agentMount {
+                        // AI contexts are ephemeral: never inherit or later publish human cookies.
+                        return try TatwoCEFBrowserView(frame: .zero, persistentProfile: nil,
+                                                      initialURL: startupURL, actor: .agent)
+                    }
+                    return try TatwoCEFBrowserView(frame: .zero, persistentProfile: location.persistentProfilePath,
+                                           initialURL: startupURL, actor: .human)
                 }
             }
             let browser = try create()
+            if !agentMount { BrowserHumanInteraction.shared.configure(browser) { [weak self] url in
+                guard let self else { return }
+                if let handler = self.onTabPopupRequested { handler(tabID, url) }
+                else { self.onPopupRequested(url) }
+            } }
+            if initialNavigation == nil { browser.loadURLString(initialURL.absoluteString) }
             if let initialNavigation {
                 // Frame is still zero and unmounted, so this pairs URL + gate
                 // before native startup. The gate reads the actual installed
@@ -2561,6 +2725,8 @@ final class TatwoCEFTabHostView: NSView {
                     profileID: mountIdentity.profile.dataStoreIdentifier)
             }
             let entry = Entry()
+            entry.memorySlot = memorySlot
+            slotTransferred = true
             entries[tabID] = entry
             browser.stateHandler = { [weak self, weak entry] (
                 committedURL, generation, canGoBack, canGoForward,
@@ -2580,6 +2746,71 @@ final class TatwoCEFTabHostView: NSView {
                 // completion, opens a tab selected during context startup.
                 self.ensureSelectedTab()
             }
+            // Work space opts in; chat's existing host does not fetch metadata.
+            if onPageMetadataChange != nil {
+                browser.pageMetadataHandler = { [weak self, weak browser, weak entry] url, generation, title, favicon in
+                    guard let self, let browser, let entry, !self.isClosing,
+                          self.entries[tabID] === entry,
+                          browser.navigationGeneration == generation else { return }
+                    let previous = entry.metadata
+                    let samePage = previous?.url == url && previous?.generation == generation
+                    entry.metadata = (url, generation, title ?? (samePage ? previous?.title : nil),
+                                      favicon ?? (samePage ? previous?.favicon : nil))
+                    // Defer past SwiftUI updates and reject callbacks from closed/recreated tabs.
+                    DispatchQueue.main.async { [weak self, weak browser, weak entry] in
+                        guard let self, let browser, let entry, !self.isClosing,
+                              self.entries[tabID] === entry,
+                              browser.navigationGeneration == generation,
+                              browser.currentURLString == url else { return }
+                        if browser.browserActor == .human, !browser.agentControlled, let pageURL = URL(string: url) {
+                            if entry.zoomGeneration != generation, let host = pageURL.host?.lowercased() {
+                                entry.zoomGeneration = generation
+                                browser.setZoomLevel(BrowserGeneralSettings.load().zoomByHost[host] ?? 0)
+                            }
+                            if entry.historyGeneration != generation, let title, !title.isEmpty {
+                                entry.historyGeneration = generation
+                                Task {
+                                    do { try await BrowserHistoryStore.shared.recordVisit(url: pageURL, title: title) }
+                                    catch { NSLog("Browser history write failed: %@", error.localizedDescription) }
+                                }
+                            }
+                        }
+                        self.onPageMetadataChange?(tabID, url, title, favicon)
+                    }
+                }
+            }
+            browser.contextSearchEngineTitle = BrowserGeneralSettings.load().searchEngine.title
+            browser.onDailyShortcut = { [weak self, weak browser, weak entry] kind in
+                guard let self, let browser, let entry, !self.isClosing,
+                      self.entries[tabID] === entry, self.selectedTabID == tabID,
+                      browser.browserActor == .human, !browser.agentControlled else { return }
+                self.onDailyShortcut?(tabID, kind)
+            }
+            browser.onFindResult = { [weak self, weak entry] count, active in
+                guard let self, let entry, self.entries[tabID] === entry, !self.isClosing else { return }
+                self.onFindResult?(tabID, Int(count), Int(active))
+            }
+            browser.onContextMenuAction = { [weak self, weak browser, weak entry] kind, value in
+                guard let self, let browser, let entry, self.entries[tabID] === entry,
+                      !self.isClosing, browser.browserActor == .human, !browser.agentControlled else { return }
+                switch kind {
+                case "open", "search":
+                    let url = kind == "search" ? BrowserGeneralSettings.load().searchEngine.queryURL(value) : URL(string: value)
+                    if let url { self.onTabPopupRequested?(tabID, url) }
+                case "copyURL", "copy":
+                    if kind == "copy", value.isEmpty { browser.performContextEdit(kind) }
+                    else {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(value, forType: .string)
+                    }
+                case "cut", "paste", "selectAll": browser.performContextEdit(kind)
+                case "download": browser.downloadImageURL(value)
+                case "back": browser.goBack()
+                case "forward": browser.goForward()
+                case "reload": browser.reload()
+                default: break
+                }
+            }
             browser.webMCPToolsHandler = { snapshotJSON in
                 TatwoWebMCPRuntime.shared.update(
                     tabID: tabID, snapshotJSONString: snapshotJSON)
@@ -2594,6 +2825,7 @@ final class TatwoCEFTabHostView: NSView {
                     name, argumentsJSON: arguments,
                     navigationGeneration: generation, completion: completion)
             }
+            BrowserAgentBridge.shared.attachAILogin(tabID: tabID, view: browser)
             entry.container.frame = bounds
             entry.container.autoresizingMask = [.width, .height]
             // Consume before mounting: native startup can publish synchronously.
@@ -2615,12 +2847,27 @@ final class TatwoCEFTabHostView: NSView {
     private func executePendingCommand(on browser: TatwoCEFBrowserView) {
         guard let command = pendingCommand else { return }
         pendingCommand = nil
+        let container = entries.values.first { $0.container.browserView === browser }?.container
         let enqueue: @MainActor () -> Void
         switch command.action {
         case let .load(url): enqueue = { browser.loadURLString(url.absoluteString) }
         case .goBack: enqueue = { browser.goBack() }
         case .goForward: enqueue = { browser.goForward() }
         case .reload: enqueue = { browser.reload() }
+        case .stopLoading: enqueue = { browser.stopLoading() }
+        case .printPage: enqueue = { browser.printPage() }
+        case .printPDF: enqueue = { container?.requestPDF() }
+        case .openPDF: enqueue = { container?.requestPDF(download: true) }
+        case let .find(text, forward, matchCase): enqueue = { browser.findText(text, forward: forward, matchCase: matchCase) }
+        case .stopFinding: enqueue = { browser.stopFinding() }
+        case let .zoom(level): enqueue = {
+            browser.setZoomLevel(level)
+            guard let host = URL(string: browser.currentURLString ?? "")?.host?.lowercased() else { return }
+            var settings = BrowserGeneralSettings.load()
+            settings.zoomByHost[host] = level
+            do { try settings.save() }
+            catch { NSLog("Browser zoom write failed: %@", error.localizedDescription) }
+        }
         }
         do {
             if let navigation = command.agentNavigation {
@@ -2659,14 +2906,29 @@ final class TatwoCEFTabHostView: NSView {
             visibleError: .runtimeMessage(message)), tabID: tabID)
     }
 
+    /// Flush already-committed native state before marking a tab sleeping.
+    /// This avoids losing an event waiting in the main queue when the entry closes.
+    func flushTabState(_ tabID: String) {
+        guard !isClosing, let entry = entries[tabID] else { return }
+        onNavigationStateChange(tabID, entry.state)
+        if let metadata = entry.metadata,
+           let browser = entry.container.browserView,
+           browser.navigationGeneration == metadata.generation,
+           browser.currentURLString == metadata.url {
+            onPageMetadataChange?(tabID, metadata.url, metadata.title, metadata.favicon)
+        }
+    }
+
     private func closeTab(_ tabID: String) {
         guard let entry = entries.removeValue(forKey: tabID) else { return }
         TatwoWebMCPRuntime.shared.detach(tabID: tabID)
+        BrowserAgentBridge.shared.detachAILogin(tabID: tabID)
         closingCount += 1
         // The completion retains the host/lease until CEF OnBeforeClose, even
         // after SwiftUI has dismantled the host. There is no delayed release.
         entry.container.close { [self] in
             closingCount -= 1
+            if let slot = entry.memorySlot { BrowserNativeMemoryBudget.shared.release(slot) }
             releaseLeaseIfIdle()
             if !isClosing { ensureSelectedTab() }
         }
@@ -2679,11 +2941,13 @@ final class TatwoCEFTabHostView: NSView {
             TatwoCEFProfileLeaseRegistry.shared.release(profileLease)
             self.profileLease = nil
         }
+        onIdle?()
     }
 
     func close() {
         guard !isClosing else { return }
         isClosing = true
+        BrowserNativeMemoryBudget.shared.cancelWait(owner: self)
         pendingCommand = nil
         for id in Array(entries.keys) { closeTab(id) }
         releaseLeaseIfIdle()
@@ -2698,6 +2962,7 @@ struct EmbeddedChromiumBrowserView: NSViewRepresentable {
     let openTabIDs: Set<String>
     let command: EmbeddedBrowserCommand?
     let isGeometryDragInProgress: Bool
+    var onPopupRequested: (URL) -> Void = { _ in }
     let onNavigationStateChange: (String, EmbeddedBrowserNavigationState) -> Void
 
     func makeNSView(context: Context) -> TatwoCEFTabHostView {
@@ -2707,6 +2972,7 @@ struct EmbeddedChromiumBrowserView: NSViewRepresentable {
     }
 
     func updateNSView(_ host: TatwoCEFTabHostView, context: Context) {
+        host.onPopupRequested = onPopupRequested
         host.onNavigationStateChange = onNavigationStateChange
         host.update(
             tabID: tabID, initialURL: initialURL, initialAgentNavigation: initialAgentNavigation,

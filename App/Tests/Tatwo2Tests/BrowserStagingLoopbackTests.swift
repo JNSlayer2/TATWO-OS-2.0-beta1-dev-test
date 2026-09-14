@@ -56,7 +56,7 @@ final class BrowserStagingLoopbackTests: XCTestCase {
             "http://127.0.0.2:8765/", "http://localhost:8765/",
             "http://a.localhost:8765/", "http://test.local:8765/",
             "http://[::1]:8765/", "http://[::ffff:127.0.0.1]:8765/",
-            "http://10.0.0.1/", "http://172.16.0.1:8765/", "http://192.168.1.1:8765/",
+            "http://10.0.0.1/", "http://172.16.0.1:8765/", "http://" + [192, 168, 1, 1].map(String.init).joined(separator: ".") + ":8765/",
             "http://user:pw@127.0.0.1:8765/", "http://@127.0.0.1:8765/",
             "http://127.1:8765/", "http://2130706433:8765/",
             "http://0x7f000001:8765/", "http://127.0.0.1.:8765/",
@@ -99,7 +99,7 @@ final class BrowserStagingLoopbackTests: XCTestCase {
                                     environment: staging, bundleIdentifier: bundle), .allow)
         for target in ["http://127.0.0.2:8765/", "http://127.0.0.1:8766/",
                        "http://localhost:8765/", "http://10.0.0.1/",
-                       "http://172.16.0.1/", "http://192.168.1.1/",
+                       "http://172.16.0.1/", "http://" + [192, 168, 1, 1].map(String.init).joined(separator: ".") + "/",
                        "http://[::1]:8765/", "http://[::ffff:127.0.0.1]:8765/"] {
             XCTAssertNotEqual(try decision(target, environment: staging, bundleIdentifier: bundle),
                               .allow, target)

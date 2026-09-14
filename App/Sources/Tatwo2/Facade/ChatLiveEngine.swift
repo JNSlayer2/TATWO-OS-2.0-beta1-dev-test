@@ -232,6 +232,8 @@ final class ChatLiveEngine: LiveEngineAPI {
     }
 
     func isRunning(_ threadID: UUID?) -> Bool { threadID.map { runningThreads.contains($0) } ?? false }
+    /// Any thread still running (window-close confirmation gate).
+    var hasRunningWork: Bool { !runningThreads.isEmpty }
     func acceptsBrowserAgentRequests(_ threadID: UUID) -> Bool {
         runningThreads.contains(threadID) && !stoppingThreads.contains(threadID)
     }
@@ -388,6 +390,8 @@ final class ChatLiveEngine: LiveEngineAPI {
         if doc.threads[index].cwdOverride != nil, isRunning(threadID) { stop(threadID: threadID) }
         let projectID = doc.threads[index].projectID
         doc.threads[index].isArchived = true
+        BrowserChatLifecycle.didClose(threadID.uuidString.lowercased(), registry: .shared,
+            retention: BrowserGeneralSettings.load().sessionRetention)
         doc.threads[index].isPinned = false
         doc.threads[index].updatedAt = Date()
         let archivedRoomID = doc.threads[index].cwdOverride == nil ? nil : threadID

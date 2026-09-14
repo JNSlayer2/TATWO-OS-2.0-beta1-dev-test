@@ -743,7 +743,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
                         "/tmp/tatwo-claude-state",
                 ]),
             profileHomeURL: URL(
-                fileURLWithPath: "/Users/tatwo-test",
+                fileURLWithPath: "/Users/example",
                 isDirectory: true),
             runnerFactory: { runner })
 
@@ -751,7 +751,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
 
         XCTAssertEqual(status, .signedIn(subscriptionType: "max"))
         let invocation = await runner.invocations.first
-        XCTAssertEqual(invocation?.environment["HOME"], "/Users/tatwo-test")
+        XCTAssertEqual(invocation?.environment["HOME"], "/Users/example")
         XCTAssertNil(invocation?.environment["CLAUDE_CONFIG_DIR"])
         XCTAssertNil(
             invocation?.environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
@@ -792,7 +792,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
             fileURLWithPath: "/tmp/tatwo-claude-single-source",
             isDirectory: true)
         let profileHome = URL(
-            fileURLWithPath: "/Users/tatwo-test",
+            fileURLWithPath: "/Users/example",
             isDirectory: true)
         let homeLocator = ChatNativeClaudeSubscriptionHomeLocator(
             environment: [
@@ -896,7 +896,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
                         "/tmp/tatwo-claude-home",
                 ]),
             profileHomeURL: URL(
-                fileURLWithPath: "/Users/tatwo-test",
+                fileURLWithPath: "/Users/example",
                 isDirectory: true),
             runnerFactory: { runner })
 
@@ -928,7 +928,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
         XCTAssertFalse(modelArguments.contains("--console"))
         XCTAssertEqual(
             invocations.last?.environment["HOME"],
-            "/Users/tatwo-test")
+            "/Users/example")
         XCTAssertNil(invocations.last?.environment["CLAUDE_CONFIG_DIR"])
         XCTAssertNil(
             invocations.last?.environment[
@@ -965,7 +965,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
             scratchDirectoryURL: URL(
                 fileURLWithPath: "/tmp/tatwo-claude-medium-test"),
             profileHomeURL: URL(
-                fileURLWithPath: "/Users/tatwo-test",
+                fileURLWithPath: "/Users/example",
                 isDirectory: true),
             runnerFactory: { runner })
 
@@ -1014,7 +1014,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
             scratchDirectoryURL: URL(
                 fileURLWithPath: "/tmp/tatwo-fable-native-test"),
             profileHomeURL: URL(
-                fileURLWithPath: "/Users/tatwo-test",
+                fileURLWithPath: "/Users/example",
                 isDirectory: true),
             runnerFactory: { runner })
 
@@ -1070,7 +1070,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
             scratchDirectoryURL: URL(
                 fileURLWithPath: "/tmp/tatwo-fable-auxiliary-test"),
             profileHomeURL: URL(
-                fileURLWithPath: "/Users/tatwo-test",
+                fileURLWithPath: "/Users/example",
                 isDirectory: true),
             runnerFactory: { runner })
 
@@ -1113,7 +1113,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
             scratchDirectoryURL: URL(
                 fileURLWithPath: "/tmp/tatwo-fable-fallback-test"),
             profileHomeURL: URL(
-                fileURLWithPath: "/Users/tatwo-test",
+                fileURLWithPath: "/Users/example",
                 isDirectory: true),
             runnerFactory: { runner })
 
@@ -1508,7 +1508,7 @@ final class ChatNativeSubscriptionRuntimeTests: XCTestCase {
                         "/tmp/tatwo-claude-home",
                 ]),
             profileHomeURL: URL(
-                fileURLWithPath: "/Users/tatwo-test",
+                fileURLWithPath: "/Users/example",
                 isDirectory: true),
             runnerFactory: { runner })
 

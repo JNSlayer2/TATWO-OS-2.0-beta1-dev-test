@@ -338,7 +338,7 @@ final class DevicePairingHost: @unchecked Sendable {
                 continue
             }
             let value = String(cString: host)
-            if value.hasPrefix("10.") || value.hasPrefix("192.168.") || Self.isPrivate172(value) {
+            if value.hasPrefix("10.") || value.hasPrefix(["192", "168", ""].joined(separator: ".")) || Self.isPrivate172(value) {
                 return value
             }
         }

@@ -34,7 +34,7 @@ struct ComputerUseTarget: Equatable, Sendable {
         return (url, name)
     }
 
-    static let consentDetail = "此聊天的模型會看到這個 App 的視窗畫面與文字，並可點擊、輸入、按鍵、捲動與拖曳。付款、對外發送、刪除資料或更改帳號安全設定前，模型必須先在聊天中詢問你。授權最多 15 分鐘；按停止、切換聊天或你自己動鍵盤滑鼠即撤回。"
+    static let consentDetail = "此聊天的模型會看到這個 App 的視窗畫面與文字，並可點擊、輸入、按鍵、捲動與拖曳。付款、對外發送、刪除資料或更改帳號安全設定前，模型必須先在聊天中詢問你。授權持續至本次 session 結束；按停止、切換聊天或你自己動鍵盤滑鼠即撤回。"
 }
 
 /// Controller-local, ephemeral cache. An epoch mismatch (including a synchronous

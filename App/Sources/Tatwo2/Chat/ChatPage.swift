@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 import Darwin
 
 struct ChatPage: View {
+    @StateObject var browserWorkSpaceStore = BrowserWorkSpaceStore()
     @State var islandFooterHovering = false
     @StateObject var islandExceptionsCount = IslandExceptionsCount()
     @State var globalNoteOpen = ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_EXPORT_WINDOW_SNAPSHOT"] != nil && ["1", "2"].contains(ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_EXPORT_GLOBAL_NOTE"] ?? "")
@@ -196,11 +197,14 @@ struct ChatPage: View {
                 let chatCanvasWidth = rightPanelLayout.mainContentWidth
                 // All workspace modes reserve the same shared sidebar width.
                 let sidebarWidth =
-                    ChatSidebarLayoutPolicy.width(for: layoutWidth)
-                let showSidebar = isChatProjectRailPinned && model.mode != .bot && !isPanel
+                    model.mode == .browser && browserWorkSpaceStore.focusMode ? WorkspaceSidebarMetrics.browserFocusWidth : ChatSidebarLayoutPolicy.width(for: layoutWidth)
+                let workspaceOwnsSidebar = model.mode == .bot
+                let showSidebar = (isChatProjectRailPinned || model.mode == .browser) && !workspaceOwnsSidebar && !isPanel
+                    && (model.mode != .browser || ChatRunMode.browserPreviewEnabled)
                 let showChatProjectHoverRail =
                     rightPanelLayout.showsMainContent
-                    && model.mode != .bot
+                    && !workspaceOwnsSidebar
+                    && model.mode != .browser
                     && !isPanel
                     // Gate the hover rail on the full window width, not the
                     // right-panel-reduced canvas: selecting a thread from the
@@ -213,8 +217,8 @@ struct ChatPage: View {
                     layoutWidth: chatCanvasWidth,
                     railPinned: showSidebar,
                     sidebarVisible: showSidebar)
-                let leadingReserve: CGFloat = (isPanel || model.mode == .bot) ? 0 : layoutPolicy.leadingReserve
-                let trailingReserve: CGFloat = (isPanel || model.mode == .bot) ? 0 : layoutPolicy.trailingReserve
+                let leadingReserve: CGFloat = (isPanel || workspaceOwnsSidebar) ? 0 : layoutPolicy.leadingReserve
+                let trailingReserve: CGFloat = (isPanel || workspaceOwnsSidebar) ? 0 : layoutPolicy.trailingReserve
                 let mainAvailableWidth = max(
                     320,
                     chatCanvasWidth
@@ -480,6 +484,10 @@ struct ChatPage: View {
             retainedLifecycle?.registerStopHandler {
                 model.shutdownForContainerClose()
             }
+            // Window-close confirmation (Island) fires only while chat work is running.
+            TatwoInterruptGate.activityProvider = { [weak model] in
+                model?.hasRunningWork ?? false
+            }
             loopsActivity.attach()
             refreshCLILoopTree()
             if model.collaborationLevel != .off {
@@ -547,13 +555,17 @@ struct ChatPage: View {
         ) { notification in
             model.handlePlanQuestionAnswerNotification(notification)
         }
-        .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier], isTargeted: $dropIsTargeted, perform: handleDrop(providers:))
+        .onDrop(of: model.mode == .browser && browserWorkSpaceStore.selectedSpace.isSessionSpace
+                ? [] : [UTType.fileURL.identifier, UTType.image.identifier], isTargeted: $dropIsTargeted) { providers in
+            guard model.mode != .browser || !browserWorkSpaceStore.selectedSpace.isSessionSpace else { return false }
+            return handleDrop(providers: providers)
+        }
         .modifier(SpaceBuilderPresentation())
         .sheet(isPresented: feedback.presentation(for: "Chat")) {
             FeedbackSheet(coordinator: feedback)
         }
         .overlay {
-            if dropIsTargeted {
+            if dropIsTargeted && !(model.mode == .browser && browserWorkSpaceStore.selectedSpace.isSessionSpace) {
                 RoundedRectangle(cornerRadius: LiquidGlassTokens.radiusCard, style: LiquidGlassTokens.shapeStyle)
                     .strokeBorder(
                         LiquidGlassTokens.brandAccent.opacity(LiquidGlassTokens.strokeOpacity),

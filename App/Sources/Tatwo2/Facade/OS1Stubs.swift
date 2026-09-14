@@ -318,11 +318,49 @@ struct TatwoLoopsTerminationSnapshot {}
 // TatwoLoopsActivityMonitor：已由照搬檔提供，stub 移除
 
 struct TatwoInterruptDecision { let requiresConfirmation: Bool }
-enum TatwoInterruptGate { static func decision(kind: TatwoInterruptKind, snapshot: TatwoLoopsTerminationSnapshot) -> TatwoInterruptDecision { .init(requiresConfirmation: false) } }
+enum TatwoInterruptGate {
+    /// Set by ChatPage: whether any chat/loops work is running right now.
+    /// 2.0 has no real termination snapshot yet, so window close asks only when work is live.
+    @MainActor static var activityProvider: () -> Bool = { false }
+    /// One-shot: the updater sets this after the user already confirmed "重開" in Island,
+    /// so the terminate that follows the hand-off does not ask a second time.
+    @MainActor static var bypassNextTerminate = false
+    @MainActor static func decision(kind: TatwoInterruptKind, snapshot: TatwoLoopsTerminationSnapshot) -> TatwoInterruptDecision {
+        switch kind {
+        case .appTerminate:
+            if bypassNextTerminate { bypassNextTerminate = false; return .init(requiresConfirmation: false) }
+            return .init(requiresConfirmation: true)
+        case .composerStop: return .init(requiresConfirmation: true)
+        case .windowClose, .escapeClose: return .init(requiresConfirmation: activityProvider())
+        }
+    }
+}
+@MainActor
 enum TatwoInterruptConfirmationPresenter {
-    static func confirm(kind: TatwoInterruptKind, snapshot: TatwoLoopsTerminationSnapshot, window: NSWindow?) -> Bool { true }
-    static func confirm(kind: TatwoInterruptKind, window: NSWindow?) -> Bool { true }
-    static func confirm(kind: TatwoInterruptKind) -> Bool { true }
+    static func confirm(kind: TatwoInterruptKind, snapshot: TatwoLoopsTerminationSnapshot, window: NSWindow?) -> Bool {
+        confirm(kind: kind, window: window)
+    }
+    static func confirm(kind: TatwoInterruptKind, window: NSWindow?) -> Bool {
+        guard TatwoInterruptGate.decision(kind: kind, snapshot: .init()).requiresConfirmation else { return true }
+        let title: String
+        let detail: String
+        switch kind {
+        case .appTerminate:
+            title = "結束 TATWO OS？"
+            detail = "執行中的工作會中斷"
+        case .windowClose, .escapeClose:
+            title = "關閉這個視窗？"
+            detail = ""
+        case .composerStop:
+            title = "停止目前的回覆？"
+            detail = ""
+        }
+        return IslandNotice.shared.confirmBlocking(title: title, detail: detail,
+            confirmLabel: "確認", cancelLabel: "取消", timeout: 20, window: window)
+    }
+    static func confirm(kind: TatwoInterruptKind) -> Bool {
+        confirm(kind: kind, window: nil)
+    }
 }
 
 // MARK: - CLI 假水電

@@ -32,12 +32,13 @@ test('actual browser navigation row renders without squeezing out the address fi
   mkdirSync(output, { recursive: true });
   const root = mkdtempSync(path.join(output, 'browser-navigation-ui.'));
   const sourcePaths = [
-    'App/Sources/Tatwo2/Browser/EmbeddedBrowserView.swift',
+    'App/Sources/Tatwo2/Browser/EmbeddedBrowserToolbar.swift',
     'App/Sources/Tatwo2/Browser/EmbeddedBrowserSecurity.swift',
     'App/Sources/Tatwo2/Pages/PluginsPage.swift',
+    'App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift',
   ];
   const sources = sourcePaths.map(read);
-  const row = between(sources[0], '    private var browserNavigationBar:', '    private var browserToolbar:');
+  const row = sources[0].slice(sources[0].indexOf('struct EmbeddedBrowserToolbar: View'));
   const command = between(sources[1], 'struct EmbeddedBrowserCommand:', 'enum EmbeddedBrowserLoadPhase:');
   const backing = sources[2].slice(sources[2].indexOf('struct NonWindowDraggingView:'));
   assert.ok(backing.startsWith('struct NonWindowDraggingView:'));
@@ -46,23 +47,22 @@ import SwiftUI
 import AppKit
 ${command}
 ${backing}
-private struct FixtureProfile { let registryKey = UUID() }
-private struct FixtureAccess { func isReady(for key: UUID) -> Bool { true } }
+${sources[3]}
+final class BrowserAgentNavigation {}
+struct EmbeddedBrowserNavigationState {
+    let urlString: String? = "https://example.com/a/long/path?query=browser-navigation"
+    let canGoBack = true
+    let canGoForward = false
+}
+${row}
 private struct NavigationFixture: View {
     @State private var addressText = "https://example.com/a/long/path?query=browser-navigation"
     @FocusState private var addressFieldFocused: Bool
-    @FocusState private var startPageFieldFocused: Bool
-    private let currentURLString = "https://example.com/a/long/path?query=browser-navigation"
-    private let canGoBack = true
-    private let canGoForward = false
-    private let isBrowserRuntimeVisible = true
-    private let browserProfile = FixtureProfile()
-    private let profileAccessState = FixtureAccess()
     let validationMessage: String?
-    private func loadAddress() {}
-    private func issue(_ action: EmbeddedBrowserCommand.Action) {}
-    var body: some View { browserNavigationBar }
-${row}
+    var body: some View {
+        EmbeddedBrowserToolbar(addressText: $addressText, addressFieldFocused: $addressFieldFocused,
+            state: EmbeddedBrowserNavigationState(), enabled: true, onSubmit: {}, onCommand: { _ in })
+    }
 }
 @MainActor func renderFixture() throws {
     let app = NSApplication.shared
@@ -135,7 +135,7 @@ try MainActor.assumeIsolated { try renderFixture() }
         return [name, hash(readFileSync(path.join(root, name)))];
       })),
       result,
-      scope: 'Exact production navigation row, command shape and non-dragging backing. Synthetic profile/readiness/actions. Isolated native windows only, no CEF, actual browser window, login or formal UI acceptance.',
+      scope: 'Exact shared toolbar, metrics, command shape and non-dragging backing. Synthetic navigation/actions. Isolated native windows only, no CEF, actual browser window, login or formal UI acceptance.',
     }, null, 2));
     console.log(result.trim());
     console.log('Evidence:', root);

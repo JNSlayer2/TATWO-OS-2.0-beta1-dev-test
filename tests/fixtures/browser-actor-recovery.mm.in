@@ -1,0 +1,87 @@
+#import <Foundation/Foundation.h>
+#include <cassert>
+#include <vector>
+#include <string>
+static std::vector<std::string> recoveryOrder;
+
+enum TatwoCEFBrowserActor { TatwoCEFBrowserActorHuman, TatwoCEFBrowserActorAgent };
+struct Context {
+  bool human = false;
+  bool failPreferences = false;
+  bool IsSame(Context *other) { return this == other; }
+};
+struct Client {
+  int invalidations = 0, cancellations = 0;
+  void CancelPendingBrowserOperations() { cancellations++; recoveryOrder.push_back("cancel_browser"); }
+  void CancelPendingWebMCPInvocations(NSString *) { recoveryOrder.push_back("cancel_webmcp"); }
+  void InvalidateResourceErrors() { invalidations++; }
+};
+struct BrowserState {
+  bool close_requested = false, close_completed = false;
+  bool request_context_security_ready = true, request_context_security_blocked = false;
+  Context *request_context;
+  Client *client;
+};
+@interface TatwoCEFBrowserView : NSObject
+@property(atomic) BOOL agentControlled;
+@property(atomic) BOOL humanPreferencesDeferred;
+@property(atomic) TatwoCEFBrowserActor browserActor;
+@property(nonatomic) BrowserState *state;
+- (BOOL)restoreHumanInteraction;
+- (void)closeBrowser;
+@end
+static NSHashTable<TatwoCEFBrowserView *> *g_live_browser_views;
+static NSString *telemetry;
+static TatwoCEFBrowserView *recoveryView;
+static BrowserState *State(TatwoCEFBrowserView *view) { return view.state; }
+static bool ApplyPrivacyStrictRequestContextPreferences(Context *context, TatwoCEFBrowserActor actor) {
+  assert(!recoveryView.agentControlled); // actor changed only after callback cancellation
+  recoveryOrder.push_back("human_preferences");
+  if (context->failPreferences) return false;
+  context->human = actor == TatwoCEFBrowserActorHuman;
+  return true;
+}
+static void AppendCEFEmbeddingTelemetryLine(NSString *line) { telemetry = line; }
+@implementation TatwoCEFBrowserView
+- (void)closeBrowser { self.state->close_requested = true; }
+// INSERT recovery
+@end
+int main() { @autoreleasepool {
+  g_live_browser_views = [NSHashTable weakObjectsHashTable];
+  Context context;
+  Client ca, cb;
+  BrowserState sa{false, false, true, false, &context, &ca};
+  BrowserState sb{false, false, true, false, &context, &cb};
+  TatwoCEFBrowserView *a = [TatwoCEFBrowserView new], *b = [TatwoCEFBrowserView new];
+  a.state = &sa; b.state = &sb; recoveryView = a;
+  a.browserActor = b.browserActor = TatwoCEFBrowserActorHuman;
+  a.agentControlled = YES;
+  [g_live_browser_views addObject:a];
+  assert([a restoreHumanInteraction] && !a.agentControlled && context.human);
+  assert(ca.invalidations == 1 && ca.cancellations == 1);
+  assert((recoveryOrder == std::vector<std::string>{"cancel_browser", "cancel_webmcp", "human_preferences"}));
+  assert([telemetry containsString:@"prefs=human"]);
+  assert(![a restoreHumanInteraction]);
+
+  // A closing agent still owns its context until the native close completes.
+  context.human = false; a.agentControlled = b.agentControlled = YES;
+  [g_live_browser_views addObject:b];
+  sb.close_requested = true;
+  assert([a restoreHumanInteraction] && !a.agentControlled && !context.human);
+  assert(a.humanPreferencesDeferred);
+  assert([telemetry containsString:@"strict_shared_context"]);
+  assert(![a restoreHumanInteraction]);
+  sb.close_completed = true;
+  assert([a restoreHumanInteraction] && context.human && !a.humanPreferencesDeferred);
+
+  // Preference failure never leaves a browser running with a relaxed policy.
+  a.agentControlled = YES; context.failPreferences = true;
+  assert(![a restoreHumanInteraction] && a.agentControlled);
+  assert(sa.close_requested && sa.request_context_security_blocked);
+  sa.close_requested = false; sa.request_context_security_blocked = false;
+  context.failPreferences = false; a.browserActor = TatwoCEFBrowserActorAgent;
+  assert(![a restoreHumanInteraction]);
+  a.browserActor = TatwoCEFBrowserActorHuman; sa.request_context_security_ready = false;
+  assert(![a restoreHumanInteraction]);
+  puts("W53 native actor recovery passed");
+} }

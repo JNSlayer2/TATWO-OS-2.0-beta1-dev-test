@@ -5,7 +5,7 @@ import XCTest
 // 也必須被偵測，否則一鍵放行鈕永遠不出現。
 final class ChatMCPApprovalRequestTests: XCTestCase {
     func testDetectsBuiltinWritePermissionRequest() {
-        let text = "Claude requested permissions to write to /Users/x/y/test.md, "
+        let text = "Claude requested permissions to write to /Users/example/y/test.md, "
             + "but you haven't granted it yet."
         let request = TatwoChatMCPApprovalRequest(diagnosticText: text)
         XCTAssertEqual(request?.toolName, "Write")

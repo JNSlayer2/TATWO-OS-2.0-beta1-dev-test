@@ -31,6 +31,7 @@ enum Tatwo2App {
         TatwoLaunchEnvironmentGuard.configureHostResourceGovernorAtLaunch()
         if TatwoPanelSnapshotExporter.exportIfRequested() { return }
         if TatwoSingleInstanceGuard.forwardToExistingInstanceAndExitIfNeeded() { return }
+        BrowserTabRegistry.shared.prepareForLaunch()
         let delegate = TatwoUltraworkAppDelegate()
         retainedTatwoAppDelegate = delegate
         let cliDelegate = Tatwo2CLITerminationDelegate(wrapped: delegate)
@@ -72,5 +73,8 @@ private final class SidecarTerminationObserver {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard CLISessionsTermination.shouldTerminate() else { return .terminateCancel }
         return wrapped.applicationShouldTerminate(sender)
+    }
+    func application(_ application: NSApplication, open urls: [URL]) {
+        wrapped.application(application, open: urls)
     }
 }

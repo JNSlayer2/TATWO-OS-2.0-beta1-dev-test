@@ -16,8 +16,8 @@ final class ClaudeSpawnAuthorityTests: XCTestCase {
       profileHomeURL: root,
       environment: [
         "PATH": "/usr/bin",
-        "HOME": "/Users/real-user",
-        "CLAUDE_CONFIG_DIR": "/Users/real-user/.claude",
+        "HOME": "/Users/example",
+        "CLAUDE_CONFIG_DIR": "/Users/example/.claude",
         "ANTHROPIC_API_KEY": "must-be-scrubbed",
       ])
 

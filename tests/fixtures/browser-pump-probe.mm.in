@@ -1,0 +1,93 @@
+#import <Foundation/Foundation.h>
+#include <atomic>
+#include <algorithm>
+#include <limits>
+#include <cassert>
+
+std::atomic_bool g_initialized{true}, g_shutdown{false}, g_shutdown_requested{false};
+std::atomic<uint64_t> g_message_pump_generation{0}, g_message_pump_schedule_count{0},
+    g_message_pump_do_work_count{0}, g_message_pump_last_generation{0}, g_message_pump_detail_event_count{0};
+std::atomic<int64_t> g_message_pump_last_schedule_ms{0}, g_message_pump_last_do_work_ms{0},
+    g_message_pump_last_requested_delay_ms{0}, g_message_pump_last_normalized_delay_ms{0};
+dispatch_source_t g_message_pump_idle_timer = nil;
+int overdueRecoveries = 0;
+int64_t MonotonicMilliseconds() { return (int64_t)(NSProcessInfo.processInfo.systemUptime * 1000); }
+NSString *SanitizeTelemetryToken(NSString *s, NSString *) { return s; }
+void AppendCEFEmbeddingTelemetryLine(NSString *s) {
+  if ([s containsString:@"phase=message_pump_overdue"]) ++overdueRecoveries;
+}
+void MaybeLogMessagePumpSummary(NSString *) {}
+bool CanRunScheduledMessagePump(uint64_t a, uint64_t b, bool initialized, bool shutdown) {
+  return a == b && initialized && !shutdown;
+}
+bool CanRunImmediateMessagePump(bool initialized, bool shutdown) { return initialized && !shutdown; }
+// Deliberately a CEF double: this exercises the production scheduler on real
+// GCD/CFRunLoop, not Chromium rendering or a shipped browser workload.
+bool RunCEFMessagePumpWorkOnMainThread() {
+  assert(NSThread.isMainThread);
+  if (!g_initialized || g_shutdown || g_shutdown_requested) return false;
+  ++g_message_pump_do_work_count;
+  return true;
+}
+
+// INSERT scheduler
+
+int main(int argc, const char **argv) {
+  @autoreleasepool {
+    NSString *mode = argc > 1 ? @(argv[1]) : @"probe";
+    __block uint64_t wakeups = 0;
+    auto observer = CFRunLoopObserverCreateWithHandler(kCFAllocatorDefault, kCFRunLoopAfterWaiting,
+        true, 0, ^(CFRunLoopObserverRef, CFRunLoopActivity) { ++wakeups; });
+    CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+    if ([mode isEqualToString:@"checks"]) {
+      // Two immediate requests survive newer delayed requests; only the last
+      // positive delay survives. Replacements cannot run prematurely.
+      ScheduleCEFMessagePumpWork(0);
+      ScheduleCEFMessagePumpWork(-1);
+      ScheduleCEFMessagePumpWork(20);
+      ScheduleCEFMessagePumpWork(100);
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        assert(g_message_pump_do_work_count == 2);
+      });
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 180 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        assert(g_message_pump_do_work_count == 3);
+        ScheduleCEFMessagePumpWork(5);
+        ScheduleCEFMessagePumpWork(INT64_MAX); // cancel without overflow/early execution
+      });
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        assert(g_message_pump_do_work_count == 3);
+        ScheduleCEFMessagePumpWork(10);
+        // Let the queue arm its timers before simulating a blocked main thread.
+        dispatch_async(dispatch_get_main_queue(), ^{ [NSThread sleepForTimeInterval:0.30]; });
+      });
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 650 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        assert(g_message_pump_do_work_count == 4 && overdueRecoveries == 1);
+        ScheduleCEFMessagePumpWork(10);
+        g_shutdown_requested = true;
+        ScheduleCEFMessagePumpWork(0);
+      });
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 750 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        assert(g_message_pump_do_work_count == 4);
+        StopCEFMessagePumpIdleTimer();
+        puts("W60 scheduler checks PASS");
+        CFRunLoopStop(CFRunLoopGetMain());
+      });
+    } else {
+      StartCEFMessagePumpIdleTimer();
+      for (int i = 0; i < 10; ++i) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (100 + i * 450) * NSEC_PER_MSEC),
+            dispatch_get_main_queue(), ^{ ScheduleCEFMessagePumpWork(5); });
+      }
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        StopCEFMessagePumpIdleTimer();
+        printf("{\"scope\":\"isolated_scheduler_fixture\",\"duration_seconds\":5,"
+               "\"cef_work_stub_calls\":%llu,\"main_runloop_wakeups\":%llu}\n",
+               g_message_pump_do_work_count.load(), wakeups);
+        CFRunLoopStop(CFRunLoopGetMain());
+      });
+    }
+    CFRunLoopRun();
+    CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+    CFRelease(observer);
+  }
+}

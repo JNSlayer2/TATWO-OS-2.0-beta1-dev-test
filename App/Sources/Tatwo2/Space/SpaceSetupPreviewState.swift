@@ -102,8 +102,8 @@ final class SpaceSetupPreviewState: ObservableObject {
             interfaces.first { $0.id == selectedInterfaceID }
         }
         var visibleTabs: [Tab] {
-            tabs.filter { enabledTabs.contains($0) && ($0 != .browser
-                || ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] == "1") }
+            // Shipped bundles enable Browser via Info.plist; previews via the env flag (both in browserPreviewEnabled).
+            tabs.filter { enabledTabs.contains($0) && ($0 != .browser || ChatRunMode.browserPreviewEnabled) }
         }
         var selectedTab: Tab? {
             switch screen {

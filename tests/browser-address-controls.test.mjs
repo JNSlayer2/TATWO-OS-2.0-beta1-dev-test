@@ -20,55 +20,40 @@ const section = (start, end) => {
   return view.slice(from, to);
 };
 
-test('loaded browser retains an address field and explicit history/reload controls', () => {
-  assert.match(view, /browserToolbar\s+browserNavigationBar\s+Divider/);
-  const bar = section('private var browserNavigationBar:', 'private var browserToolbar:');
-  for (const action of ['goBack', 'goForward', 'reload']) {
-    assert.match(bar, new RegExp(`action: \\.${action}`));
-  }
-  assert.match(bar, /TextField\("搜尋或輸入網址", text: \$addressText\)/);
-  assert.match(bar, /\.focused\(\$addressFieldFocused\)/);
-  assert.match(bar, /\.onSubmit\(loadAddress\)/);
-  assert.match(bar, /\.onExitCommand/);
-  assert.match(bar, /addressText = currentURLString/);
-  assert.match(bar, /issue\(action\)/);
-  assert.match(bar, /profileAccessState\.isReady/);
+const toolbar = read('App/Sources/Tatwo2/Browser/EmbeddedBrowserToolbar.swift').split('struct EmbeddedBrowserToolbar: View')[1];
+const runtime = read('App/Sources/Tatwo2/Browser/BrowserWorkSpaceCEFSurface.swift');
+test('shared toolbar retains address, explicit history/reload, focus and escape', () => {
+  assert.match(view, /EmbeddedBrowserToolbar\(/);
+  for (const action of ['goBack', 'goForward', 'reload']) assert.ok(toolbar.includes('.' + action));
+  assert.match(toolbar, /TextField\("搜尋或輸入網址", text: \$addressText\)/);
+  assert.match(toolbar, /\.focused\(addressFieldFocused\)/);
+  assert.match(toolbar, /\.onSubmit \{[\s\S]*?choose\(choices\[selection\]\)[\s\S]*?onSubmit\(\)/);
+  assert.match(toolbar, /\.onExitCommand/);
+  assert.match(toolbar, /addressText = state.urlString \?\? ""/);
 });
-
-test('navigation callbacks preserve focused drafts including blank/closed callbacks', () => {
-  const callback = view.slice(view.indexOf('private func applyNavigationState('));
-  assert.match(callback, /clearActivePageVisibleState\(preserveAddressDraft: true\)/);
-  assert.match(callback, /EmbeddedBrowserAddressPresentation\.text/);
-  assert.match(callback, /isEditing: addressFieldFocused \|\| startPageFieldFocused/);
-  assert.doesNotMatch(callback, /addressText = urlString/);
-  // Committed state must keep following navigation even while the field is edited.
-  assert.match(callback, /currentURLString = urlString/);
-  assert.match(callback, /laneURLs\[selectedLaneID\] = url/);
+test('navigation preserves focused drafts; committed URLs are persisted by the shared runtime', () => {
+  assert.match(view, /EmbeddedBrowserAddressPresentation\.text/);
+  assert.match(view, /isEditing: addressFieldFocused/);
+  assert.match(runtime, /EmbeddedBrowserView.committedURLForPersistence\(state\)/);
+  assert.match(runtime, /registry.update\(uuid, url: url/);
+  assert.match(view, /state.phase == \.committed \|\| state.phase == \.finished/);
+  assert.match(view, /state.hasExplicitCommittedURL/);
 });
-
-test('initial panel restoration opens the saved selected page, not just its tab label', () => {
-  const restored = section('} else if let saved = model.browserLanes(for: sessionID)', '} else {');
-  assert.match(restored, /let selected = lanes\.selectedLaneID, let url = urls\[selected\]/);
-  assert.match(restored, /_addressText = State\(initialValue: url\.absoluteString\)/);
-  assert.match(restored, /_currentURLString = State\(initialValue: url\.absoluteString\)/);
-  assert.match(restored, /_isBrowserRuntimeVisible = State\(initialValue: true\)/);
+test('initial restoration reads registry selected tab and its URL', () => {
+  assert.match(view, /registry.selectedTab\(ownedBy: owner\)/);
+  assert.match(view, /addressText = selected\?\.url\?\.absoluteString \?\? ""/);
+  assert.match(view, /BrowserWorkSpaceCEFSurface\(tabID: tab.id/);
 });
-
-test('only explicit navigation and identity switches discard the draft', () => {
-  const navigate = section('private func navigate(to url:', 'private func loadAddress()');
-  assert.match(navigate, /addressFieldFocused = false/);
-  assert.match(navigate, /startPageFieldFocused = false/);
-  assert.match(navigate, /addressText = url\.absoluteString/);
-  const reset = section('private func clearActivePageVisibleState(', 'private var browserStartPage:');
-  assert.match(reset, /preserveAddressDraft: Bool = false/);
-  assert.match(reset, /isEditing: preserveAddressDraft && \(addressFieldFocused \|\| startPageFieldFocused\)/);
+test('identity switches discard drafts but do not discard commands addressed to the new tab', () => {
+  const reset = section('private func syncSelection()', 'private func select(');
+  assert.match(reset, /addressFieldFocused = false/);
+  assert.match(reset, /commandTabID != selected\?\.id/);
 });
-
-test('transient preparation does not display implementation prose or relax navigation policy', () => {
+test('transient failures are actionable and navigation still uses human policy', () => {
   assert.doesNotMatch(view, /Lifecycle recovery, capacity|Retry formal recovery check|命令已 fail-closed/);
   assert.match(view, /Text\(validationMessage\)/);
   const submit = section('private func loadAddress()', 'private func issue(');
-  assert.match(submit, /TatwoBrowserAddressResolver\.resolve/);
+  assert.match(submit, /BrowserOmniboxResolver\.resolve/);
   assert.match(submit, /EmbeddedBrowserNavigationPolicy\.decision/);
 });
 

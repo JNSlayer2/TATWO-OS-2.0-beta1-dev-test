@@ -19,23 +19,22 @@ const part = (s,a,b) => { const x=s.indexOf(a), y=s.indexOf(b,x+a.length); asser
 test('normal CEF tab initialization reuses a secured context without popup flags or policy bypass', () => {
   const shared = part(sources.bridge, '- (BOOL)canShareRequestContext', '- (void)dealloc');
   for (const policy of ['request_context_security_ready', 'request_context_security_blocked', 'close_requested',
-    'g_shutdown_requested', 'URLHasCredentials', 'IsAllowedURLString', 'IsDeniedByLocalHostList']) assert.ok(shared.includes(policy));
+    'g_shutdown_requested', 'URLHasCredentials', 'IsActorURLAllowed', 'IsDeniedByLocalHostList']) assert.ok(shared.includes(policy));
   assert.match(shared, /state->request_context = State\(source\)->request_context/);
   assert.doesNotMatch(shared, /CreateContext\(|creation_attempted = true|creation_pending = true|popup_id =/);
   assert.match(shared, /CreateBrowserState\(self\)/);
   assert.match(sources.header, /sharingContextWith:\(TatwoCEFBrowserView \*\)source/);
 });
 
-test('SwiftUI keeps the host mounted and keys background states before applying active navigation', () => {
-  assert.match(sources.view, /if browserEngine == \.chromiumCEF \{\s*\/\/[\s\S]*?ZStack \{\s*browserSurface/);
-  assert.match(sources.view, /initialURL: isBrowserRuntimeVisible \? selectedLaneURL : nil/);
-  assert.match(sources.view, /laneURLs\[laneID\] = url/);
-  assert.match(sources.view, /guard laneState.selectedLaneID == laneID,\s*isBrowserRuntimeVisible else \{ return \}\s*applyNavigationState\(state\)/);
-  assert.match(sources.view, /refreshedProfileAccessRevision == profileAccessRevision/);
-  const select = part(sources.view, 'private func selectLane(', 'private func togglePinned(');
-  const cefBranches = [...select.matchAll(/if browserEngine == \.chromiumCEF \{([\s\S]*?)\} else if/g)];
-  assert.equal(cefBranches.length,2);
-  for (const match of cefBranches) assert.doesNotMatch(match[1], /issue\(\.load/);
+test('shared runtime retains the native host and keys background states before active navigation', () => {
+  const runtime = readFileSync(path.join(repo, 'App/Sources/Tatwo2/Browser/BrowserWorkSpaceCEFSurface.swift'), 'utf8');
+  assert.match(sources.view, /BrowserWorkSpaceCEFSurface\(tabID: tab.id/);
+  assert.match(runtime, /if let host \{ return host \}/);
+  assert.match(runtime, /workTabs.first\(where: \{ \$0.id == uuid \}\)/);
+  assert.match(runtime, /if uuid == selectedID/);
+  assert.match(runtime, /registry.update\(uuid, url: url/);
+  assert.match(runtime, /guard !access.isReady/);
+  assert.doesNotMatch(sources.view, /laneURLs|laneState/);
 });
 
 test('actual tab host and close aggregation with controlled native callbacks', {
@@ -54,12 +53,25 @@ test('actual tab host and close aggregation with controlled native callbacks', {
     const modelStubs=String.raw`
 import AppKit
 import SwiftUI
-struct EmbeddedBrowserRuntimeProfile: Hashable { let registryKey = UUID() }
+struct EmbeddedBrowserRuntimeProfile: Hashable { let registryKey = UUID(); var dataStoreIdentifier: UUID? { registryKey } }
 struct EmbeddedChromiumBrowserMountIdentity: Equatable {
     let profile: EmbeddedBrowserRuntimeProfile
     var profilePolicyTag: Int { 1 }
 }
-struct EmbeddedBrowserCommand { enum Action { case load(URL), goBack, goForward, reload }; let id=UUID();let action:Action }
+struct EmbeddedBrowserCommand { enum Action { case load(URL), goBack, goForward, reload }; let id=UUID();let action:Action; var agentNavigation:BrowserAgentNavigation? = nil }
+final class BrowserAgentNavigation { let url=URL(string:"https://example.test/")!; let request=UUID() }
+struct BrowserAgentRequestError: Error { init(_ message:String) {} }
+@MainActor final class BrowserAgentBridge {
+    static let shared=BrowserAgentBridge()
+    var agentActionState:(inFlight:Int,lastAgentActionAt:TimeInterval?)=(0,nil)
+    func revokeRequests() {}
+    func isRequestCurrent(_ request:UUID)->Bool { true }
+    func enqueueCEFNavigation(_ navigation:BrowserAgentNavigation,on browser:TatwoCEFBrowserView,profileID:UUID?)throws { browser.loadURLString(navigation.url.absoluteString) }
+}
+@MainActor final class BrowserHumanInteraction {
+    static let shared=BrowserHumanInteraction()
+    func configure(_ browser:TatwoCEFBrowserView, onPopup:@escaping(URL)->Void) {}
+}
 struct VisibleError { let message:String; static func runtimeMessage(_ s:String)->Self { .init(message:s) } }
 struct EmbeddedBrowserNavigationState {
     var urlString:String?; var canGoBack:Bool; var canGoForward:Bool; var visibleError:VisibleError?
@@ -72,7 +84,7 @@ struct EmbeddedChromiumNavigationStateProjector {
 }
 struct Location { let profilePolicyTag=1; let rootCachePath="";let helperExecutablePath="";let logFilePath="";let persistentProfilePath:String?=nil }
 @MainActor enum TatwoCEFProfileLocationResolver {
-    static func resolve(profile:EmbeddedBrowserRuntimeProfile)throws->Location? { Location() }
+    static func resolve(profile:EmbeddedBrowserRuntimeProfile, actor: TatwoCEFBrowserActor = .human)throws->Location? { Location() }
     static func prepareForRuntime(_ location:Location)throws->TatwoCEFProfileLeaseRegistry.Lease? { TatwoCEFProfileLeaseRegistry.shared.acquire() }
 }
 @MainActor final class TatwoCEFProfileLeaseRegistry {
@@ -93,19 +105,26 @@ enum TatwoCEFGeometrySyncThrottlePolicy { static func delay(lastSyncUptime:TimeI
 }
 `;
     const nativeStubs=String.raw`
+enum TatwoCEFBrowserActor { case human,agent }
 enum TatwoCEFBrowserPhase { case creating,finished }
 enum TatwoCEFBrowserErrorKind { case none }
 @MainActor enum TatwoCEFRuntime { static func initialize(withRootCachePath:String,helperExecutablePath:String,logFilePath:String,bundledDenyListPath:String)throws {} }
 @MainActor final class TatwoCEFBrowserView:NSView {
     static var created:[TatwoCEFBrowserView]=[]
+    var browserActor=TatwoCEFBrowserActor.human
+    var agentControlled=false, humanPreferencesDeferred=false
+    var navigationGeneration:UInt64=1
+    var currentURLString:String? { current }
+    var pageMetadataHandler:((String,UInt64,String?,Data?)->Void)?
+    func restoreHumanInteraction()->Bool { agentControlled=false;return true }
     var contextID=UUID(); var canShareRequestContext=false
     var stateHandler:((String?,UInt64,Bool,Bool,Bool,TatwoCEFBrowserPhase,Int,TatwoCEFBrowserErrorKind,Int,String?)->Void)?
     var webMCPToolsHandler:((String)->Void)?
     var history:[String]=[];var historyIndex=0;var loads=0;var dom="";var closeRequested=false
     private var completion:(()->Void)?
     var current:String { history[historyIndex] }
-    init(frame:NSRect,persistentProfile:String?,initialURL:String)throws { super.init(frame:frame);history=[initialURL];Self.created.append(self) }
-    init(frame:NSRect,sharingContextWith source:TatwoCEFBrowserView,initialURL:String)throws { super.init(frame:frame);precondition(source.canShareRequestContext);contextID=source.contextID;canShareRequestContext=true;history=[initialURL];Self.created.append(self) }
+    init(frame:NSRect,persistentProfile:String?,initialURL:String,actor:TatwoCEFBrowserActor = .human)throws { super.init(frame:frame);history=[initialURL];Self.created.append(self) }
+    init(frame:NSRect,sharingContextWith source:TatwoCEFBrowserView,initialURL:String,actor:TatwoCEFBrowserActor = .human)throws { super.init(frame:frame);precondition(source.canShareRequestContext);contextID=source.contextID;canShareRequestContext=true;history=[initialURL];Self.created.append(self) }
     required init?(coder:NSCoder) { return nil }
     func publish() { stateHandler?(current,1,historyIndex>0,historyIndex<history.count-1,false,.finished,200,.none,0,nil) }
     func becomeReady() { canShareRequestContext=true;publish() }
@@ -118,6 +137,8 @@ enum TatwoCEFBrowserErrorKind { case none }
     func invokeWebMCPToolNamed(_ name:String,argumentsJSON:String,navigationGeneration:UInt64,completion:@escaping(String?,String?)->Void) { completion("{}",nil) }
 }
 `;
+    const lifecycle=readFileSync(path.join(repo,'App/Sources/Tatwo2/Browser/BrowserChatLifecycle.swift'),'utf8');
+    const recovery=part(lifecycle,'enum BrowserActorRecovery {','enum BrowserChatRequestRouting');
     const checks=String.raw`
 @MainActor func verify() {
     var checks=0
@@ -151,10 +172,11 @@ enum TatwoCEFBrowserErrorKind { case none }
     first.loadURLString("https://example.test/background");drain()
     check(events.contains{$0.0=="A" && $0.1==first.current},"background callback retains original tab")
     check(!events.contains{$0.0=="B"},"background callback not relabelled active tab")
-    let count=first.loads
+    let count=first.loads, retainedHistory=first.history
+    check(retainedHistory == ["about:blank", a.absoluteString, "https://example.test/background"], "startup blank precedes human navigation")
     update("A",a);drain()
     check(TatwoCEFBrowserView.created.count==2 && first.loads==count,"select does not recreate or load")
-    check(first.dom=="unsent form" && first.history.count==2,"select retains DOM and history")
+    check(first.dom=="unsent form" && first.history==retainedHistory,"select retains DOM and history")
     check(!first.isHiddenOrHasHiddenAncestor && second.isHiddenOrHasHiddenAncestor,"native visibility swaps")
     update("A",a,["A","B","C","blank"],.goBack)
     check(first.current==a.absoluteString,"back operates same browser history")
@@ -191,15 +213,16 @@ enum TatwoCEFBrowserErrorKind { case none }
 MainActor.assumeIsolated { verify() }
 `;
     const main=path.join(root,'main.swift');const binary=path.join(root,'tab-fixture');
-    const swift=modelStubs+nativeStubs+container+host+checks;writeFileSync(main,swift);
+    const telemetry=readFileSync(path.join(repo,'App/Sources/Tatwo2/Browser/Diagnostics/BrowserEngineStartupTelemetry.swift'),'utf8');
+    const swift=modelStubs+nativeStubs+telemetry+recovery+container+host+checks;writeFileSync(main,swift);
     run('/usr/bin/xcrun',['swiftc','-swift-version','5','-j','1',main,'-o',binary]);
-    const result=run(binary,[]);assert.match(result,/BROWSERTABS RESULT checks=31 failures=0/);
+    const result=run(binary,[]);assert.match(result,/BROWSERTABS RESULT checks=32 failures=0/);
     // Check the exact production host against the actual Objective-C interface,
     // not just a fake Swift spelling of the initializer.
     const moduleDir=path.join(root,'bridge-module');mkdirSync(moduleDir);
     writeFileSync(path.join(moduleDir,'module.modulemap'),`module TatwoCEFBridge { header "${path.join(repo,files.header)}" export * }`);
     const typecheck=path.join(root,'native-interface.swift');
-    writeFileSync(typecheck,'import TatwoCEFBridge\n'+modelStubs+container+host);
+    writeFileSync(typecheck,'import TatwoCEFBridge\n'+modelStubs+telemetry+recovery+container+host);
     run('/usr/bin/xcrun',['swiftc','-swift-version','5','-j','1','-typecheck','-I',moduleDir,typecheck]);
     for (const [name,file] of Object.entries(files)) assert.equal(sha(readFileSync(path.join(repo,file),'utf8')),sha(sources[name]),`${name} drifted`);
     writeFileSync(path.join(root,'receipt.json'),JSON.stringify({at:new Date().toISOString(),sourceHashes:Object.fromEntries(Object.entries(sources).map(([k,v])=>[k,sha(v)])),result,scope:'Actual Swift host/container with fake CEF callbacks plus actual Objective-C header typecheck. Not real CEF DOM/auth or formal App acceptance.'},null,2));

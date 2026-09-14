@@ -820,8 +820,8 @@ public enum ScenarioWorkflowContractFactory {
   private static func makeVisualizationHints(loopNodes: [ScenarioLoopNode]) -> ScenarioVisualizationHints {
     ScenarioVisualizationHints(
       style: "show-loops-inspired-local",
-      sourceURL: "https://github.com/JNSlayer2/show-loops",
-      sourceStatus: "optional_external_repo_not_required; local schema remains the source of truth until repo access is verified",
+      sourceURL: "https://example.com/show-loops",
+      sourceStatus: "example_reference_only; local schema remains the source of truth",
       plainPurpose: "規劃預覽：用身份組節點呈現可能的任務流；沒有 runtime dispatch record 時固定是尚未派發、無 runtime receipt。",
       layout: "read-only planning preview: task -> mode -> identity -> scope -> sandbox -> scout -> builder -> reviewer -> verifier -> judge -> receipt",
       nodeOrder: loopNodes.map(\.id),

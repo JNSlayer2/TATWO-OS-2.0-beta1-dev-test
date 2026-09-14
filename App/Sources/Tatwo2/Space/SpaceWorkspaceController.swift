@@ -24,7 +24,8 @@ final class SpaceWorkspaceController: ObservableObject {
         if hasInvalidWorkspace { return [] }
         let modes = activeSetupState?.selectedDomain.visibleTabs.compactMap { ChatRunMode(rawValue: $0.rawValue) }
             ?? ChatRunMode.allCases
-        return modes.filter { $0 != .browser || ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] == "1" }
+        return modes.filter { $0 != .browser || ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] == "1"
+            || ChatRunMode.browserPreviewEnabled }
     }
     private var activeSetupState: SpaceSetupPreviewState? {
         SpaceSetupPreviewState.isEnabled ? SpaceSetupPreviewState.shared : state
@@ -36,7 +37,7 @@ final class SpaceWorkspaceController: ObservableObject {
     }
     func allows(_ mode: ChatRunMode) -> Bool {
         if hasInvalidWorkspace { return false }
-        if mode == .browser && ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] != "1" { return false }
+        if mode == .browser && !ChatRunMode.browserPreviewEnabled { return false }
         guard let state = activeSetupState,
               let tab = SpaceSetupPreviewState.Tab(rawValue: mode.rawValue) else { return true }
         return state.selectedDomain.isRequestedEnabled(tab)

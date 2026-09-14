@@ -1,0 +1,138 @@
+// Production UA/gates/callback methods; only CEF transport and native window are doubled.
+// No actual picker, network request, or user file is used.
+#import <Foundation/Foundation.h>
+#include <cassert>
+#include <cstdint>
+#include <string>
+#include <vector>
+#define CEF_REQUIRE_UI_THREAD() assert(NSThread.isMainThread)
+using CefString = std::string;
+template<class T> using CefRefPtr = T*;
+class CefBrowser {};
+enum FileDialogMode { FILE_DIALOG_OPEN, FILE_DIALOG_OPEN_MULTIPLE, FILE_DIALOG_OPEN_FOLDER,
+                      FILE_DIALOG_SAVE, FILE_DIALOG_NUM_VALUES };
+enum TatwoCEFBrowserActor { TatwoCEFBrowserActorAgent, TatwoCEFBrowserActorHuman };
+typedef void (^Reply)(NSArray<NSString *> *);
+@interface TatwoCEFBrowserView : NSObject
+@property TatwoCEFBrowserActor browserActor;
+@property BOOL agentControlled;
+@property BOOL isHiddenOrHasHiddenAncestor;
+@property BOOL inputCurrent;
+@property uint64_t navigationGeneration;
+@property NSObject *window;
+@property(copy) void (^onFileDialog)(NSInteger, NSString *, NSString *, NSArray<NSString *> *, BOOL, Reply);
+@end
+@implementation TatwoCEFBrowserView @end
+bool BrowserInputIsCurrent(TatwoCEFBrowserView *v, uint64_t g) {
+  return v.inputCurrent && v.navigationGeneration == g;
+}
+NSString *FromCefString(const CefString &s) { return [NSString stringWithUTF8String:s.c_str()]; }
+CefString ToCefString(NSString *s) { return s.UTF8String; }
+void ScheduleImmediateCEFMessagePumpWork(NSString *) {}
+class CefFileDialogCallback {
+ public:
+  int canceled = 0, continued = 0;
+  std::vector<CefString> selected;
+  void Cancel() { ++canceled; }
+  void Continue(const std::vector<CefString> &paths) { ++continued; selected = paths; }
+};
+class TatwoClient {
+ public:
+  TatwoCEFBrowserView *owner_;
+  CefFileDialogCallback *file_dialog_callback_ = nullptr;
+  uint64_t web_features_serial_ = 0, file_dialog_serial_ = 0;
+  bool pdf_print_pending_ = false;
+  NSString *pdf_download_url_, *pdf_download_path_;
+  void (^pdf_download_completion_)(NSString *) = nil;
+  void W57dCancel();
+  bool OnFileDialog(CefBrowser *, FileDialogMode, const CefString &, const CefString &,
+    const std::vector<CefString> &, const std::vector<CefString> &,
+    const std::vector<CefString> &, CefFileDialogCallback *);
+};
+// INSERT ua
+// INSERT current
+// INSERT cancel
+// INSERT dialog
+
+int main() { @autoreleasepool {
+  const std::string ua = W57dUserAgent();
+  assert(ua == "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36");
+  assert(ua.find("TATWO") == std::string::npos && ua.find("CEF") == std::string::npos);
+  TatwoCEFBrowserView *view = [TatwoCEFBrowserView new];
+  view.window = [NSObject new]; view.inputCurrent = YES; view.navigationGeneration = 1;
+  view.browserActor = TatwoCEFBrowserActorHuman;
+  TatwoClient client; client.owner_ = view;
+  __block Reply reply;
+  __block int panels = 0;
+  __block BOOL multiple = NO;
+  view.onFileDialog = ^(NSInteger mode, NSString *title, NSString *path, NSArray *filters, BOOL multi, Reply cb) {
+    ++panels; reply = [cb copy]; multiple = multi;
+    assert([title isEqualToString:@"Fixture"]);
+    assert([path isEqualToString:@"/fixture/default.txt"]);
+    assert(([filters isEqualToArray:@[@".txt", @"image/*"]]));
+  };
+  auto request = [&](CefFileDialogCallback &cb, FileDialogMode mode = FILE_DIALOG_OPEN) {
+    return client.OnFileDialog(nullptr, mode, "Fixture", "/fixture/default.txt",
+                              {".txt", "image/*"}, {}, {}, &cb);
+  };
+  for (int denied = 0; denied < 6; ++denied) {
+    view.browserActor = denied == 0 ? TatwoCEFBrowserActorAgent : TatwoCEFBrowserActorHuman;
+    view.agentControlled = denied == 1;
+    view.isHiddenOrHasHiddenAncestor = denied == 2;
+    view.inputCurrent = denied != 3;
+    view.window = denied == 4 ? nil : [NSObject new];
+    CefFileDialogCallback cb;
+    assert(request(cb, denied == 5 ? FILE_DIALOG_NUM_VALUES : FILE_DIALOG_OPEN));
+    assert(cb.canceled == 1 && cb.continued == 0 && panels == 0);
+  }
+  view.browserActor = TatwoCEFBrowserActorHuman; view.agentControlled = NO;
+  view.isHiddenOrHasHiddenAncestor = NO; view.inputCurrent = YES; view.window = [NSObject new];
+  CefFileDialogCallback single;
+  assert(request(single) && !multiple && panels == 1);
+  Reply oldReply = reply;
+  CefFileDialogCallback overlap;
+  assert(request(overlap) && overlap.canceled == 1 && panels == 1);
+  reply(@[@"/fixture/a.txt"]);
+  assert(single.continued == 1 && single.canceled == 0 && single.selected.size() == 1);
+  oldReply(nil);
+  assert(single.continued == 1 && single.canceled == 0);
+  CefFileDialogCallback multi;
+  assert(request(multi, FILE_DIALOG_OPEN_MULTIPLE) && multiple);
+  oldReply(@[@"/fixture/stale.txt"]); // Must not consume the newer picker.
+  assert(multi.canceled == 0 && multi.continued == 0);
+  reply(@[@"/fixture/a.txt", @"/fixture/b.png"]);
+  assert(multi.continued == 1 && multi.selected.size() == 2);
+  for (NSArray *paths in @[@[], @[@"relative"], @[@"/fixture/a", @"/fixture/b"]]) {
+    CefFileDialogCallback bad;
+    assert(request(bad));
+    reply(paths);
+    assert(bad.canceled == 1 && bad.continued == 0);
+  }
+  for (int revoke = 0; revoke < 3; ++revoke) {
+    CefFileDialogCallback cb;
+    assert(request(cb));
+    if (revoke == 0) {
+      client.W57dCancel(); // close, hidden tab or agent takeover/recovery serial
+    } else if (revoke == 1) {
+      view.navigationGeneration = 2;
+    } else {
+      view.agentControlled = YES;
+    }
+    reply(@[@"/fixture/revoked.txt"]);
+    assert(cb.canceled == 1 && cb.continued == 0);
+    view.navigationGeneration = 1; view.agentControlled = NO;
+    reply(@[@"/fixture/still-revoked.txt"]);
+    assert(cb.canceled == 1 && cb.continued == 0);
+  }
+  for (FileDialogMode mode : {FILE_DIALOG_OPEN_FOLDER, FILE_DIALOG_SAVE}) {
+    CefFileDialogCallback cb;
+    assert(request(cb, mode) && !multiple);
+    reply(@[@"/fixture/selected"]);
+    assert(cb.continued == 1);
+  }
+  view.onFileDialog = nil;
+  CefFileDialogCallback missing;
+  assert(request(missing) && missing.canceled == 1);
+  puts("W57d UA and dialog fixture passed: agent/hidden/missing/revoked/duplicate/multiple/folder/save");
+} }

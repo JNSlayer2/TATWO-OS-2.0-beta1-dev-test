@@ -110,14 +110,61 @@ extension ChatPage {
     @ViewBuilder
     var sidebar: some View {
         switch model.mode {
-        case .chat, .browser, .custom:
+        case .chat, .custom:
             chatSidebar
         case .cli:
             cliSidebar
+        case .browser:
+            if ChatRunMode.browserPreviewEnabled { browserSidebar }
         case .bot:
-            // Gen-4：BotPageRootView 自帶 rail，chat 側欄整欄讓位。
+            // Bot owns its sidebar; do not nest the chat rail.
             EmptyView()
         }
+    }
+
+    var browserSidebar: some View {
+        WorkspaceSidebarShell(width: browserWorkSpaceStore.focusMode ? WorkspaceSidebarMetrics.browserFocusWidth : WorkspaceSidebarMetrics.width) {
+            VStack(alignment: .leading, spacing: WorkspaceSidebarMetrics.sectionSpacing) {
+                workspaceModeSection
+                    .padding(.top, WorkspaceSidebarMetrics.headerTopInset)
+                    .contextMenu {
+                        ForEach(ChatRunMode.visibleChatTabs) { mode in
+                            Button(mode.displayName) { model.mode = mode }
+                        }
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if !browserWorkSpaceStore.focusMode {
+                            Menu {
+                                ForEach(browserWorkSpaceStore.spaces) { space in
+                                    Button(space.name) { browserWorkSpaceStore.selectSpace(space.id) }
+                                }
+                                Button("新增空間", action: browserWorkSpaceStore.addSpace)
+                                Divider()
+                                Button("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Text(browserWorkSpaceStore.selectedSpace.name)
+                                        .font(.system(size: 12.5, weight: .bold)).lineLimit(1)
+                                    Image(systemName: "chevron.down").font(.system(size: 10))
+                                }
+                            }
+                            .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                            .frame(maxHeight: .infinity, alignment: .center)
+                            .frame(maxWidth: 112, alignment: .leading).frame(height: WorkspaceSidebarMetrics.headerTopInset)
+                            .padding(.leading, 70)
+                        }
+                    }
+                if browserWorkSpaceStore.focusMode {
+                    Spacer(minLength: 0)
+                } else {
+                    BrowserWorkSpaceSidebarList(store: browserWorkSpaceStore)
+                        .frame(maxHeight: .infinity)
+                    workspaceSidebarFooter
+                }
+            }
+            .frame(maxHeight: .infinity, alignment: .topLeading)
+        }
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
     }
 
     var chatSidebar: some View {
@@ -318,7 +365,7 @@ extension ChatPage {
     }
 
     var workspaceModeSection: some View {
-        WorkspaceSidebarModePicker(modes: ChatRunMode.visibleChatTabs, selection: model.mode) { mode in
+        WorkspaceSidebarModePicker(modes: model.mode == .browser && browserWorkSpaceStore.focusMode ? [.browser] : ChatRunMode.visibleChatTabs, selection: model.mode) { mode in
             withAnimation(.easeInOut(duration: 0.14)) { model.mode = mode }
         }
     }

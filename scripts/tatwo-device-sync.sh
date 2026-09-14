@@ -45,7 +45,7 @@ set -euo pipefail
 # ---- 設定（env 可覆寫） ----
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_BRANCH="${TATWO_RELEASE_BRANCH:-release/tatwo-os}"
-PRIMARY_SSH_HOST="${TATWO_PRIMARY_SSH_HOST:-ssh-mac-mini.tatwo214.com}"
+PRIMARY_SSH_HOST="${TATWO_PRIMARY_SSH_HOST:-}"
 APP_SUPPORT="${TATWO_APP_SUPPORT:-$HOME/Library/Application Support/Tatwo Ultrawork}"
 REMOTE_APP_SUPPORT="${TATWO_REMOTE_APP_SUPPORT:-$APP_SUPPORT}"
 DEVICE_NAME="${TATWO_DEVICE_NAME:-$(hostname -s 2>/dev/null || echo device)}"
@@ -540,6 +540,7 @@ cmd_db_pull() {
     --from) from="$2"; shift 2;;
     --dry-run) dry=1; shift;;
     *) die "未知參數 $1";; esac; done
+  [ -n "$from" ] || { echo "請設定 TATWO_PRIMARY_SSH_HOST" >&2; exit 2; }
   command -v rsync >/dev/null || die "缺 rsync"
   [ -d "$APP_SUPPORT" ] || die "找不到本機 app-support：$APP_SUPPORT"
 
@@ -6051,6 +6052,7 @@ cmd_sync_poll() {  # 在副設備 helper 跑：看有無主設備發起的指令
     --device) device="$2"; shift 2;;
     --from) from="$2"; shift 2;;
     *) die "未知參數 $1";; esac; done
+  [ -n "$from" ] || { echo "請設定 TATWO_PRIMARY_SSH_HOST" >&2; exit 2; }
   recover_incomplete_system_transactions \
     || die "未完成的 system transaction 無法安全恢復；拒絕處理新同步 request"
   channel_ensure
@@ -6811,6 +6813,7 @@ cmd_register() {  # 把本機設備登記到通道 devices/<name>.json，讓主�
 
   validate_device_role "$role"
   validate_device_name "$name"
+  [ -n "$host" ] || { echo "請設定 TATWO_PRIMARY_SSH_HOST" >&2; exit 2; }
   validate_ssh_host "$host"
   channel_ensure
   read_primary_state

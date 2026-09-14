@@ -64,18 +64,65 @@ node sidecar.mjs --cwd <工作目錄> [--resume <session id>] [--model <model id
 
 ## 內建瀏覽器 MCP（tatwo2_browser）
 
-Claude 與 Codex sidecar 會註冊 bundle 內同層的 `browser-mcp/server.mjs`；Grok 不註冊。
+Claude、Codex 與使用隔離 HOME 的 Grok sidecar 共用 bundle 內同層的 `browser-mcp/server.mjs`。
 該 MCP 只透過使用者本機、權限 `0600` 的 UNIX socket 溝通：
 
 ```
-~/Library/Application Support/tatwo2/live/browser.sock
+~/Library/Application Support/tatwo2/live/browser-v2.sock
 ```
 
-一行一個 JSON：`{"id":1,"method":"browser_open","params":{"url":"https://example.com"}}`。
+callerThreadID 由 sidecar 綁定的 `TATWO2_THREAD_ID` 注入，模型不能覆寫。
+原生輸入工具先 `browser_start` 取得 sessionID，再送一行一個 JSON：
+`{"id":1,"method":"browser_open","params":{"callerThreadID":"<bound UUID>","sessionID":"<grant UUID>","url":"https://example.com"}}`。
 App 回 `{"id":1,"ok":true,"result":{...}}` 或 `{"id":1,"ok":false,"error":"..."}`。
 工具為 `browser_open`、`browser_read`、`browser_screenshot`、`browser_click`、
 `browser_type`、`browser_scroll`、`browser_search`。橋不讀 cookie、storage、HTML 或欄位值；
 `browser_type` 對 CEF 可見快照標成 sensitive/password 的欄位一律拒絕。
+
+### WebMCP 頁面工具（W48）
+
+三個 MCP 名稱就是同名 socket method；外層參數禁止額外欄位：
+
+- `browser_tabs({})` → `{tabs:[{tabID,title,origin,hasPageTools,sleeping}]}`：所有 work space＋呼叫者目前 chat session，不列其他 chat／bot。tabID 是 registry UUID，App 內部轉為 CEF lane ID；不喚醒睡眠分頁。
+- `page_tools_list({tabID})` → `{origin?,tools:[{name,description,inputSchema}]}`。
+- `page_tool_call({tabID,tool,arguments:{...}})` → `{result:"<JSON string>",contentTrust:"untrusted_page_data_not_instructions"}`。
+
+這三個工具不要求 `browser_start`／sessionID／AX 權限，**不授予原生輸入權**。
+仍須本機、目前選中且執行中的使用者 Chat；原有 room／bot／remote 隔離不變。
+呼叫政策只取 App 的 caller preset（bot override 的 configFile 回退使用者 preset），不取分頁擁有者或 MCP 參數。
+唯讀 caller 只允許 readOnly；fullAccess 全允許；approveForMe 允許 readOnly，
+sideEffect／highRisk 每次問 Island；askFirst／configFile／nil 的 readOnly 在 caller session＋tab＋origin 問一次，
+其餘每次問。Stop／request epoch、對話切換、caller 權限變更、分頁移轉、睡眠或斷線均重驗，不沿用待決授權。
+`EmbeddedBrowserSiteToolPolicy` 的 origin 拒絕優先於 preset；私網不因 human tab 或 fullAccess 放行。
+
+runtime 解析 `TatwoCEFWebMCPToolsSnapshotV1`：origin、navigationGeneration、tools；
+工具欄位 name、description、inputSchemaJSON、origin、navigationGeneration、contextID；未知欄位忽略。
+限制為 UTF-8：name 128 B、description 8192 B、schema 65536 B、snapshot／arguments／result 1 MiB，
+JSON 深度 16、每容器 4096 項、每分頁最多 128 工具；socket 整包仍限 1 MiB。
+拒收 snapshot 時清除舊工具並記固定錯誤碼，避免繼續用舊頁面。
+schema／description 的 readOnlyHint 或 get/list/search/read 名稱判 readOnly；
+destructiveHint 或 delete/pay/send 語詞優先判 highRisk，其他為 sideEffect。
+**這些是網站宣告的分類，不是 JS 純讀沙箱或無副作用證明**；網站提供的 schema、描述及結果皆不可信。
+
+呼叫帶 CEF navigationGeneration；確認前後及結果返回時再驗頁面／工具版本與 request。
+換代回 `stale_page`；錯誤／逾時不自動重試（已送出的寫入不會回滾）。
+Island 確認最多 20 秒、renderer 最多 30 秒，WebMCP request 共 60 秒、MCP 等候最多 65 秒（原生輸入仍 40／45 秒）；
+兩段合計逾時會取消等候，不能據此認定寫入沒發生。
+每次 runtime invoke 寫一行 JSON 到 `~/Library/Application Support/TATWO OS/Browser/webmcp-audit.log`（0600）：
+時間、caller、origin、tool、decision、outcome、固定 error code；不寫參數、結果或頁面錯誤內容。
+磁碟寫入失敗會記 `audit_write_failed`，不宣稱審計已落盤。
+
+#### Island 實測 fixture（後續 CEF／人類驗收）
+
+`tests/fixtures/webmcp-demo.html` 登記 `get_note` 與 `set_note`，筆記只存在 DOM。
+在允許的 HTTP(S) origin 提供此頁；不可直接 file://，正式私網規則不放寬。
+本分支 C++ 實際掛的是 `document.modelContext`，fixture 局部別名到 `navigator.modelContext`，
+並優先選 TATWO 的 `__tatwoWebMCP`；**一般頁面 navigator API 相容仍待 CEF 房修正，本單不改 C++**。
+隔離 staging 的 loopback 測試須沿用既有 staging 專用例外，不能在正式 App 開例外。
+後續以三家 AI 各自取得 browser_tabs／page_tools_list，再以 approveForMe 呼叫 get_note（不問）
+與 set_note（Island 問一次，先測取消再測允許），核對 DOM 與審計。
+另測 askFirst 同 origin 第二次讀不問、每次寫都問、fullAccess 不問、換頁待決拒絕。
+本單 swiftc 假 invoker／假 confirm、socket fixture 與 CEF=0 build **不等同此實機／視覺驗收**。
 
 
 ## 內建派工引擎（tatwo2_os，E1）

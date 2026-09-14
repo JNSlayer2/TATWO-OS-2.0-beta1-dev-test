@@ -34,20 +34,18 @@ struct UpdateAvailableCard: View {
             }
             if let release = checker.availableRelease, !checker.dismissed {
                 if let title = release.name, !title.isEmpty { Text(title) }
-                Text(updater.preparationTitle(release.tag_name))
+                Text(updater.updateMarkTitle)
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack {
-                    if updater.phase == .ready {
-                        Button(updateButtonTitle) { updater.update(to: release.tag_name) }
-                            .buttonStyle(.borderedProminent)
-                    } else if updater.phase == .starting {
-                        Button("取消") { updater.cancelUpdate() }
-                    } else if updater.phase != .handedOff {
-                        Button("現在就下載") {
-                            updater.prefetch(to: release.tag_name, repository: checker.repository, force: true)
+                    Button(updater.updateMarkTitle) {
+                        Task {
+                            await updater.activateUpdateMark(to: release.tag_name, repository: checker.repository)
                         }
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(updater.updateMarkDisabled)
+                    .help(updater.updateMarkHelp)
                     Spacer()
                     Button("稍後") { checker.dismissForLaunch() }
                         .disabled(updater.phase == .handedOff)
@@ -89,9 +87,6 @@ struct UpdateAvailableCard: View {
         return formatter
     }()
 
-    private var updateButtonTitle: String { "重新啟動以更新（約 10 秒）" }
-
-
 }
 
 struct SidebarUpdateShortcut: View {
@@ -101,15 +96,17 @@ struct SidebarUpdateShortcut: View {
     var body: some View {
         if let release = checker.availableRelease, !checker.dismissed {
             Button {
-                if updater.phase == .ready { updater.update(to: release.tag_name) }
-                else { openUpdateSettings() }
+                Task {
+                    await updater.activateUpdateMark(to: release.tag_name, repository: checker.repository)
+                }
             } label: {
-                Text((checker.isPrivateChannel ? "私人通道 · " : "") + updater.preparationTitle(release.tag_name) + (updater.phase == .ready ? " · 重新啟動" : ""))
-                    .font(.caption.weight(.semibold)).lineLimit(1)
+                Text((checker.isPrivateChannel ? "私人通道 · " : "") + updater.updateMarkTitle)
+                    .font(.caption.weight(.semibold)).monospacedDigit().lineLimit(1)
                     .frame(minHeight: 26).contentShape(Rectangle())
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
-            .help(updater.phase == .ready ? "重新啟動以更新（約 10 秒）" : "開啟設定的 App 更新卡")
+            .disabled(updater.updateMarkDisabled)
+            .help(updater.updateMarkHelp)
             .accessibilityIdentifier("chat-sidebar-update")
         }
     }
