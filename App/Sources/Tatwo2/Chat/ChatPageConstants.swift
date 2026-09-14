@@ -38,16 +38,50 @@ enum ChatTypography {
     static let terminalMono = Font.system(size: terminalPointSize, weight: .regular, design: .monospaced)
 }
 
-enum ChatRunMode: String, CaseIterable, Identifiable {
-    case chat = "Chat"
-    case cli = "CLI"
-    case bot = "Bot"
+enum ChatRunMode: RawRepresentable, CaseIterable, Identifiable, Hashable {
+    case chat, cli, bot, browser
+    case custom(String)
+
+    static let allCases: [Self] = [.chat, .cli, .bot, .browser]
+    var rawValue: String {
+        switch self {
+        case .chat: "Chat"
+        case .cli: "CLI"
+        case .bot: "Bot"
+        case .browser: "Browser"
+        case .custom(let id): id
+        }
+    }
+    init?(rawValue: String) {
+        switch rawValue {
+        case "Chat": self = .chat
+        case "CLI": self = .cli
+        case "Bot": self = .bot
+        case "Browser": self = .browser
+        case "": return nil
+        default: self = .custom(rawValue)
+        }
+    }
+    @MainActor var displayName: String {
+        if case .custom(let id) = self { return SpaceWorkspaceController.shared.displayName(for: id) }
+        return rawValue
+    }
+
+    /// Browser is a design-only work space; it stays hidden unless explicitly previewed.
+    static var browserPreviewEnabled: Bool {
+        ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] == "1"
+    }
+
+    static func previewFilteredModes(_ modes: [ChatRunMode], enabled: Bool) -> [ChatRunMode] {
+        modes.filter { $0 != .browser || enabled }
+    }
 
     /// Wave1: Ultrawork/cowork tab removed from chat chrome; keep `.chat` + `.cli` only.
     /// Archived sidebar: `Apps/TatwoUltraworkMac/_archived/ChatPage-coworkSidebar-wave1-20260728.swift.txt`
     /// Gen-4: `.bot` 第三格＝純 UI 展示面（GEN4_UI_PLAN §1-8；零副作用、零 runner）。
     @MainActor static var visibleChatTabs: [ChatRunMode] {
-        SpaceWorkspaceController.shared.visibleModes
+        previewFilteredModes(
+            SpaceWorkspaceController.shared.visibleModes, enabled: browserPreviewEnabled)
     }
 
     var id: String { rawValue }
@@ -56,6 +90,8 @@ enum ChatRunMode: String, CaseIterable, Identifiable {
         case .chat: "bubble.left.and.bubble.right"
         case .cli: "terminal"
         case .bot: "person.2"
+        case .browser: "globe"
+        case .custom: "square.dashed"
         }
     }
 
@@ -64,7 +100,8 @@ enum ChatRunMode: String, CaseIterable, Identifiable {
         case .chat: .chat
         case .cli: .cli
         // Gen-4 展示面沒有命令面；映射 .chat 僅為型別完備，bot 模式下 composer 不掛接。
-        case .bot: .chat
+        // Design/display surfaces never mount a composer; the mapping is for type completeness.
+        case .bot, .browser, .custom: .chat
         }
     }
 
@@ -73,6 +110,8 @@ enum ChatRunMode: String, CaseIterable, Identifiable {
         case .chat: "互動續聊"
         case .cli: "唯讀終端"
         case .bot: "bot 展示"
+        case .browser: "設計稿：未連線"
+        case .custom: "自訂 work space"
         }
     }
 }

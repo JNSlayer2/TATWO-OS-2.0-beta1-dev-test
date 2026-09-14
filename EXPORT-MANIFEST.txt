@@ -1,6 +1,6 @@
-Source commit: 46756bba7cd224fc169049b66ba07d90c39c376f
+Source commit: d86c6300f9b0834ae9cf1a8758adf5b85c8be53a
 Source worktree: clean
-Files: 1439
+Files: 1445
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -12,6 +12,7 @@ App/Sources/Tatwo2/Bot/BotStudioPage.swift
 App/Sources/Tatwo2/Bot/BotStudioState.swift
 App/Sources/Tatwo2/Browser/BrowserManagementView.swift
 App/Sources/Tatwo2/Browser/BrowserManagementViewModel.swift
+App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift
 App/Sources/Tatwo2/Browser/ChromiumCEFBackend.swift
 App/Sources/Tatwo2/Browser/EmbeddedBrowserAddressPresentation.swift
 App/Sources/Tatwo2/Browser/EmbeddedBrowserProfile.swift
@@ -1313,6 +1314,7 @@ tests/browser-snapshot-dispatch.test.mjs
 tests/browser-snapshot-metadata.test.mjs
 tests/browser-socket-recovery.test.mjs
 tests/browser-startup-pump.test.mjs
+tests/browser-workspace-design.test.mjs
 tests/claude-sidecar-attachments.test.mjs
 tests/claude-sidecar-readonly.test.mjs
 tests/codex-sidecar-cancellation.test.mjs
@@ -1335,6 +1337,8 @@ tests/fixtures/ipad-use-controller-checks.swift
 tests/fixtures/scroll-follow-checks.swift
 tests/fixtures/tatwo-high-intensity-24turns.json
 tests/fixtures/tatwo-same-thread-expected-fail.json
+tests/fixtures/work-space-checks.swift
+tests/fixtures/work-space-legacy.json
 tests/full-access-permission.test.mjs
 tests/g2c-realistic-corpus-source-contract.test.mjs
 tests/gen3-death-inventory-source-contract.test.mjs
@@ -1440,3 +1444,5 @@ tests/w28-audit.test.mjs
 tests/w29a-update-fixes.test.mjs
 tests/w29b-ux-fixes.test.mjs
 tests/w31-r2-tail.test.mjs
+tests/work-space-add.test.mjs
+tests/work-space-naming.test.mjs

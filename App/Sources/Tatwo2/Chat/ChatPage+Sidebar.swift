@@ -110,7 +110,7 @@ extension ChatPage {
     @ViewBuilder
     var sidebar: some View {
         switch model.mode {
-        case .chat:
+        case .chat, .browser, .custom:
             chatSidebar
         case .cli:
             cliSidebar

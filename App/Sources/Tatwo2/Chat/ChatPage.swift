@@ -22,6 +22,7 @@ struct ChatPage: View {
     @State var showDeveloperInfo = false
     @State var showComputerUseInfo = false
     @State var showIPadConnection = false
+    @ObservedObject private var spaceSetupPreview = SpaceSetupPreviewState.shared
     @ObservedObject private var feedback = FeedbackCoordinator.shared
     @State var showTabDesignPhilosophy = false
     @State var tabDesignPhilosophyHoverGeneration = 0
@@ -525,7 +526,8 @@ struct ChatPage: View {
             NotificationCenter.default.publisher(for: .tatwoChatSelectMode)
         ) { notification in
             guard let raw = notification.object as? String,
-                  let requested = ChatRunMode(rawValue: raw)
+                  let requested = ChatRunMode(rawValue: raw),
+                  ChatRunMode.visibleChatTabs.contains(requested)
             else { return }
             model.mode = requested
         }
@@ -546,6 +548,7 @@ struct ChatPage: View {
             model.handlePlanQuestionAnswerNotification(notification)
         }
         .onDrop(of: [UTType.fileURL.identifier, UTType.image.identifier], isTargeted: $dropIsTargeted, perform: handleDrop(providers:))
+        .modifier(SpaceBuilderPresentation())
         .sheet(isPresented: feedback.presentation(for: "Chat")) {
             FeedbackSheet(coordinator: feedback)
         }

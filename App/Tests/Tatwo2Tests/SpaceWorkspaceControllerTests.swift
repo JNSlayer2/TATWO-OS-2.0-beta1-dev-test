@@ -11,6 +11,37 @@ final class SpaceWorkspaceControllerTests: XCTestCase {
         return library
     }
 
+    func testCustomWorkSpacePersistsNameOrderVisibilityWithoutCreatingBot() async throws {
+        let store = await library()
+        let controller = SpaceWorkspaceController()
+        await controller.load(library: store)
+        let domain = try XCTUnwrap(controller.state?.selectedDomain)
+        domain.screen = .settings
+        let originalBots = store.list().count
+        domain.addWorkSpace()
+        let tab = try XCTUnwrap(domain.tabs.last)
+        XCTAssertTrue(tab.isCustom)
+        XCTAssertEqual(domain.name(for: tab), "Work Space 1")
+        domain.renameWorkSpace(tab, to: "Custom renamed")
+        domain.moveTab(tab, before: .chat)
+        XCTAssertEqual(controller.visibleModes.first, .custom(tab.rawValue))
+        if case .settings = domain.screen {} else { XCTFail("+add navigated away from Settings") }
+        await controller.flushWrites()
+        XCTAssertNil(controller.error)
+        let reloaded = SpaceWorkspaceController()
+        await reloaded.load(library: BotLibrary(root: store.root))
+        XCTAssertEqual(reloaded.state?.selectedDomain.tabs.first, tab)
+        XCTAssertEqual(reloaded.displayName(for: tab.rawValue), "Custom renamed")
+        XCTAssertEqual(reloaded.visibleModes.first, .custom(tab.rawValue))
+        reloaded.state?.selectedDomain.toggle(tab)
+        await reloaded.flushWrites()
+        let disabled = SpaceWorkspaceController()
+        await disabled.load(library: BotLibrary(root: store.root))
+        XCTAssertFalse(disabled.visibleModes.contains(.custom(tab.rawValue)))
+        XCTAssertEqual(store.list().count, originalBots)
+        XCTAssertTrue(domain.interfaces.isEmpty)
+    }
+
     func testLegacyEmptyLibraryKeepsOriginalTabs() async {
         let controller = SpaceWorkspaceController()
         await controller.load(library: await library())

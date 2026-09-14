@@ -35,6 +35,15 @@ extension ChatPage {
                     })
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            } else if model.mode == .browser {
+                if ChatRunMode.browserPreviewEnabled {
+                    BrowserWorkSpaceDesignView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    // Fail closed even for a stale selection or mode notification.
+                    Color.clear
+                        .onAppear { model.mode = .chat }
+                }
             } else if model.mode == .cli {
                 // 2026-08-23 sol 一致性收尾 R2：loops 僅留在 chat 右欄；
                 // CLI 主畫面固定為右上、多卡向下排列的終端工作區。
@@ -51,7 +60,7 @@ extension ChatPage {
                     .frame(maxWidth: contentMaxWidth ?? composerMaxWidth)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
-            if model.mode != .cli, model.mode != .bot {
+            if model.mode != .cli, model.mode != .bot, model.mode != .browser {
                 composer(contentMaxWidth: contentMaxWidth, forceCompactToolbar: forceCompactToolbar)
                     .frame(maxWidth: contentMaxWidth ?? composerMaxWidth)
                     .frame(maxWidth: .infinity, alignment: .center)

@@ -187,8 +187,8 @@ struct TatwoSettingsPage: View {
         case .space:
             if SpaceSetupPreviewState.isEnabled {
             SpaceSetupPreviewView(opensSettings: true, onOpenBuilder: {
+                SpaceSetupPreviewState.shared.selectedDomain.presentsBuilder = true
                 onClose()
-                model.mode = .bot
             })
             } else {
                 SpaceLiveSetupView(opensSettings: true, onOpenBuilder: {

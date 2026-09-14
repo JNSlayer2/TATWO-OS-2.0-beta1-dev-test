@@ -61,7 +61,7 @@ final class SpaceWorkspacePersistenceTests: XCTestCase {
         let tattoo = try await store.updateSpaceDomain(id: "tattoo") {
             $0.draft.text = "預約管理"
             $0.disabledTabs.insert(.cli)
-            $0.tabOrder = [.bot, .chat, .cli]
+            $0.tabOrder = [.bot, .chat, .cli, .browser]
         }
         _ = try await store.updateSpaceDomain(id: "admin") { $0.draft.text = "行政後台" }
         let reloaded = BotLibrary(root: store.root)

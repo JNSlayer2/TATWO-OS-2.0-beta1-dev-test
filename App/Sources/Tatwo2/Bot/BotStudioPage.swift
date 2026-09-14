@@ -5,7 +5,7 @@ import AppKit
 // 左列風格照現況不動（Chat／CLI／Bot 膠囊、已釘選、資料夾、臨時工區、
 // create bot、底部 TATWO OS＋space 圓點）；新增的只有：
 //   ① 子資料夾可再深一層、群可展開看成員
-//   ② 側欄右緣把手 → 工作室抽屜（一個 space 可有多間工作室）
+//   ② 側欄右緣把手 → 工作室抽屜（一個 bot space 可有多間工作室）
 //   ③ add space 三段流 → 綁一個工作環境（三種來源講白能力）
 //   ④ create bot ＝生臨時工；轉常駐才走六步
 //   ⑤ 資料夾設定＝身份組，拆「權限×視野」兩軸（認知隔離）
@@ -89,7 +89,7 @@ struct BotStudioRootView: View {
         .zIndex(10)
     }
 
-    /// 膠囊下方＝這個 space 的名字；點名字進全 space 設定。
+    /// 膠囊下方＝這個 bot space 的名字；點名字進全 bot space 設定。
     private var spaceHeader: some View {
         Button { state.openSpaceSettings() } label: {
             HStack(spacing: 8) {
@@ -109,7 +109,7 @@ struct BotStudioRootView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("這個 space 的設定")
+        .help("這個 bot space 的設定")
     }
 
     private var treeScroll: some View {
@@ -171,7 +171,7 @@ struct BotStudioRootView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("新增一個 space")
+                .help("新增一個 bot space")
             }
             .frame(maxWidth: .infinity, alignment: .center)
             TatwoOSMark(size: 13)

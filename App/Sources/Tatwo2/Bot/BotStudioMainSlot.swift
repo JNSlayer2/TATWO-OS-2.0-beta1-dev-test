@@ -75,7 +75,7 @@ struct BotStudioMainSlot: View {
         } else {
             BotStudioEmpty(
                 symbol: "square.dashed",
-                title: "這個 space 還沒接東西進來",
+                title: "這個 bot space 還沒接東西進來",
                 detail: "用 app 右緣的工作室書籤 ＋，講一句你要接什麼，bot 會先給你 plan。") {
                     state.startBind()
                 }
@@ -725,7 +725,7 @@ struct BotStudioRolePane: View {
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             } else {
-                BotStudioEmpty(symbol: "folder", title: "這個 space 還沒有部門", detail: nil, action: nil)
+                BotStudioEmpty(symbol: "folder", title: "這個 bot space 還沒有部門", detail: nil, action: nil)
             }
             Spacer(minLength: 0)
         }
@@ -789,7 +789,7 @@ struct BotStudioMemberRow: View {
     }
 }
 
-// MARK: - 這個 space 的設定
+// MARK: - 這個 bot space 的設定
 
 struct BotStudioSpaceSettingsPane: View {
     @ObservedObject var state: BotStudioState
@@ -798,7 +798,7 @@ struct BotStudioSpaceSettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Text("space 設定").font(.system(size: 14, weight: .bold))
+                Text("bot space 設定").font(.system(size: 14, weight: .bold))
                 Spacer(minLength: 0)
                 Button("完成") { state.mode = .studio }
                     .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -808,7 +808,7 @@ struct BotStudioSpaceSettingsPane: View {
             BotStudioButton(title: "改名字", prominent: false) { state.renameSpace(draftName) }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("這個 space 的工作室").font(.system(size: 12.5, weight: .bold))
+                Text("這個 bot space 的工作室").font(.system(size: 12.5, weight: .bold))
                 if state.studios.isEmpty {
                     Text("還沒綁。用 app 右緣的工作室書籤 ＋ 接一個進來。")
                         .font(.system(size: 12)).foregroundStyle(.tertiary)

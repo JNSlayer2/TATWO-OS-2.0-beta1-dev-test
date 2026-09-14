@@ -101,6 +101,7 @@ final class BotStudioState: ObservableObject {
 
     // MARK: - 取值
 
+    /// The Bot sidebar bot space, not a top-level work space.
     var space: BotSpace { spaces[spaceIndex] }
     var studios: [BotStudio] { space.studios }
     var studio: BotStudio? { studios.first { $0.id == selectedStudioID } ?? studios.first }

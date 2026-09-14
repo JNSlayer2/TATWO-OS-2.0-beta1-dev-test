@@ -22,12 +22,22 @@ final class SpaceWorkspaceController: ObservableObject {
     var selectedDomainID: String? { state?.selectedDomainID }
     var visibleModes: [ChatRunMode] {
         if hasInvalidWorkspace { return [] }
-        return state?.selectedDomain.visibleTabs.compactMap { ChatRunMode(rawValue: $0.rawValue) }
-            ?? [.chat, .cli, .bot]
+        let modes = activeSetupState?.selectedDomain.visibleTabs.compactMap { ChatRunMode(rawValue: $0.rawValue) }
+            ?? ChatRunMode.allCases
+        return modes.filter { $0 != .browser || ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] == "1" }
+    }
+    private var activeSetupState: SpaceSetupPreviewState? {
+        SpaceSetupPreviewState.isEnabled ? SpaceSetupPreviewState.shared : state
+    }
+    func displayName(for id: String) -> String {
+        guard let domain = activeSetupState?.selectedDomain,
+              let tab = SpaceSetupPreviewState.Tab(rawValue: id) else { return id }
+        return domain.name(for: tab)
     }
     func allows(_ mode: ChatRunMode) -> Bool {
         if hasInvalidWorkspace { return false }
-        guard let state,
+        if mode == .browser && ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] != "1" { return false }
+        guard let state = activeSetupState,
               let tab = SpaceSetupPreviewState.Tab(rawValue: mode.rawValue) else { return true }
         return state.selectedDomain.isRequestedEnabled(tab)
     }
@@ -87,9 +97,10 @@ final class SpaceWorkspaceController: ObservableObject {
         draftIDs[domain.id] = saved.draft.id
         domain.draft = saved.draft.text
         domain.chosenBotID = saved.draft.existingBotID ?? ""
-        domain.tabs = saved.tabOrder.compactMap { SpaceSetupPreviewState.Tab(rawValue: $0.rawValue.capitalized.replacingOccurrences(of: "Cli", with: "CLI")) }
+        domain.tabs = saved.tabOrder.compactMap { SpaceSetupPreviewState.Tab(rawValue: $0.modeRawValue) }
+        domain.customTabs = saved.customTabs ?? [:]
         domain.enabledTabs = Set(domain.tabs.filter {
-            !saved.disabledTabs.contains(SpaceManagedTab(rawValue: $0.rawValue.lowercased())!)
+            !saved.disabledTabs.contains(SpaceManagedTab(modeRawValue: $0.rawValue)!)
         })
         domain.bots = library.list().filter { $0.spaceIDs.contains(domain.id) }
             .map { .init(id: $0.id, name: $0.name) }
@@ -108,15 +119,17 @@ final class SpaceWorkspaceController: ObservableObject {
         let draft = SpaceBuilderDraft(id: draftIDs[id] ?? UUID(), text: domain.draft,
                                      existingBotID: domain.chosenBotID.isEmpty ? nil : domain.chosenBotID)
         draftIDs[id] = draft.id
-        let order = domain.tabs.compactMap { SpaceManagedTab(rawValue: $0.rawValue.lowercased()) }
+        let order = domain.tabs.compactMap { SpaceManagedTab(modeRawValue: $0.rawValue) }
         let disabled = Set(domain.tabs.filter { !domain.isRequestedEnabled($0) }
-            .compactMap { SpaceManagedTab(rawValue: $0.rawValue.lowercased()) })
+            .compactMap { SpaceManagedTab(modeRawValue: $0.rawValue) })
+        let customTabs = domain.customTabs
         let previous = writeTail
         writeTail = Task { [weak self] in
             await previous?.value
             do {
                 _ = try await library.updateSpaceDomain(id: id) {
                     $0.draft = draft; $0.tabOrder = order; $0.disabledTabs = disabled
+                    $0.customTabs = customTabs
                 }
                 self?.error = nil
                 self?.model?.applySpaceRuntimePreferences()
@@ -142,9 +155,9 @@ final class SpaceWorkspaceController: ObservableObject {
     }
 
     func openBuilder() {
-        state?.selectedDomain.openBuilder()
-        presentsInterface = true
-        model?.mode = .bot
+        guard let domain = activeSetupState?.selectedDomain else { return }
+        domain.openBuilder()
+        domain.presentsBuilder = true
     }
 
     func openInterface(_ id: String) {

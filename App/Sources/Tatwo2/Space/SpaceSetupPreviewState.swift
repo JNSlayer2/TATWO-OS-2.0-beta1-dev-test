@@ -10,14 +10,27 @@ final class SpaceSetupPreviewState: ObservableObject {
     static let shared = SpaceSetupPreviewState()
 
     enum Screen { case settings, builder, interface, conversation, tab(Tab) }
-    enum Tab: String, CaseIterable, Identifiable {
-        case chat = "Chat", cli = "CLI", bot = "Bot"
+    /// Value identity for a top-level work space, including custom IDs.
+    struct Tab: RawRepresentable, CaseIterable, Identifiable, Hashable {
+        let rawValue: String
+        init?(rawValue: String) {
+            guard !rawValue.isEmpty else { return nil }
+            self.rawValue = rawValue
+        }
+        static let chat = Self(rawValue: "Chat")!
+        static let cli = Self(rawValue: "CLI")!
+        static let bot = Self(rawValue: "Bot")!
+        static let browser = Self(rawValue: "Browser")!
+        static let allCases: [Self] = [.chat, .cli, .bot, .browser]
         var id: String { rawValue }
+        var isCustom: Bool { !Self.allCases.contains(self) }
         var symbol: String {
             switch self {
             case .chat: "bubble.left"
             case .cli: "terminal"
             case .bot: "person.crop.square"
+            case .browser: "globe"
+            default: "square.dashed"
             }
         }
     }
@@ -39,6 +52,7 @@ final class SpaceSetupPreviewState: ObservableObject {
         let name: String
         @Published var screen: Screen = .builder
         @Published var tabs = Tab.allCases
+        @Published var customTabs: [String: String] = [:]
         @Published var enabledTabs = Set(Tab.allCases)
         /// Fixture lifecycle only. No process or task is launched by these controls.
         @Published private(set) var runningTabs = Set<Tab>()
@@ -51,6 +65,7 @@ final class SpaceSetupPreviewState: ObservableObject {
         var onSubmit: (() -> Void)?
         var beforeToggle: (() -> Void)?
         @Published var presentsInterface = false
+        @Published var presentsBuilder = false
         var transcript: (() -> [ChatMessage])?
         @Published var isSubmitting = false
         @Published var bots: [Bot]
@@ -86,7 +101,10 @@ final class SpaceSetupPreviewState: ObservableObject {
         var selectedInterface: WorkInterface? {
             interfaces.first { $0.id == selectedInterfaceID }
         }
-        var visibleTabs: [Tab] { tabs.filter { enabledTabs.contains($0) } }
+        var visibleTabs: [Tab] {
+            tabs.filter { enabledTabs.contains($0) && ($0 != .browser
+                || ProcessInfo.processInfo.environment["TATWO_BROWSER_WORKSPACE_PREVIEW"] == "1") }
+        }
         var selectedTab: Tab? {
             switch screen {
             case .tab(let tab): tab
@@ -105,6 +123,23 @@ final class SpaceSetupPreviewState: ObservableObject {
             !isSubmitting && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && (chosenBotID.isEmpty || bots.contains { $0.id == chosenBotID })
         }
+        func name(for tab: Tab) -> String {
+            guard let name = customTabs[tab.rawValue] else { return tab.rawValue }
+            return name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Work Space" : name
+        }
+        func addWorkSpace() {
+            let tab = Tab(rawValue: UUID().uuidString)!
+            customTabs[tab.rawValue] = "Work Space \(customTabs.count + 1)"
+            tabs.append(tab)
+            enabledTabs.insert(tab)
+            onPersist?()
+        }
+        func renameWorkSpace(_ tab: Tab, to name: String) {
+            let bounded = String(name.prefix(80))
+            guard let current = customTabs[tab.rawValue], current != bounded else { return }
+            customTabs[tab.rawValue] = bounded
+            onPersist?()
+        }
         func openBuilder() {
             validationMessage = nil
             screen = .builder
@@ -112,6 +147,7 @@ final class SpaceSetupPreviewState: ObservableObject {
         func cancelBuilder() {
             // Dismiss without creating anything; retain this domain's input for returning.
             validationMessage = nil
+            presentsBuilder = false
             screen = selectedInterface == nil ? .settings : .interface
             if isProduction { presentsInterface = false }
         }
@@ -166,14 +202,14 @@ final class SpaceSetupPreviewState: ObservableObject {
         func previewResult() {
             if let onSubmit { onSubmit(); return }
             guard canPreview else {
-                validationMessage = "請填寫搭建需求，並選擇此 Space 的 Bot。"
+                validationMessage = "請填寫搭建需求，並選擇此 work space 的 Bot。"
                 return
             }
             let number = interfaces.count + 1
             let interfaceID = "\(id)-interface-\(number)"
             let bot: Bot
             if chosenBotID.isEmpty {
-                bot = Bot(id: "\(interfaceID)-bot", name: "工作介面 \(number) Bot")
+                bot = Bot(id: "\(interfaceID)-bot", name: "自訂 work space \(number) Bot")
                 bots.append(bot)
             } else if let existing = bots.first(where: { $0.id == chosenBotID }) {
                 bot = existing
@@ -181,7 +217,7 @@ final class SpaceSetupPreviewState: ObservableObject {
                 return
             }
             interfaces.append(WorkInterface(
-                id: interfaceID, name: "工作介面 \(number)", bot: bot,
+                id: interfaceID, name: "自訂 work space \(number)", bot: bot,
                 specification: draft, conversationID: "\(interfaceID)-conversation"))
             selectedInterfaceID = interfaceID
             draft = ""
@@ -222,7 +258,7 @@ final class SpaceSetupPreviewState: ObservableObject {
     }
 
     static let specificationPrompt = """
-    請協助我在目前 Space 搭建以下工作介面：
+    請協助我在目前 work space 搭建以下自訂 work space：
 
     【名稱】
     【使用者與工作領域】
@@ -241,6 +277,6 @@ final class SpaceSetupPreviewState: ObservableObject {
     提出介面與操作流程供我確認，再進行搭建。
     左列必須沿用 OS 共用側欄模板（WorkspaceSidebarShell／WorkspaceSidebarModePicker）：
     寬度、邊距、分頁列與底部對齊依 WorkspaceSidebarMetrics，不得各自另定比例。
-    不得把此工作介面或對話帶到其他 Space。
+    不得把此自訂 work space或對話帶到其他 work space。
     """
 }
