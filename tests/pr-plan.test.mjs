@@ -16,7 +16,7 @@ test('PR text creates discussing canvas without invoking contribution; bare comm
   assert.doesNotMatch(send, /startPRContribution\(/);
   assert.match(send, /PullRequestCoordinator\.shared\.present\(directory:/);
   assert.match(engine, /plan\.kind == "pr"[\s\S]*planDiscussionRules[\s\S]*這是要送回公開倉庫的貢獻/);
-  assert.match(model, /planCommand == "開始"[^\n]*activePlanArtifact\?\.kind != "pr"/);
+  assert.match(engine, /實作只能由畫布確認啟動，提交只能按「送 PR」/);
 });
 test('only confirmation starts implementation with editable plan; completion cannot submit', () => {
   const confirm = model.slice(model.indexOf('func confirmActivePlan()'), model.indexOf('func editablePlanTextForCanvas'));

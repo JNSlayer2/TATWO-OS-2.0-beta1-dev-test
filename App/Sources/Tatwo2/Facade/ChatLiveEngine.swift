@@ -702,7 +702,7 @@ final class ChatLiveEngine: LiveEngineAPI {
         guard let sidecar = ensureSidecar(threadID, model: model, engine: engine, systemPrompt: systemPrompt) else { return false }
         let turn = UUID().uuidString
         let planBriefing = planContext(plan, userText: t)
-        if var confirmed = plan, confirmed.kind != "feedback", confirmed.state == .confirmed, confirmed.executionTurnID == nil, t == "開始" {
+        if var confirmed = plan, confirmed.acceptsStart(t) {
             confirmed.executionTurnID = turn
             do { try savePlanArtifact(confirmed) }
             catch {

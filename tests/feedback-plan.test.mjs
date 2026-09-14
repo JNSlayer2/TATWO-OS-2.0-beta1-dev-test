@@ -42,9 +42,12 @@ test('human submit reuses coordinator review and submit with manual and stale-pa
   assert.match(canvas, /Text\(ChatPlanArtifactTranscriptProjection\.title\(for: artifact\)\)/);
   assert.match(canvas, /case "feedback": "回報問題"/);
   assert.match(canvas, /if artifact\.kind == "feedback" \{\s+FeedbackPlanActions/);
-  assert.match(actions, /"提交 Issue", action: submitIssue/);
+  assert.match(actions, /"審查中…"[\s\S]*?"送出 Issue"[\s\S]*?"審查內容"/);
   assert.match(actions, /coordinator\.title = issueTitle[\s\S]*coordinator\.content = issueBody[\s\S]*coordinator\.review\(\)/);
-  assert.match(actions, /phase == \.reviewed, requestedText == artifact\.editableText\(\), !isDisabled,[\s\S]*!coordinator\.requiresManualConfirmation \{ coordinator\.submit\(\) \}/);
+  const changes = actions.slice(actions.indexOf('.onChange(of: coordinator.phase)'), actions.indexOf('private func submitIssue'));
+  assert.doesNotMatch(changes, /coordinator\.submit\(\)/);
+  assert.match(actions, /將送出到/);
+  assert.match(actions, /phase == \.reviewed, coordinator.title == issueTitle, coordinator.content == issueBody \{\s*coordinator.submit\(\)/);
   assert.match(actions, /coordinator\.manualConfirmation/);
   assert.match(actions, /coordinator\.checkSubmission/);
   assert.match(actions, /coordinator\.title == issueTitle, coordinator\.content == issueBody/);
@@ -78,6 +81,70 @@ test('submitted callback is artifact-scoped and incomplete or busy canvases cann
   assert.match(model, /func finishFeedbackPlan\(_ id: UUID\)[\s\S]*?plan\.planID == id[\s\S]*?plan\.confirm\(\)/);
   assert.match(actions, /guard !isDisabled, complete else \{ return \}/);
   assert.match(actions, /matches\.count == 1 && !matches\[0\]\.body/);
-  assert.match(actions, /\.onDisappear \{ requestedText = nil \}/);
-  assert.match(actions, /requestedText = nil; coordinator\.repositoryChanged\(\)/);
+  assert.match(actions, /coordinator\.repositoryChanged\(\)/);
+});
+
+test('production feedback actions wait for a second click and re-review changed payloads', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const root = mkdtempSync(join(tmpdir(), 'w32-feedback-'));
+  const click = actions.slice(actions.indexOf('    private func submitIssue()'), actions.indexOf('    private var issueTitle:')).replace('private func', 'func');
+  const change = actions.slice(actions.indexOf('.onChange(of: coordinator.phase) { _, phase in') + '.onChange(of: coordinator.phase) { _, phase in'.length, actions.indexOf('.onChange(of: repository)')).trim().replace(/\}$/, '');
+  writeFileSync(join(root, 'main.swift'), `import Foundation
+ enum Phase: Equatable {
+ case draft, checking, reviewed, submitting, submitted(Int)
+ var allowsEditing: Bool { self == .draft }
+ }
+ final class Coordinator {
+ var phase = Phase.draft, title = "", content = ""
+ var reviews = 0, submissions = 0, requiresManualConfirmation = false, manualConfirmation = false
+ func review() { reviews += 1; phase = .checking }
+ func edit() { phase = .draft }
+ func submit() {
+  guard phase == .reviewed, !requiresManualConfirmation || manualConfirmation else { return }
+  submissions += 1; phase = .submitting
+ }
+ }
+ final class Actions {
+ let coordinator = Coordinator()
+ var isDisabled = false, complete = true, isLocked = false
+ var issueTitle = "title", issueBody = "body"
+ let artifact = (planID: UUID(), unused: false)
+ func onSubmitted(_ id: UUID) {}
+ ${click}
+ func changed(_ phase: Phase) { ${change} }
+ }
+ for manual in [false, true] {
+ let a = Actions(), c = a.coordinator
+ a.submitIssue()
+ precondition(c.reviews == 1 && c.submissions == 0)
+ a.submitIssue()
+ precondition(c.reviews == 1 && c.submissions == 0)
+ c.requiresManualConfirmation = manual
+ c.phase = .reviewed
+ a.changed(c.phase)
+ precondition(a.isLocked && c.submissions == 0)
+ if manual { a.submitIssue(); precondition(c.submissions == 0); c.manualConfirmation = true }
+ a.submitIssue()
+ precondition(c.submissions == 1)
+ a.submitIssue()
+ precondition(c.submissions == 1)
+ }
+ let stale = Actions()
+ stale.submitIssue(); stale.coordinator.phase = .reviewed
+ stale.issueBody = "edited"
+ stale.submitIssue()
+ precondition(stale.coordinator.reviews == 2 && stale.coordinator.submissions == 0)
+ for disabled in [false, true] {
+ let a = Actions(); a.isDisabled = disabled; a.complete = disabled
+ a.submitIssue(); precondition(a.coordinator.reviews == 0)
+ }
+ print("W32 production feedback fixture passed")
+ `);
+  const build = spawnSync('swiftc', [join(root, 'main.swift'), '-o', join(root, 'fixture')], { encoding: 'utf8' });
+  assert.equal(build.status, 0, build.stderr);
+  const run = spawnSync(join(root, 'fixture'), [], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
 });

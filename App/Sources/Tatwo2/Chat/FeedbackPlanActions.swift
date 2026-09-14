@@ -9,7 +9,6 @@ struct FeedbackPlanActions: View {
     @Binding var isLocked: Bool
     @StateObject private var coordinator: FeedbackCoordinator
     @StateObject private var accounts = GitHubAccountsStore()
-    @State private var requestedText: String?
     @State private var loggingIn = false
     @State private var loginError: String?
     @AppStorage(FeedbackSettings.repositoryKey) private var repository = FeedbackSettings.defaultRepository
@@ -53,6 +52,10 @@ struct FeedbackPlanActions: View {
                     }
                 }
             }
+            if coordinator.phase == .reviewed {
+                Text("將送出到 \(coordinator.destination)：\(coordinator.title)")
+                    .textSelection(.enabled)
+            }
             if let body = coordinator.reviewedBody {
                 DisclosureGroup("提交全文") { Text(body).textSelection(.enabled) }
             }
@@ -66,29 +69,28 @@ struct FeedbackPlanActions: View {
             } else if coordinator.phase == .unconfirmed {
                 Button("確認提交狀態", action: coordinator.checkSubmission)
             } else {
-                if coordinator.phase == .reviewed {
-                    Button("返回修改") { requestedText = nil; coordinator.edit() }
+                HStack {
+                    if coordinator.phase == .reviewed {
+                        Button("返回修改") { coordinator.edit() }
+                    }
+                    Button(coordinator.phase == .checking ? "審查中…" : coordinator.phase == .reviewed ? "送出 Issue" : "審查內容", action: submitIssue)
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .disabled(isDisabled || !complete || coordinator.account == nil || coordinator.phase.isBusy
+                            || (coordinator.phase == .reviewed && coordinator.requiresManualConfirmation && !coordinator.manualConfirmation))
+                        .accessibilityIdentifier("feedback-plan-submit")
                 }
-                Button(coordinator.phase == .checking ? "審查中…" : "提交 Issue", action: submitIssue)
-                    .buttonStyle(.borderedProminent)
-                    .frame(maxWidth: .infinity, minHeight: 34)
-                    .disabled(isDisabled || !complete || coordinator.account == nil || coordinator.phase.isBusy
-                        || (coordinator.phase == .reviewed && coordinator.requiresManualConfirmation && !coordinator.manualConfirmation))
-                    .accessibilityIdentifier("feedback-plan-submit")
             }
         }
         .onAppear {
             coordinator.refreshAccount(); isLocked = !coordinator.phase.allowsEditing
             if case .submitted = coordinator.phase { onSubmitted(artifact.planID) }
         }
-        .onDisappear { requestedText = nil }
         .onChange(of: coordinator.phase) { _, phase in
             isLocked = !phase.allowsEditing
             if case .submitted = phase { onSubmitted(artifact.planID) }
-            if phase == .reviewed, requestedText == artifact.editableText(), !isDisabled,
-               !coordinator.requiresManualConfirmation { coordinator.submit() }
         }
-        .onChange(of: repository) { _, _ in requestedText = nil; coordinator.repositoryChanged() }
+        .onChange(of: repository) { _, _ in coordinator.repositoryChanged() }
     }
 
     private func submitIssue() {
@@ -98,7 +100,6 @@ struct FeedbackPlanActions: View {
         } else {
             if coordinator.phase == .reviewed { coordinator.edit() }
             guard coordinator.phase.allowsEditing else { return }
-            requestedText = artifact.editableText()
             coordinator.title = issueTitle
             coordinator.content = issueBody
             coordinator.review()

@@ -401,6 +401,7 @@ struct PlanTranscriptInspectorView: View {
     let ultraworkAuxiliaryCount: Int
     let onDismissUltrawork: () -> Void
     let onExecute: () -> Void
+    var onStart: () -> Void = {}
     var onFeedbackSubmitted: (UUID) -> Void = { _ in }
     var onPRSubmit: () -> Void = {}
     var onPRDiscuss: () -> Void = {}
@@ -470,11 +471,25 @@ struct PlanTranscriptInspectorView: View {
                                 .padding(.horizontal, 12)
                                 .padding(.bottom, 12)
                             } else if selection == nil {
-                                Button(artifact.state == .confirmed ? "計畫已確認" : "確認計畫", action: onExecute)
-                                    .frame(maxWidth: .infinity, minHeight: 34)
-                                    .disabled(artifact.state == .confirmed || isEditing || isWriting)
-                                    .accessibilityIdentifier("plan-canvas-confirm")
-                                    .padding(12)
+                                Group {
+                                    if artifact.state == .confirmed {
+                                        if artifact.executionTurnID == nil {
+                                            Button("開始實作", action: onStart)
+                                                .disabled(isEditing || isWriting)
+                                                .accessibilityIdentifier("plan-canvas-start")
+                                        } else {
+                                            Button("實作中…") {}
+                                                .disabled(true)
+                                                .accessibilityIdentifier("plan-canvas-start")
+                                        }
+                                    } else {
+                                        Button("確認計畫", action: onExecute)
+                                            .disabled(artifact.state != .discussing || isEditing || isWriting)
+                                            .accessibilityIdentifier("plan-canvas-confirm")
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 34)
+                                .padding(12)
                             } else {
                                 PlanExecutionHandoffView(
                                     selection: selection,

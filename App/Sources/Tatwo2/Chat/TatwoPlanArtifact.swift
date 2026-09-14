@@ -10,6 +10,13 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
     case ready
   }
 
+  /// Shared by the canvas start action, outgoing rules and one-shot persistence.
+  func acceptsStart(_ text: String) -> Bool {
+    guard kind != "pr", kind != "feedback", state == .confirmed, executionTurnID == nil else { return false }
+    let command = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return command.hasPrefix("開始") || command == "start" || command == "go"
+  }
+
   public struct Section: Codable, Sendable, Equatable {
     public var title: String
     public var body: String

@@ -62,10 +62,10 @@ extension ChatLiveEngine {
         }
         if plan.state == .discussing { return Self.planDiscussionRules }
         guard plan.executionTurnID == nil else { return nil }
-        if userText.trimmingCharacters(in: .whitespacesAndNewlines) == "開始" {
+        if plan.acceptsStart(userText) {
             return "使用者已確認以下計畫：\n\(plan.editableText())\n現在可以動手。"
         }
-        return Self.planDiscussionRules + "\n計畫已確認，但使用者尚未說「開始」，不可執行。"
+        return Self.planDiscussionRules + "\n計畫已確認，但尚未開始；請按「開始實作」或說「開始」，目前不可執行。"
     }
 
     func updatePlanFromReply(_ threadID: UUID, reply: ChatMessage) {

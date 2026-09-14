@@ -459,6 +459,7 @@ struct ChatPage: View {
                     ultraworkRolePickerTarget = nil
                 },
                 onExecute: model.confirmActivePlan,
+                onStart: model.startActivePlan,
                 onFeedbackSubmitted: model.finishFeedbackPlan,
                 onPRSubmit: model.submitActivePRPlan,
                 onPRDiscuss: model.returnActivePRToDiscussion)

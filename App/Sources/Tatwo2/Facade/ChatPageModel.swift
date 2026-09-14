@@ -1367,8 +1367,19 @@ final class ChatPageModel: ObservableObject {
                 startPRContribution(description: plan.editableText(), threadID: plan.threadID)
                 return
             }
-            localLive?.appendSystemMessage(threadID: plan.threadID, text: "計畫已確認；說「開始」即執行", status: "info|Plan")
+            localLive?.appendSystemMessage(threadID: plan.threadID, text: "計畫已確認；按「開始實作」或說「開始」即執行", status: "info|Plan")
         }
+    }
+    func startActivePlan() {
+        guard selectedRemote == nil, let plan = activePlanArtifact, plan.acceptsStart("開始"),
+              selectedThreadID == plan.threadID, localLive?.isRunning(plan.threadID) == false,
+              !preparingPR, !pendingPR.contains(plan.threadID) else { return }
+        // Reuse normal routing without sending or consuming the existing composer draft.
+        let draft = prompt, paths = droppedPaths, names = droppedPathDisplayNames
+        defer { prompt = draft; droppedPaths = paths; droppedPathDisplayNames = names }
+        prompt = "開始"
+        droppedPaths = []; droppedPathDisplayNames = [:]
+        send()
     }
     func returnActivePRToDiscussion() {
         guard selectedRemote == nil, var plan = activePlanArtifact, plan.kind == "pr",
@@ -1982,10 +1993,6 @@ final class ChatPageModel: ObservableObject {
         }
         if activePlanArtifact != nil, let id = selectedThreadID, localLive?.isRunning(id) == true {
             flashComposerHint("請等計畫回覆完成再送出"); return
-        }
-        if planCommand == "開始", isPlanModeEnabled, activePlanArtifact?.kind != "feedback", activePlanArtifact?.kind != "pr" {
-            confirmActivePlan()
-            guard !isPlanModeEnabled else { return }
         }
         if isLocalPRCommand {
             let title = TatwoSlashCommandParser.prArgument(in: prompt) ?? ""
