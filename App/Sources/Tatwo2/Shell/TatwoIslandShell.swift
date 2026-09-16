@@ -152,14 +152,26 @@ final class TatwoIslandShellState: ObservableObject {
 
     func handleCollapseEvent(_ event: IslandCollapsePolicy.Event) {
         guard !isHeldOpen else { return }
-        pendingCollapse?.cancel()
-        pendingCollapse = nil
         if collapsePolicy.handle(event), !Self.pinExpandedForVerification {
+            pendingCollapse?.cancel()
+            pendingCollapse = nil
             setExpanded(false)
+        } else if case .tick = event,
+                  let remaining = collapsePolicy.remainingDelay(at: ProcessInfo.processInfo.systemUptime) {
+            scheduleCollapse(after: max(0.01, remaining))
         }
     }
 
-    private func scheduleCollapse() {
+    func expandForNavigation() {
+        setExpanded(true)
+        guard !isHeldOpen, !pointerIsInside else { return }
+        pendingCollapse?.cancel()
+        collapsePolicy = IslandCollapsePolicy()
+        collapsePolicy.handle(.hoverExited(at: ProcessInfo.processInfo.systemUptime))
+        scheduleCollapse()
+    }
+
+    private func scheduleCollapse(after delay: TimeInterval? = nil) {
         guard isExpanded, !Self.pinExpandedForVerification else { return }
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, !self.pointerIsInside else { return }
@@ -167,7 +179,7 @@ final class TatwoIslandShellState: ObservableObject {
             self.handleCollapseEvent(.tick(now: ProcessInfo.processInfo.systemUptime))
         }
         pendingCollapse = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + collapseDelay, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (delay ?? collapseDelay), execute: workItem)
     }
 
     private func setExpanded(_ isExpanded: Bool) {
@@ -185,6 +197,7 @@ final class TatwoIslandShellController {
     private let panel: TatwoIslandShellPanel
     private var localEvents: Any?
     private var outsideEvents: Any?
+    private var pointerTimer: Timer?
 
     init() {
         let state = TatwoIslandShellState()
@@ -228,6 +241,7 @@ final class TatwoIslandShellController {
     }
 
     deinit {
+        pointerTimer?.invalidate()
         if let localEvents { NSEvent.removeMonitor(localEvents) }
         if let outsideEvents { NSEvent.removeMonitor(outsideEvents) }
     }
@@ -235,6 +249,27 @@ final class TatwoIslandShellController {
     func show() {
         updateOverlayFrame()
         panel.orderFrontRegardless()
+        guard pointerTimer == nil else { return }
+        // Non-key panels may miss mouseExited during SwiftUI rebuilds or drags.
+        // Reconcile only an open, visible Island; no input monitoring permission.
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconcilePointer() }
+        }
+        timer.tolerance = 0.03
+        RunLoop.main.add(timer, forMode: .common)
+        pointerTimer = timer
+    }
+
+    private func reconcilePointer() {
+        guard panel.isVisible, state.isExpanded else { return }
+        let geometry = TatwoIslandShellMetrics.geometry(progress: state.expansionProgress, within: panel.frame.size)
+        let bounds = CGRect(x: (panel.frame.width - geometry.shellSize.width) / 2, y: 0,
+                            width: geometry.shellSize.width, height: geometry.shellSize.height)
+        let location = NSEvent.mouseLocation
+        let point = CGPoint(x: location.x - panel.frame.minX, y: panel.frame.maxY - location.y)
+        state.setPointerInside(TatwoIslandShellShape(
+            topReverseCornerRadius: geometry.topReverseCornerRadius,
+            bottomCornerRadius: geometry.bottomCornerRadius).path(in: bounds).contains(point))
     }
 
     private func updateOverlayFrame() {

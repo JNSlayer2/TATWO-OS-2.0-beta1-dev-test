@@ -176,8 +176,8 @@ struct BotPageRootView: View {
         .overlay(alignment: .topLeading) {
             if !sidebarIsPinned {
                 sidebarPinButton
-                    // 佔紅綠燈原位（燈已隱藏；2026-08-23 驗收修正）。
-                    .padding(.leading, 14)
+                    // 視窗控制常駐可見，固定鈕排在其右側。
+                    .padding(.leading, WindowChromeMetrics.appControlLeadingX)
                     .padding(.top, 7)
                     .zIndex(60)
             }

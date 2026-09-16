@@ -171,7 +171,8 @@ final class W67Window: NSWindow {
                     try snapshot("expanded")
                     // Drive the real NSTextView field editor, then the real Esc handler.
                     guard let editor = window.firstResponder as? NSTextView else { fatalError("\(tag) input not focused") }
-                    editor.selectAll(nil); editor.insertText("discard draft", replacementRange: editor.selectedRange())
+                    check(editor.selectedRange() == NSRange(location: 0, length: (probe.address as NSString).length), "\(tag) opening selects entire URL")
+                    editor.insertText("discard draft", replacementRange: editor.selectedRange())
                     settle()
                     check(probe.address == "discard draft", "\(tag) native typing updates draft")
                     editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
@@ -219,8 +220,21 @@ final class W67Window: NSWindow {
                     editor.selectAll(nil); editor.insertText("example", replacementRange: editor.selectedRange())
                     settle()
                     // first suggestion follows field (32), hint, panel padding and gaps.
-                    click(110, 112)
+                    click(110, 112 + BrowserOmniboxMetrics.suggestionRowHeight)
                     check(probe.selectedTab == "fixture-tab" && editable(host) == nil, "\(tag) mouse suggestion selects existing tab")
+                    click(width / 2, 12)
+                    guard let searchEditor = window.firstResponder as? NSTextView else { fatalError("search not focused") }
+                    searchEditor.insertText("繁體中文 C++", replacementRange: searchEditor.selectedRange())
+                    settle()
+                    searchEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+                    settle()
+                    check(probe.submissions == 1 && probe.submitted == "繁體中文 C++", "\(tag) Enter sends new query once, not old URL")
+                    click(width / 2, 12)
+                    guard let clickEditor = window.firstResponder as? NSTextView else { fatalError("suggestion not focused") }
+                    clickEditor.insertText("搜尋測試", replacementRange: clickEditor.selectedRange())
+                    settle(); click(110, 112)
+                    check(probe.submissions == 2 && probe.submitted == "https://example.com/search" && editable(host) == nil,
+                        "\(tag) primary search click submits before focus dismissal")
                     click(width - 20, 12)
                     check(probe.annotationClicks == 1, "\(tag) annotation remains clickable")
                     window.close(); settle()

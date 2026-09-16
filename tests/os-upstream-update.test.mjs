@@ -14,7 +14,7 @@ function fixture() {
   if (!binary) {
     const root = testScratch('w68-upstream-compiled-');
     binary = join(root, 'checks');
-    const files = ['Facade/OSUpstreamRefresh.swift', 'Facade/OSUpstreamLineDiff.swift',
+    const files = ['Facade/TatwoResources.swift', 'Facade/OSUpstreamRefresh.swift', 'Facade/OSUpstreamLineDiff.swift',
       'Facade/OSUpstreamUpdateModel.swift', 'New/OSUpstreamUpdateView.swift', 'New/IslandNotice.swift'];
     execFileSync('swiftc', ['-swift-version', '5', '-parse-as-library', '-num-threads', '2',
       ...files.map(file => join(repo, app, file)), join(repo, 'tests/fixtures/os-upstream-update-checks.swift'),

@@ -146,8 +146,8 @@ struct CLISolidCard<Content: View>: View {
     }
 }
 
-/// 將共用的「左列常駐」狀態同步到目前 SwiftUI 所屬 NSWindow 的紅綠燈。
-/// view 移窗或離開階層時會還原，避免其他視窗殘留隱藏狀態。
+/// 側欄佈局改變時重新確認原生視窗控制可見；取消常駐不能藏掉關閉／最小化。
+/// view 移窗或離開階層時同樣還原，避免舊視窗殘留隱藏狀態。
 struct WindowTrafficLightVisibilitySync: NSViewRepresentable {
     let sidebarPinned: Bool
 
@@ -178,7 +178,7 @@ struct WindowTrafficLightVisibilitySync: NSViewRepresentable {
                     restore()
                     window = nextWindow
                 }
-                setTrafficLights(hidden: !sidebarPinned, in: nextWindow)
+                setTrafficLights(hidden: false, in: nextWindow)
             }
         }
 

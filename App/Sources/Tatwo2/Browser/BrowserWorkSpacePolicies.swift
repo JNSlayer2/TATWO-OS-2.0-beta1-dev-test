@@ -33,21 +33,16 @@ enum BrowserOmniboxResolver {
     static func resolve(_ input: String, engine: BrowserSearchEngine = .google) -> URL? {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-        if !text.contains(where: \.isWhitespace) {
-            let authority = String(text.split(separator: "/", maxSplits: 1).first ?? "")
-            let host = String(authority.split(separator: ":", maxSplits: 1).first ?? "")
-            if host == "localhost" || authority.hasPrefix("[::1]") {
-                return URL(string: "http://" + text)
-            }
-            if let url = URL(string: text), let scheme = url.scheme {
-                // host.tld:port is not a custom scheme.
-                if !scheme.contains(".") { return url }
-            }
-            if host.contains("."), !host.hasPrefix("."), !host.hasSuffix(".") {
-                return URL(string: "https://" + text)
-            }
+        if text.lowercased() == "about:blank" { return URL(string: "about:blank") }
+        if !text.contains(where: \.isWhitespace),
+           let local = URLComponents(string: "http://" + text),
+           local.user == nil, local.password == nil,
+           ["localhost", "[::1]"].contains(local.host?.lowercased() ?? ""),
+           let url = local.url { return url }
+        switch TatwoBrowserAddressResolver.resolve(text, searchURL: engine.searchURL) {
+        case .navigate(let url): return url
+        case .reject: return nil
         }
-        return engine.searchURL(text)
     }
 }
 

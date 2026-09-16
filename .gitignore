@@ -61,3 +61,6 @@ docs/UI定位冊/截圖-2x/
 
 # 房間交付報告誤用 -o 當檔名（brief 用詞造成）；永遠不要進版控
 /-o
+
+# Local UI/debug evidence can contain private screenshots and must not be exported.
+evidence/

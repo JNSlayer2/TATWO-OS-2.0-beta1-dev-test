@@ -107,7 +107,7 @@ test('W60b settings round-trip, old/stale writer compatibility, invalid settings
   do { try BrowserMemorySettings.save(.liveTabLimit,value:999,to:url); fatalError("accepted invalid cap") } catch {}
   print("W60b settings PASS")
  }
-}`, [browser+'BrowserWorkSpacePolicies.swift', browser+'BrowserGeneralSettings.swift', browser+'BrowserShortcuts.swift']),
+}`, [browser+'TatwoBrowserLaneCore.swift', browser+'BrowserWorkSpacePolicies.swift', browser+'BrowserGeneralSettings.swift', browser+'BrowserShortcuts.swift']),
   /W60b settings PASS/);
 });
 
@@ -184,7 +184,7 @@ extension BrowserWorkSpaceRuntime {
   precondition(runtime.mount().nativeIDs.count == 2)
   print("W60b runtime PASS; native callback transport doubled")
  }
-}`, [browser+'BrowserWorkSpacePolicies.swift', browser+'BrowserGeneralSettings.swift', browser+'BrowserShortcuts.swift']),
+}`, [browser+'TatwoBrowserLaneCore.swift', browser+'BrowserWorkSpacePolicies.swift', browser+'BrowserGeneralSettings.swift', browser+'BrowserShortcuts.swift']),
   /W60b runtime PASS/);
 });
 

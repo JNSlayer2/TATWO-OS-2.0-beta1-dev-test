@@ -14,7 +14,10 @@ struct IslandCollapsePolicy {
     }
 
     private var exitedAt: TimeInterval?
-    private var itemWasTapped = false
+
+    func remainingDelay(at now: TimeInterval) -> TimeInterval? {
+        exitedAt.map { max(0, Self.delay - (now - $0)) }
+    }
 
     @discardableResult
     mutating func handle(_ event: Event) -> Bool {
@@ -24,13 +27,12 @@ struct IslandCollapsePolicy {
         case .hoverExited(let time):
             if exitedAt == nil { exitedAt = time }
         case .itemTapped:
-            itemWasTapped = true
-            exitedAt = nil
+            break // Only consent/notice holdOpen may keep the Island open.
         case .outsideTapped, .escape:
             self = Self()
             return true
         case .tick(let now):
-            guard !itemWasTapped, let exitedAt, now - exitedAt >= Self.delay else { return false }
+            guard let exitedAt, now - exitedAt >= Self.delay else { return false }
             self = Self()
             return true
         }

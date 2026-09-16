@@ -26,7 +26,7 @@ public enum TatwoBrowserAddressResolver {
     "javascript",
   ]
 
-  public static func resolve(_ rawValue: String) -> TatwoBrowserAddressResolution {
+  public static func resolve(_ rawValue: String, searchURL: ((String) -> URL)? = nil) -> TatwoBrowserAddressResolution {
     let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
       return .reject(.emptyInput)
@@ -60,6 +60,7 @@ public enum TatwoBrowserAddressResolver {
       return .navigate(directURL)
     }
 
+    if let searchURL { return .navigate(searchURL(trimmed)) }
     return googleSearchURL(for: trimmed)
   }
 

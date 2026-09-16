@@ -151,7 +151,7 @@ extension BrowserWorkSpaceRuntime {
 }
 `);
   const compile = spawnSync('swiftc', ['-parse-as-library', '-swift-version', '6', '-num-threads', '2',
-    browser + 'BrowserWorkSpacePolicies.swift', browser + 'BrowserMemoryPolicy.swift', browser + 'BrowserMemorySettings.swift', browser + 'BrowserNativeMemoryBudget.swift', browser + 'BrowserGeneralSettings.swift', browser + 'BrowserShortcuts.swift', source, '-o', binary],
+    browser + 'TatwoBrowserLaneCore.swift', browser + 'BrowserWorkSpacePolicies.swift', browser + 'BrowserMemoryPolicy.swift', browser + 'BrowserMemorySettings.swift', browser + 'BrowserNativeMemoryBudget.swift', browser + 'BrowserGeneralSettings.swift', browser + 'BrowserShortcuts.swift', source, '-o', binary],
     { encoding: 'utf8', timeout: 90000 });
   assert.equal(compile.status, 0, compile.stderr);
   const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 15000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''} });

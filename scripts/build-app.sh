@@ -72,9 +72,8 @@ bash "$ROOT/scripts/stage-ipad-use-device.sh" \
 cp -R \
   Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/Resources/BrowserBlocklists \
   "$CONTENTS/Resources/BrowserBlocklists"
-if [[ -d "$BIN_PATH/TatwoUltrawork_Tatwo2.bundle" ]]; then
-  cp -R "$BIN_PATH/TatwoUltrawork_Tatwo2.bundle" "$CONTENTS/Resources/"
-fi
+[[ -d "$BIN_PATH/TatwoUltrawork_Tatwo2.bundle" ]] || { echo "Missing Tatwo2 resource bundle" >&2; exit 1; }
+cp -R "$BIN_PATH/TatwoUltrawork_Tatwo2.bundle" "$CONTENTS/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

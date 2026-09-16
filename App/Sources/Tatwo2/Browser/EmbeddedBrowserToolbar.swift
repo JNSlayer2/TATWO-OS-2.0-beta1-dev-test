@@ -494,6 +494,7 @@ struct EmbeddedBrowserToolbar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded = false
     @State private var history: [BrowserHistoryEntry] = []
+    @State private var searchSettings = BrowserGeneralSettings()
     @State private var selection = -1
     private struct Choice: Identifiable {
         let id: String
@@ -513,9 +514,8 @@ struct EmbeddedBrowserToolbar: View {
         let visits = BrowserHistoryStore.suggestions(history, matching: query).map {
             Choice(id: $0.url.absoluteString, section: "歷史", title: $0.title, url: $0.url.absoluteString, tabID: nil)
         }
-        let engine = BrowserGeneralSettings.load().searchEngine
-        return tabs + visits + [Choice(id: "search", section: "用 \(engine.title) 搜尋", title: query,
-            url: engine.queryURL(query).absoluteString, tabID: nil)]
+        return [Choice(id: "search", section: "用 \(searchSettings.searchEngine.title) 搜尋", title: query,
+            url: searchSettings.searchEngine.queryURL(query).absoluteString, tabID: nil)] + tabs + visits
     }
     private func choose(_ choice: Choice) {
         isExpanded = BrowserOmniboxPresentation.isExpanded(after: .submit)
@@ -575,7 +575,7 @@ struct EmbeddedBrowserToolbar: View {
         .onReceive(NotificationCenter.default.publisher(for: BrowserShortcutMap.changed)) { _ in
             addressShortcutHint = EmbeddedBrowserToolbar.focusAddressHint()
         }
-        .task(id: isExpanded ? addressText : nil) {
+        .task(id: isExpanded) {
             guard isExpanded else { return }
             do { try await Task.sleep(for: BrowserOmniboxMetrics.historyDebounce) }
             catch { return }
@@ -651,6 +651,7 @@ struct EmbeddedBrowserToolbar: View {
     private func expandEditor() {
         guard enabled else { return }
         guard !isExpanded else { addressFieldFocused.wrappedValue = true; return }
+        searchSettings = BrowserGeneralSettings.load()
         addressText = state.urlString ?? ""
         selection = -1
         isExpanded = BrowserOmniboxPresentation.isExpanded(after: .click)

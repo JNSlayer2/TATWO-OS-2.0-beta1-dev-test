@@ -41,7 +41,7 @@ import Combine
     static func openWork() {
         requestedWork = true
         selectWork()
-        shell?.setPointerInside(true)
+        shell?.expandForNavigation()
     }
     static func selectWork() {
         guard requestedWork, let pager, let index = pager.spaces.firstIndex(where: { $0.kind == .work }) else { return }

@@ -141,7 +141,7 @@ let now = Date()
 precondition(!BrowserTabSleepPolicy.shouldSleep(lastActiveAt:now.addingTimeInterval(-expected-1), now:now, isSelected:true, interval:interval))
 precondition(BrowserTabSleepPolicy.shouldSleep(lastActiveAt:now.addingTimeInterval(-expected), now:now, isSelected:false, interval:interval))
 `);
-  run('swiftc',['-num-threads','2',path.join(root,app+'Browser/BrowserWorkSpacePolicies.swift'), path.join(root,app+'Browser/BrowserMemoryPolicy.swift'), path.join(root,app+'Browser/BrowserMemorySettings.swift'), path.join(root,app+'Browser/BrowserNativeMemoryBudget.swift'),
+  run('swiftc',['-num-threads','2',path.join(root,app+'Browser/TatwoBrowserLaneCore.swift'),path.join(root,app+'Browser/BrowserWorkSpacePolicies.swift'), path.join(root,app+'Browser/BrowserMemoryPolicy.swift'), path.join(root,app+'Browser/BrowserMemorySettings.swift'), path.join(root,app+'Browser/BrowserNativeMemoryBudget.swift'),
     path.join(root,app+'Browser/BrowserGeneralSettings.swift'),path.join(root,app+'Browser/BrowserShortcuts.swift'),path.join(dir,'main.swift'),'-o',path.join(dir,'fixture')]);
   for (const [value, expected] of [['2',2],['0','auto'],['-1','auto'],['nan','auto'],['inf','auto'],['oops','auto'],['','auto']]) {
     run(path.join(dir,'fixture'), [String(expected)], {env:{...process.env,TATWO_BROWSER_SLEEP_SECONDS:value}});
@@ -158,7 +158,8 @@ test('W55 change boundaries: policies identical after removing only logging / en
   assert.equal(hash(security),'7c3bbc8e9eed789827213f7ad77f6c9c9574488ab14d1264a548fef97607f512');
   const actor = read(app+'Browser/BrowserActor.swift').replace(/^.*BrowserPolicyLog\.shared\.record.*\n/gm,'');
   assert.equal(hash(actor),'ac8bf66dde08c537d3e36465dd14222d15a861eddf0021fc8ff73fbf9c12bbbe');
-  // W60b owns only the sleep enum; retain W47 omnibox/settings byte-for-byte.
+  // Search repair intentionally replaces W47 resolver with the shared safe resolver.
+  // Keep the updated snapshot pinned; behavioral cases live in browser-workspace-cef.
   const sleep = read(app+'Browser/BrowserWorkSpacePolicies.swift').split('enum BrowserTabSleepPolicy {')[0]
     + `enum BrowserTabSleepPolicy {
     static let idleInterval: TimeInterval = 20 * 60
@@ -167,7 +168,7 @@ test('W55 change boundaries: policies identical after removing only logging / en
     }
 }
 `;
-  assert.equal(hash(sleep),'200cdfd5469cdec6716e10d5532b9dc0fb5403ceaddbceff66e85eea3fdc2ba7');
+  assert.equal(hash(sleep),'bac2968aadd38e7e596c3722bd7e724cceda0d5b5e6f4fe7fde6d6fc0f9d7190');
 });
 
 test('swiftc: backend timestamps and actual diagnostics refresh stop when page task cancels', {

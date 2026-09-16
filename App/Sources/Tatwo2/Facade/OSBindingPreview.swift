@@ -60,7 +60,7 @@ extension OSUpstreamBinding {
     }
     static func failure(_ text: String) -> NSError { NSError(domain: "OSBinding", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
     static func bundled(_ name: String) throws -> String {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "md") else {
+        guard let url = TatwoResources.url(forResource: name, withExtension: "md") else {
             throw failure("缺少內建資源：" + name)
         }
         let text = try readText(url.path)

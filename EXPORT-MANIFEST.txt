@@ -1,6 +1,6 @@
-Source commit: a74ff06d04115ab403e053682b52080c86751cf5
+Source commit: 7265dadce8ed8008de07be007eb644381cfc0f64
 Source worktree: clean
-Files: 1575
+Files: 1580
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -260,6 +260,7 @@ App/Sources/Tatwo2/Facade/RemoteLiveEngine.swift
 App/Sources/Tatwo2/Facade/RunTask.swift
 App/Sources/Tatwo2/Facade/StreamingAppendAcceptance.swift
 App/Sources/Tatwo2/Facade/Tatwo2PlumbingStubs.swift
+App/Sources/Tatwo2/Facade/TatwoResources.swift
 App/Sources/Tatwo2/Facade/TatwoSkillsDirectoryCatalog.swift
 App/Sources/Tatwo2/Facade/TurnArtifacts.swift
 App/Sources/Tatwo2/Facade/TurnArtifactsGit.swift
@@ -1463,6 +1464,7 @@ tests/github-settings-polish.test.mjs
 tests/grok-sidecar-attachments.test.mjs
 tests/helpers/browser-visual-fixture.mjs
 tests/helpers/browser-visual-render.mjs
+tests/helpers/island-controller-fixture.swift
 tests/helpers/omnibox-native-checks.mjs
 tests/helpers/omnibox-native-fixture.swift
 tests/helpers/test-scratch.mjs
@@ -1475,10 +1477,12 @@ tests/ipad-use-controller.test.mjs
 tests/ipad-use-mcp.test.mjs
 tests/ipad-use-packaging.test.mjs
 tests/ipad-use-ui-source.test.mjs
+tests/island-hover.test.mjs
 tests/island-notice.test.mjs
 tests/os-upstream-refresh.test.mjs
 tests/os-upstream-update.test.mjs
 tests/package-release-gates.test.mjs
+tests/packaged-resources.test.mjs
 tests/peer-update-source.test.mjs
 tests/per-file-delta.test.mjs
 tests/plan-canvas.test.mjs
@@ -1573,6 +1577,7 @@ tests/w29b-ux-fixes.test.mjs
 tests/w31-r2-tail.test.mjs
 tests/w64-honesty.test.mjs
 tests/webmcp-runtime.test.mjs
+tests/window-traffic-lights.test.mjs
 tests/work-space-add.test.mjs
 tests/work-space-naming.test.mjs
 tests/workspace-mode-picker-wrap.test.mjs

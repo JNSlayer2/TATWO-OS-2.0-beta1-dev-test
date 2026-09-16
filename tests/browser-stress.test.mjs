@@ -223,7 +223,7 @@ extension BrowserWorkSpaceRuntime {
   print("W60 runtime wiring PASS; native engine is a double, not GUI/renderer acceptance")
  }
 }
-`, [browser+'BrowserWorkSpacePolicies.swift', browser+'BrowserMemoryPolicy.swift', browser+'BrowserMemorySettings.swift', browser+'BrowserNativeMemoryBudget.swift',browser+'BrowserGeneralSettings.swift',browser+'BrowserShortcuts.swift']);
+`, [browser+'TatwoBrowserLaneCore.swift', browser+'BrowserWorkSpacePolicies.swift', browser+'BrowserMemoryPolicy.swift', browser+'BrowserMemorySettings.swift', browser+'BrowserNativeMemoryBudget.swift',browser+'BrowserGeneralSettings.swift',browser+'BrowserShortcuts.swift']);
   assert.match(output, /W60 runtime wiring PASS/);
 });
 

@@ -25,10 +25,6 @@ struct EmbeddedBrowserNavigationState {
 struct EmbeddedChromiumBrowserMountIdentity { let profile: EmbeddedBrowserRuntimeProfile }
 enum BrowserTabOwner: Equatable { case workSpace(UUID), chat, chatSession(sessionID: String) }
 typealias Owner = BrowserTabOwner
-struct TatwoBrowserProfileIdentity {
-    let dataStoreIdentifier: UUID
-    init?(sessionID: String) { dataStoreIdentifier = UUID(uuidString: sessionID) ?? UUID() }
-}
 enum EmbeddedBrowserView {
     static func committedURLForPersistence(_ state: EmbeddedBrowserNavigationState) -> URL? {
         state.committedMainFrameURLString.flatMap(URL.init(string:))

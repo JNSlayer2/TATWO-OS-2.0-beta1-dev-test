@@ -52,7 +52,6 @@ struct EnginePaths: Sendable {
                 $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true)
             }
             ?? Bundle.main.resourceURL
-            ?? Bundle.module.resourceURL
             ?? Bundle.main.bundleURL
         self.runtimeBinDirectory = resources.appendingPathComponent(
             "runtime/bin",

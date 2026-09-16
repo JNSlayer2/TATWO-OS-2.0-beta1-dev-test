@@ -28,6 +28,13 @@ for engine in BrowserSearchEngine.allCases {
     check(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value == "how to x & 繁中")
     check(url == engine.searchURL("how to x & 繁中"))
 }
+for query in ["site:apple.com", "v2.0", "SwiftUI:focus", "C++ 教學", "繁體中文搜尋"] {
+    for engine in BrowserSearchEngine.allCases {
+        check(BrowserOmniboxResolver.resolve(query, engine: engine) == engine.searchURL(query))
+    }
+}
+check(BrowserOmniboxResolver.resolve("javascript:alert(1)") == nil)
+check(BrowserOmniboxResolver.resolve("https:/missing-host") == nil)
 let now = Date(timeIntervalSince1970: 2000)
 let idle = BrowserMemoryPolicy.defaultSleepSeconds(physicalMemory: ProcessInfo.processInfo.physicalMemory)
 check(BrowserMemorySettings().idleInterval(environment: [:]) == idle)
@@ -47,7 +54,7 @@ do { try BrowserSettings().save(to: settingsURL); fatalError("corruption overwri
 check(try String(contentsOf: settingsURL, encoding: .utf8) == "broken")
 print("W47 policies passed")
 `);
-  const compile = spawnSync('swiftc', ['-num-threads', '2', fileURLToPath(new URL(browser + 'BrowserWorkSpacePolicies.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemoryPolicy.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemorySettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserNativeMemoryBudget.swift', root)), fileURLToPath(new URL(browser + 'BrowserGeneralSettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserShortcuts.swift', root)), source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
+  const compile = spawnSync('swiftc', ['-num-threads', '2', fileURLToPath(new URL(browser + 'TatwoBrowserLaneCore.swift', root)), fileURLToPath(new URL(browser + 'BrowserWorkSpacePolicies.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemoryPolicy.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemorySettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserNativeMemoryBudget.swift', root)), fileURLToPath(new URL(browser + 'BrowserGeneralSettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserShortcuts.swift', root)), source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
   assert.equal(compile.status, 0, compile.stderr);
   const result = spawnSync(binary, [dir], { encoding: 'utf8', timeout: 15000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''} });
   assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -176,7 +183,7 @@ extension BrowserWorkSpaceRuntime {
     }
 }
 `);
-  const compile = spawnSync('swiftc', ['-parse-as-library', '-swift-version', '6', '-num-threads', '2', fileURLToPath(new URL(browser + 'BrowserWorkSpacePolicies.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemoryPolicy.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemorySettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserNativeMemoryBudget.swift', root)), fileURLToPath(new URL(browser + 'BrowserGeneralSettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserShortcuts.swift', root)), source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
+  const compile = spawnSync('swiftc', ['-parse-as-library', '-swift-version', '6', '-num-threads', '2', fileURLToPath(new URL(browser + 'TatwoBrowserLaneCore.swift', root)), fileURLToPath(new URL(browser + 'BrowserWorkSpacePolicies.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemoryPolicy.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemorySettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserNativeMemoryBudget.swift', root)), fileURLToPath(new URL(browser + 'BrowserGeneralSettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserShortcuts.swift', root)), source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
   assert.equal(compile.status, 0, compile.stderr);
   const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 15000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''} });
   assert.equal(result.status, 0, result.stdout + result.stderr);

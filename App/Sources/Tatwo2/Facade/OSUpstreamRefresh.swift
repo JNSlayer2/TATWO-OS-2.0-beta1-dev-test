@@ -28,12 +28,8 @@ enum OSUpstreamRefresh {
         }
     }
 
-    // Resolve the same SwiftPM resource without Bundle.module's fatalError when its bundle is absent.
     static var bundledURL: URL? {
-        let roots = [Bundle.main.resourceURL, Bundle.main.bundleURL, Bundle.main.executableURL?.deletingLastPathComponent()]
-        return roots.compactMap { $0 }.compactMap {
-            Bundle(url: $0.appendingPathComponent("TatwoUltrawork_Tatwo2.bundle"))?.url(forResource: "os-upstream", withExtension: "md")
-        }.first ?? Bundle.main.url(forResource: "os-upstream", withExtension: "md")
+        TatwoResources.url(forResource: "os-upstream", withExtension: "md")
     }
 
     static func applyOnLaunch(

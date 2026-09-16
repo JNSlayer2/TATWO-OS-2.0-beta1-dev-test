@@ -11,8 +11,11 @@ test('refresh API uses runtime override, bundle resource, injectable time and Cr
   assert.match(refresh, /enum OSUpstreamRefresh/);
   assert.match(refresh, /static func applyOnLaunch\([\s\S]*runtimePath: String = OSUpstream\.overridePath/);
   assert.match(refresh, /bundled: URL\? = OSUpstreamRefresh\.bundledURL/);
-  assert.match(refresh, /TatwoUltrawork_Tatwo2\.bundle/);
-  assert.match(refresh, /Bundle\(url:[\s\S]*\?\.url\(forResource: "os-upstream", withExtension: "md"\)/);
+  assert.match(refresh, /TatwoResources\.url\(forResource: "os-upstream", withExtension: "md"\)/);
+  const resources = read('App/Sources/Tatwo2/Facade/TatwoResources.swift');
+  assert.match(resources, /TatwoUltrawork_Tatwo2\.bundle/);
+  assert.match(resources, /Bundle\.main\.resourceURL/);
+  assert.doesNotMatch(resources, /Bundle\.module|fatalError\(/);
   assert.match(refresh, /now: Date = Date\(\)[\s\S]*-> Outcome/);
   assert.match(refresh, /import CryptoKit/);
   assert.match(refresh, /SHA256\.hash\(data: data\)/);

@@ -51,7 +51,8 @@ test('D5 docs and bundled rules agree after path redaction; skill root is portab
 
 test('D5 production refresh accepts only an exact marker; legacy journals remain untrusted', () => {
   const root = fs.mkdtempSync(join(tmpdir(), 'w29b-refresh-'));
-  swift(`${app('Facade/OSUpstreamRefresh.swift')}
+  swift(`${app('Facade/TatwoResources.swift')}
+${app('Facade/OSUpstreamRefresh.swift')}
 enum OSUpstream { static let overridePath = "unused" }
 @main struct Main { static func main() throws {
   let root = URL(fileURLWithPath: CommandLine.arguments[1])
