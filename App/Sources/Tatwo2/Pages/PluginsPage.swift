@@ -22,6 +22,8 @@ struct PluginsPage: View {
     @State private var statusMessage = "staging registry"
     @State private var pendingRemoval: PluginRegistryEntry?
     @State private var isSyncingClaude = false
+    @State private var refreshedMCPEntries: [PluginRegistryEntry]?
+    @State private var isProbing = false
 
     @State private var canonicalSkills: [TatwoSkillsDirectoryEntryV1] = []
     @State private var canonicalRootAvailable = true
@@ -156,7 +158,7 @@ struct PluginsPage: View {
         HStack(alignment: .center, spacing: 10) {
             Picker("", selection: $selectedTab) {
                 Text("Skillet（\(canonicalSkills.count)）").tag("skills")
-                Text("MCP（\(partition.mcp.count)）").tag("mcp")
+                Text("MCP（\(visibleMCPEntries.count)）").tag("mcp")
                 Text("Pocket").tag("pocket")
             }
             .pickerStyle(.segmented)
@@ -168,6 +170,13 @@ struct PluginsPage: View {
             }
             Spacer()
             if selectedTab == "mcp" {
+                Button {
+                    Task { await refreshMCP(force: true) }
+                } label: {
+                    Label(isProbing ? "探測中" : "重新探活", systemImage: "arrow.clockwise")
+                }
+                .disabled(isProbing)
+                .buttonStyle(.bordered)
                 Button {
                     syncToClaude()
                 } label: {
@@ -191,10 +200,57 @@ struct PluginsPage: View {
 
     private var mcpSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if partition.mcp.isEmpty {
+            if visibleMCPEntries.isEmpty {
                 sectionEmptyHint("尚無 MCP 登錄")
             }
-            ForEach(partition.mcp) { registryRow($0) }
+            ForEach(visibleMCPEntries) { entry in
+                PluginConnectionCard(entry: entry) { confirmMCPRemoval(entry) }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                await refreshMCP(force: false)
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+            }
+        }
+    }
+
+    private var visibleMCPEntries: [PluginRegistryEntry] {
+        refreshedMCPEntries ?? (entries.filter { $0.kind == .builtin } + partition.mcp)
+    }
+
+    @MainActor private func refreshMCP(force: Bool) async {
+        guard !isProbing else { return }
+        let environment = ProcessInfo.processInfo.environment
+        guard !PluginsSource.isExport(environment) else { return }
+        isProbing = true
+        defer { isProbing = false }
+        refreshedMCPEntries = visibleMCPEntries.map {
+            var entry = $0
+            if entry.kind == .mcp && entry.liveness.state != .disabled {
+                entry.liveness = .init(state: .probing)
+            }
+            return entry
+        }
+        let fresh = await Task.detached(priority: .utility) {
+            PluginsSource.refreshNow(environment: environment, force: force)
+        }.value
+        let builtins = await Task.detached(priority: .utility) {
+            let runtime = await BuiltinPluginRuntimeSnapshot.current()
+            return PluginsSource.builtinEntries(environment: environment, runtime: runtime)
+        }.value
+        refreshedMCPEntries = builtins + fresh.filter { $0.kind == .mcp }
+    }
+
+    private func confirmMCPRemoval(_ entry: PluginRegistryEntry) {
+        guard entry.kind == .mcp, entry.liveness.state == .unreachable else { return }
+        Task { @MainActor in
+            guard await IslandNotice.shared.confirm(title: "移除外掛登記？",
+                detail: "\(entry.name)・只移除設定登記並保留 .bak；不刪程式、不停止既有對話。",
+                confirmLabel: "移除登記", timeout: 30) else { return }
+            remove(entry)
+            refreshedMCPEntries = nil
+            await refreshMCP(force: true)
         }
     }
 
@@ -1280,6 +1336,7 @@ struct PluginsPage: View {
         case .mcp: "point.3.connected.trianglepath.dotted"
         case .app: "app.connected.to.app.below.fill"
         case .localRuntime: "server.rack"
+        case .builtin: "shippingbox"
         }
     }
 }

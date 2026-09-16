@@ -139,23 +139,44 @@ cat > "$WORK/measure.applescript" <<'APPLESCRIPT'
 use framework "Foundation"
 use scripting additions
 property windowName : "Tatwo Ultrawork OS"
-on findButton(p, labels)
+on findElement(p, expectedRole, identifier, labels)
     tell application "System Events"
-        repeat with e in (entire contents of window windowName of p)
+        set elements to entire contents of window windowName of p
+        -- Complete the identifier pass before considering any label fallback.
+        repeat with e in elements
             try
-                if role of e is "AXButton" and name of e is in labels then return e
+                if role of e is expectedRole and value of attribute "AXIdentifier" of e is identifier then return e
+            end try
+        end repeat
+        repeat with e in elements
+            try
+                if role of e is expectedRole and name of e is in labels then return e
             end try
         end repeat
     end tell
-    error "Required AX button missing"
-end findButton
+    error "Required AX element missing: " & identifier
+end findElement
 on openTab(p)
-    tell application "System Events" to click my findButton(p, {"新分頁", "＋ 新分頁", "+ 新分頁"})
+    tell application "System Events" to click my findElement(p, "AXButton", "browser.newTab", {"新分頁", "＋ 新分頁", "+ 新分頁"})
 end openTab
 on navigate(p)
     tell application "System Events"
-        -- Reference from W47; fresh lookup after every tab/UI change.
-        set addressField to text field 1 of group 1 of splitter group 1 of group 1 of splitter group 1 of group 1 of window windowName of p
+        -- Always resolve from the current AX tree after tab/UI changes; no group indices.
+        -- W67 exposes a compact button until explicitly clicked; do not invent a shortcut.
+        try
+            click my findElement(p, "AXButton", "browser.omnibox", {"網址"})
+        end try
+        set editorDeadline to (current application's NSProcessInfo's processInfo()'s systemUptime()) + 5
+        repeat
+            try
+                set addressField to my findElement(p, "AXTextField", "browser.omnibox", {"網址"})
+                exit repeat
+            on error
+                if (current application's NSProcessInfo's processInfo()'s systemUptime()) > editorDeadline then error "Omnibox editor did not open"
+                delay 0.05
+            end try
+        end repeat
+        set addressField to my findElement(p, "AXTextField", "browser.omnibox", {"網址"})
         set value of addressField to "https://example.com"
         perform action "AXConfirm" of addressField
     end tell
@@ -167,7 +188,7 @@ on waitForTitle(p, expectedCount)
             set matches to 0
             repeat with e in (entire contents of window windowName of p)
                 try
-                    if role of e is "AXButton" and name of e is "Example Domain" then set matches to matches + 1
+                    if role of e is "AXButton" and (value of attribute "AXIdentifier" of e starts with "browser.tab.") and name of e is "Example Domain" then set matches to matches + 1
                 end try
             end repeat
             if matches >= expectedCount then return
@@ -187,7 +208,7 @@ on run
             delay 0.25
         end repeat
         set frontmost of p to true
-        click my findButton(p, {"Browser", "Browser work space"})
+        click my findElement(p, "AXButton", "workspace.mode.Browser", {"Browser", "Browser work space"})
     end tell
     delay 0.5
     -- Engine warm-up is excluded: D-B6 specifies an already-started engine.
@@ -200,13 +221,13 @@ on run
     tell application "System Events"
         repeat with e in (entire contents of window windowName of p)
             try
-                if role of e is "AXButton" and name of e is "Example Domain" then error number -27001
+                if role of e is "AXButton" and (value of attribute "AXIdentifier" of e starts with "browser.tab.") and name of e is "Example Domain" then error number -27001
             on error number -27001
                 error "Use an empty disposable Browser space"
             end try
         end repeat
     end tell
-    set measuredButton to my findButton(p, {"新分頁", "＋ 新分頁", "+ 新分頁"})
+    set measuredButton to my findElement(p, "AXButton", "browser.newTab", {"新分頁", "＋ 新分頁", "+ 新分頁"})
     set started to current application's NSProcessInfo's processInfo()'s systemUptime()
     tell application "System Events" to click measuredButton
     my navigate(p)
@@ -222,7 +243,7 @@ on run
     my openTab(p)
     tell application "System Events"
         keystroke "w" using command down
-        click my findButton(p, {"Chat"})
+        click my findElement(p, "AXButton", "workspace.mode.Chat", {"Chat"})
     end tell
     return elapsedMS
 end run

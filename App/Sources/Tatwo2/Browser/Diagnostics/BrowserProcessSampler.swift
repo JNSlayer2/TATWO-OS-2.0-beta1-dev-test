@@ -56,7 +56,9 @@ enum BrowserProcessSampler {
                 var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
                 let length = path.withUnsafeMutableBytes { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
                 guard length > 0 else { continue }
-                let executable = String(cString: path)
+                // Foundation and libproc can spell the same temporary path as
+                // /var and /private/var. Compare both sides in the same form.
+                let executable = URL(fileURLWithPath: String(cString: path)).resolvingSymlinksInPath().path
                 guard executable.hasPrefix(canonicalRoot + "/"),
                       executable.contains(" Helper"), executable.contains(".app/Contents/MacOS/") else { continue }
                 result.append(row(pid: pid, role: BrowserHelperRole.classify(arguments: arguments(pid: pid)).rawValue,

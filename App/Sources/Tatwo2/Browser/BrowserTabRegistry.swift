@@ -20,6 +20,8 @@ struct BrowserTab: Codable, Identifiable, Equatable {
     var lastActiveAt: Date
     var createdAt: Date
     var folderID: UUID? = nil
+    /// A saved row owns this tab even after navigation. URLs are not identities.
+    var bookmarkID: UUID? = nil
     // W58: absent in old indexes means human. Never infer actor from who navigated last.
     var isAgentTab: Bool? = nil
     var usesAgentContext: Bool {
@@ -74,26 +76,41 @@ final class BrowserTabRegistry: ObservableObject {
 
     @Published private(set) var spaces: [BrowserSpace] = []
     @Published private(set) var tabs: [BrowserTab] = []
+    /// Transient engine state; never persisted as a live load on the next launch.
+    private(set) var loadingTabIDs: Set<UUID> = []
     struct ClosedTab: Equatable {
         let url: URL?
         let title: String
         let owner: BrowserTabOwner
         let folderID: UUID?
+        var bookmarkID: UUID? = nil
         var isAgentTab: Bool? = nil
     }
     @Published private(set) var recentlyClosed: [ClosedTab] = []
     private func rememberClosed(_ tab: BrowserTab) {
         if case .bot = tab.owner { return }
         recentlyClosed.append(ClosedTab(url: tab.url, title: tab.title, owner: tab.owner,
-                                       folderID: tab.folderID, isAgentTab: tab.isAgentTab))
+                                       folderID: tab.folderID, bookmarkID: tab.bookmarkID, isAgentTab: tab.isAgentTab))
         recentlyClosed = Array(recentlyClosed.suffix(10))
     }
     @discardableResult
     func reopenClosedTab(owner: BrowserTabOwner? = nil) -> BrowserTab? {
         guard let index = recentlyClosed.lastIndex(where: { (owner == nil || $0.owner == owner) && accepts($0.owner) }) else { return nil }
         let record = recentlyClosed.remove(at: index)
-        let tab = openTab(owner: record.owner, url: record.url, title: record.title, folderID: record.folderID,
+        let tab: BrowserTab
+        let existingBookmarkTab = record.bookmarkID.flatMap { id in
+            tabs.first { $0.owner == record.owner && $0.bookmarkID == id }
+        }
+        if let bookmarkID = record.bookmarkID, let folderID = record.folderID,
+           let bound = openBookmark(bookmarkID, folderID: folderID, owner: record.owner) {
+            tab = bound
+            if existingBookmarkTab == nil {
+                update(bound.id, url: record.url, title: record.title, favicon: nil)
+            }
+        } else {
+            tab = openTab(owner: record.owner, url: record.url, title: record.title, folderID: record.folderID,
                           isAgentTab: record.isAgentTab == true)
+        }
         select(tab.id)
         return tabs.first { $0.id == tab.id }
     }
@@ -219,11 +236,11 @@ final class BrowserTabRegistry: ObservableObject {
     }
     @discardableResult
     func openTab(owner: BrowserTabOwner, url: URL? = nil, title: String = "新分頁", folderID: UUID? = nil,
-                 isAgentTab: Bool = false) -> BrowserTab {
+                 isAgentTab: Bool = false, bookmarkID: UUID? = nil) -> BrowserTab {
         let now = Date()
         let tab = BrowserTab(id: UUID(), owner: owner, url: url, title: title, isPinned: false,
                              isSleeping: true, lastActiveAt: now, createdAt: now, folderID: folderID,
-                             isAgentTab: isAgentTab ? true : nil)
+                             bookmarkID: bookmarkID, isAgentTab: isAgentTab ? true : nil)
         guard accepts(owner) else { return tab } // Session space is a read-only aggregate, never an owner.
         if case let .chatSession(sessionID) = owner {
             laneIdentities[tab.id] = LaneIdentity(sessionID: sessionID, rawID: tab.id.uuidString, binding: .unboundReadOnly)
@@ -231,6 +248,23 @@ final class BrowserTabRegistry: ObservableObject {
         tabs.append(tab)
         changed()
         return tab
+    }
+
+    @discardableResult
+    func openBookmark(_ id: UUID, folderID: UUID, owner: BrowserTabOwner) -> BrowserTab? {
+        guard let (s, f) = folderLocation(folderID), owner == .workSpace(spaceID: spaces[s].id),
+              let bookmark = spaces[s].folders[f].bookmarks.first(where: { $0.id == id }) else { return nil }
+        if let existing = tabs.first(where: { $0.owner == owner && $0.bookmarkID == id }) {
+            select(existing.id)
+            return existing
+        }
+        return openTab(owner: owner, url: bookmark.url, title: bookmark.title, folderID: folderID, bookmarkID: id)
+    }
+
+    func setLoading(_ id: UUID, _ loading: Bool) {
+        guard tabs.contains(where: { $0.id == id }) else { return }
+        let changed = loading ? loadingTabIDs.insert(id).inserted : loadingTabIDs.remove(id) != nil
+        if changed { changes.send() }
     }
 
     /// AI navigation selects an isolated tab; it never converts the selected human tab.
@@ -268,11 +302,12 @@ final class BrowserTabRegistry: ObservableObject {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
         rememberClosed(tab)
         tabs.removeAll { $0.id == id }
+        loadingTabIDs.remove(id)
         removeEmptySession(tab.owner)
         changed()
     }
     func closeAll(ownedBy owner: BrowserTabOwner) {
-        for tab in tabs(ownedBy: owner) { rememberClosed(tab) }
+        for tab in tabs(ownedBy: owner) { rememberClosed(tab); loadingTabIDs.remove(tab.id) }
         tabs.removeAll { $0.owner == owner }
         if case let .chatSession(id) = owner { sessions.removeValue(forKey: id) }
         changed()
@@ -290,6 +325,8 @@ final class BrowserTabRegistry: ObservableObject {
             laneIdentities[id] = LaneIdentity(sessionID: sessionID, rawID: id.uuidString, binding: .unboundReadOnly)
         }
         tabs[index].owner = owner
+        tabs[index].bookmarkID = nil
+        tabs[index].folderID = nil
         removeEmptySession(previous)
         changed()
     }
@@ -301,7 +338,10 @@ final class BrowserTabRegistry: ObservableObject {
               tab.url != url || tab.title != title || tab.faviconPNG != favicon else { return }
         edit(id) { $0.url = url; $0.title = title; $0.faviconPNG = favicon }
     }
-    func markSleeping(_ id: UUID, _ sleeping: Bool) { edit(id) { $0.isSleeping = sleeping } }
+    func markSleeping(_ id: UUID, _ sleeping: Bool) {
+        if sleeping { loadingTabIDs.remove(id) }
+        edit(id) { $0.isSleeping = sleeping }
+    }
     /// Disk records describe tabs, not live engine instances. Call once before any launch surface mounts.
     func prepareForLaunch() {
         for index in tabs.indices { tabs[index].isSleeping = true }
@@ -358,6 +398,8 @@ final class BrowserTabRegistry: ObservableObject {
         for s in spaces.indices {
             for f in spaces[s].folders.indices { spaces[s].folders[f].bookmarks.removeAll { $0.id == id } }
         }
+        // Deleting a saved row keeps its open page, now as an ordinary tab.
+        for i in tabs.indices where tabs[i].bookmarkID == id { tabs[i].bookmarkID = nil }
         changed()
     }
     @discardableResult
@@ -537,12 +579,14 @@ final class BrowserTabRegistry: ObservableObject {
         let bookmark: BrowserBookmark
         let folderID: UUID
         let index: Int
+        var boundTabIDs: Set<UUID> = []
     }
     func bookmarkRemoval(_ id: UUID) -> RemovedBookmark? {
         for space in spaces where !space.isSessionSpace {
             for folder in space.folders {
                 if let index = folder.bookmarks.firstIndex(where: { $0.id == id }) {
-                    return RemovedBookmark(bookmark: folder.bookmarks[index], folderID: folder.id, index: index)
+                    return RemovedBookmark(bookmark: folder.bookmarks[index], folderID: folder.id, index: index,
+                        boundTabIDs: Set(tabs.filter { $0.bookmarkID == id && $0.owner == .workSpace(spaceID: space.id) }.map(\.id)))
                 }
             }
         }
@@ -552,6 +596,11 @@ final class BrowserTabRegistry: ObservableObject {
     func restoreBookmark(_ removed: RemovedBookmark) -> Bool {
         guard let (s, f) = folderLocation(removed.folderID), bookmarkRemoval(removed.bookmark.id) == nil else { return false }
         spaces[s].folders[f].bookmarks.insert(removed.bookmark, at: min(removed.index, spaces[s].folders[f].bookmarks.count))
+        for i in tabs.indices where removed.boundTabIDs.contains(tabs[i].id)
+            && tabs[i].owner == .workSpace(spaceID: spaces[s].id) && tabs[i].bookmarkID == nil {
+            tabs[i].bookmarkID = removed.bookmark.id
+            tabs[i].folderID = removed.folderID
+        }
         changed()
         return true
     }

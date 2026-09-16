@@ -1,6 +1,6 @@
-Source commit: cfae8a9adf103113c94574ae340ffaeba76268ec
+Source commit: a74ff06d04115ab403e053682b52080c86751cf5
 Source worktree: clean
-Files: 1534
+Files: 1575
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -16,6 +16,7 @@ App/Sources/Tatwo2/Browser/BrowserAIVaultSettingsView.swift
 App/Sources/Tatwo2/Browser/BrowserActor.swift
 App/Sources/Tatwo2/Browser/BrowserAnnotationSheet.swift
 App/Sources/Tatwo2/Browser/BrowserBookmarkExport.swift
+App/Sources/Tatwo2/Browser/BrowserBookmarkRows.swift
 App/Sources/Tatwo2/Browser/BrowserChatLifecycle.swift
 App/Sources/Tatwo2/Browser/BrowserDailyNavigationControls.swift
 App/Sources/Tatwo2/Browser/BrowserDailyNavigationPolicy.swift
@@ -32,12 +33,17 @@ App/Sources/Tatwo2/Browser/BrowserMemorySettingsView.swift
 App/Sources/Tatwo2/Browser/BrowserNativeMemoryBudget.swift
 App/Sources/Tatwo2/Browser/BrowserNavigationProgress.swift
 App/Sources/Tatwo2/Browser/BrowserNavigationProgressPolicy.swift
+App/Sources/Tatwo2/Browser/BrowserOmniboxGlass.swift
+App/Sources/Tatwo2/Browser/BrowserOmniboxInteraction.swift
+App/Sources/Tatwo2/Browser/BrowserOmniboxMetrics.swift
 App/Sources/Tatwo2/Browser/BrowserPasswordAssist.swift
 App/Sources/Tatwo2/Browser/BrowserPasswordVault.swift
 App/Sources/Tatwo2/Browser/BrowserPasswordsSettingsView.swift
+App/Sources/Tatwo2/Browser/BrowserSettingsComponents.swift
 App/Sources/Tatwo2/Browser/BrowserSettingsMetrics.swift
 App/Sources/Tatwo2/Browser/BrowserShortcuts.swift
 App/Sources/Tatwo2/Browser/BrowserShortcutsSettingsView.swift
+App/Sources/Tatwo2/Browser/BrowserSidebarControls.swift
 App/Sources/Tatwo2/Browser/BrowserTabRegistry.swift
 App/Sources/Tatwo2/Browser/BrowserTabRow.swift
 App/Sources/Tatwo2/Browser/BrowserWebFeatures.swift
@@ -142,6 +148,12 @@ App/Sources/Tatwo2/Chat/TatwoNativePaneBindingMatrix.swift
 App/Sources/Tatwo2/Chat/TatwoPermissionPreset.swift
 App/Sources/Tatwo2/Chat/TatwoPlanArtifact.swift
 App/Sources/Tatwo2/Chat/UltraworkRoleConfiguration.swift
+App/Sources/Tatwo2/Custody/AIAccountEditView.swift
+App/Sources/Tatwo2/Custody/AIICloudImport.swift
+App/Sources/Tatwo2/Custody/AIPasswordChange.swift
+App/Sources/Tatwo2/Custody/AgentAccountsSettingsView.swift
+App/Sources/Tatwo2/Custody/BreachDetector.swift
+App/Sources/Tatwo2/Custody/TOTP.swift
 App/Sources/Tatwo2/Engine/CLITmuxRuntime.swift
 App/Sources/Tatwo2/Engine/CLIWorkbenchTerminalSession.swift
 App/Sources/Tatwo2/Engine/ClaudeSidecar.swift
@@ -227,9 +239,15 @@ App/Sources/Tatwo2/Facade/OSBindingPreviewModel.swift
 App/Sources/Tatwo2/Facade/OSDocuments.swift
 App/Sources/Tatwo2/Facade/OSUpstream.swift
 App/Sources/Tatwo2/Facade/OSUpstreamBinding.swift
+App/Sources/Tatwo2/Facade/OSUpstreamLineDiff.swift
 App/Sources/Tatwo2/Facade/OSUpstreamRefresh.swift
+App/Sources/Tatwo2/Facade/OSUpstreamUpdateModel.swift
 App/Sources/Tatwo2/Facade/PeerUpdateSource.swift
+App/Sources/Tatwo2/Facade/PluginLiveness.swift
+App/Sources/Tatwo2/Facade/PluginServerConfiguration.swift
 App/Sources/Tatwo2/Facade/PluginStubs.swift
+App/Sources/Tatwo2/Facade/PluginsBuiltinSource.swift
+App/Sources/Tatwo2/Facade/PluginsRemoval.swift
 App/Sources/Tatwo2/Facade/PluginsSource.swift
 App/Sources/Tatwo2/Facade/PullRequestCoordinator.swift
 App/Sources/Tatwo2/Facade/PullRequestService.swift
@@ -303,6 +321,7 @@ App/Sources/Tatwo2/New/IssueQueueCard.swift
 App/Sources/Tatwo2/New/OSBindingCard.swift
 App/Sources/Tatwo2/New/OSDocumentsCard.swift
 App/Sources/Tatwo2/New/OSOverviewPage.swift
+App/Sources/Tatwo2/New/OSUpstreamUpdateView.swift
 App/Sources/Tatwo2/New/PRPanel.swift
 App/Sources/Tatwo2/New/PluginSettingsView.swift
 App/Sources/Tatwo2/New/PocketAdAssistantSettingsView.swift
@@ -317,6 +336,7 @@ App/Sources/Tatwo2/Pages/DeviceSyncReceiptPresentation.swift
 App/Sources/Tatwo2/Pages/DeviceSyncUserOperationProjection.swift
 App/Sources/Tatwo2/Pages/DevicesComposition.swift
 App/Sources/Tatwo2/Pages/DevicesPage.swift
+App/Sources/Tatwo2/Pages/PluginConnectionCard.swift
 App/Sources/Tatwo2/Pages/PluginsPage.swift
 App/Sources/Tatwo2/Pages/QuotaPage.swift
 App/Sources/Tatwo2/Pages/SkilletPresentation.swift
@@ -352,6 +372,7 @@ App/Sources/Tatwo2/Shell/TatwoWindowGlassBase.swift
 App/Sources/Tatwo2/Shell/WindowChrome.swift
 App/Sources/Tatwo2/Shell/WorkspaceSidebarModePicker.swift
 App/Sources/Tatwo2/Shell/WorkspaceSidebarShell.swift
+App/Sources/Tatwo2/Shell/WorkspaceSpaceControls.swift
 App/Sources/Tatwo2/Space/SpaceLiveSetupView.swift
 App/Sources/Tatwo2/Space/SpaceSetupComposerToolbar.swift
 App/Sources/Tatwo2/Space/SpaceSetupEdgeTabs.swift
@@ -1200,6 +1221,7 @@ scripts/bundle-cli-runtime.sh
 scripts/bundle-engines.sh
 scripts/check-appstorage-registry.sh
 scripts/copy-audit-waivers.txt
+scripts/impact.mjs
 scripts/install-j2-temp.sh
 scripts/install-tatwo-ultrawork.sh
 scripts/make-beta-signing-cert.sh
@@ -1318,6 +1340,8 @@ scripts/tatwo-sync-helper.sh
 scripts/tatwo-team-loop.mjs
 scripts/tatwo-test-run.sh
 scripts/tatwo-test-shard.mjs
+scripts/tatwo-test-thrice.mjs
+scripts/tatwo-test-thrice.sh
 scripts/tatwo-three-plane-static-gate.mjs
 scripts/tatwo-toolchain-fingerprint.sh
 scripts/tatwo-ui-copy-lint.mjs
@@ -1355,6 +1379,7 @@ scripts/validate-tatwo-sync-catalog.mjs
 scripts/verify-release-train.py
 skills/tatwo-ultrawork/SKILL.md
 skills/tatwo-ultrawork/agents/openai.yaml
+tests/agent-accounts.test.mjs
 tests/agent-kernel-driver-k3-source-contract.test.mjs
 tests/botpage-antismuggle-source-contract.test.mjs
 tests/browser-actor-policy.test.mjs
@@ -1363,6 +1388,7 @@ tests/browser-ai-vault.test.mjs
 tests/browser-chat-panel.test.mjs
 tests/browser-daily-nav.test.mjs
 tests/browser-default-browser.test.mjs
+tests/browser-dia-sidebar.test.mjs
 tests/browser-diagnostics.test.mjs
 tests/browser-import.test.mjs
 tests/browser-loading-state.test.mjs
@@ -1371,6 +1397,7 @@ tests/browser-memory-policy.test.mjs
 tests/browser-native-input.test.mjs
 tests/browser-native-tabs.test.mjs
 tests/browser-navigation-presentation.test.mjs
+tests/browser-omnibox.test.mjs
 tests/browser-password-fill.test.mjs
 tests/browser-password-vault.test.mjs
 tests/browser-resource-block.test.mjs
@@ -1383,6 +1410,7 @@ tests/browser-socket-recovery.test.mjs
 tests/browser-startup-pump.test.mjs
 tests/browser-stress.test.mjs
 tests/browser-tab-registry.test.mjs
+tests/browser-visual-tokens.test.mjs
 tests/browser-web-features.test.mjs
 tests/browser-workspace-cef.test.mjs
 tests/browser-workspace-design.test.mjs
@@ -1394,11 +1422,13 @@ tests/computer-use-consent-policy.test.mjs
 tests/dispatch-watchdog-pressure.test.mjs
 tests/dispatch-worktree-failures.test.mjs
 tests/feedback-plan.test.mjs
+tests/fixtures/agent-accounts-checks.swift
 tests/fixtures/attachment-preview-surface-checks.swift
 tests/fixtures/attachment-render-checks.swift
 tests/fixtures/browser-actor-recovery.mm.in
 tests/fixtures/browser-ai-vault-checks.swift
 tests/fixtures/browser-ai-vault-dependencies.swift
+tests/fixtures/browser-dia-sidebar-checks.swift
 tests/fixtures/browser-import-checks.swift
 tests/fixtures/browser-password-fill-checks.swift
 tests/fixtures/browser-password-vault-checks.swift
@@ -1417,6 +1447,7 @@ tests/fixtures/device-discover/expected_fingerprints.json
 tests/fixtures/device-discover/system_profiler_empty.json
 tests/fixtures/device-discover/system_profiler_mixed.json
 tests/fixtures/ipad-use-controller-checks.swift
+tests/fixtures/os-upstream-update-checks.swift
 tests/fixtures/scroll-follow-checks.swift
 tests/fixtures/tatwo-high-intensity-24turns.json
 tests/fixtures/tatwo-same-thread-expected-fail.json
@@ -1430,6 +1461,12 @@ tests/gen3-death-inventory-source-contract.test.mjs
 tests/gen3-governance-adapter-source-contract.test.mjs
 tests/github-settings-polish.test.mjs
 tests/grok-sidecar-attachments.test.mjs
+tests/helpers/browser-visual-fixture.mjs
+tests/helpers/browser-visual-render.mjs
+tests/helpers/omnibox-native-checks.mjs
+tests/helpers/omnibox-native-fixture.swift
+tests/helpers/test-scratch.mjs
+tests/impact.test.mjs
 tests/in-app-update.test.mjs
 tests/install-continuity.test.mjs
 tests/invisible-update.test.mjs
@@ -1440,11 +1477,13 @@ tests/ipad-use-packaging.test.mjs
 tests/ipad-use-ui-source.test.mjs
 tests/island-notice.test.mjs
 tests/os-upstream-refresh.test.mjs
+tests/os-upstream-update.test.mjs
 tests/package-release-gates.test.mjs
 tests/peer-update-source.test.mjs
 tests/per-file-delta.test.mjs
 tests/plan-canvas.test.mjs
 tests/plan-transcript-card.test.mjs
+tests/plugins-liveness.test.mjs
 tests/pr-plan.test.mjs
 tests/public-privacy.test.mjs
 tests/runtime-determinism.test.mjs
@@ -1509,6 +1548,7 @@ tests/tatwo-sync-catalog.test.mjs
 tests/tatwo-sync-helper-ack.test.sh
 tests/tatwo-sync-helper-aqua-domain.test.sh
 tests/tatwo-test-shard.test.mjs
+tests/tatwo-test-thrice.test.mjs
 tests/tatwo-three-plane-static-gate.test.mjs
 tests/tatwo-ultrawork-mcp-gateway.test.mjs
 tests/tatwo-user-data-migration.test.mjs
@@ -1531,6 +1571,7 @@ tests/w28-audit.test.mjs
 tests/w29a-update-fixes.test.mjs
 tests/w29b-ux-fixes.test.mjs
 tests/w31-r2-tail.test.mjs
+tests/w64-honesty.test.mjs
 tests/webmcp-runtime.test.mjs
 tests/work-space-add.test.mjs
 tests/work-space-naming.test.mjs

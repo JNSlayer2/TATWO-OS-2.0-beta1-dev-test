@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,7 +17,7 @@ test('legacy loading predicate remains bounded but W60 never arms a loading time
   // W60 removes the timer itself, not its lifecycle/close guard contract.
   assert.doesNotMatch(bridge, /ArmLoadingActiveMessagePumpTimer|phase=message_pump_loading_fallback/);
   assert.match(bridge, /phase=message_pump_overdue/);
-  const scratch = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/startup-pump.'));
+  const scratch = testScratch('startup-pump.');
   fs.writeFileSync(path.join(scratch, 'checks.cpp'), `
 #include <cassert>
 #include <cstdint>

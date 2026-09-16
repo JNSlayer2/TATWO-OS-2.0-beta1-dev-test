@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
@@ -13,7 +14,7 @@ test('native iPad USE validation and consent checks', { timeout: longSession ? 4
     context.skip('macOS AppKit runtime required');
     return;
   }
-  const output = path.join(root, 'output', 'ipad-use-tests');
+  const output = testScratch('ipad-mcp-');
   mkdirSync(output, { recursive: true });
   const scratch = mkdtempSync(path.join(output, 'native-'));
   try {

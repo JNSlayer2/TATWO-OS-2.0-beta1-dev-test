@@ -280,6 +280,7 @@ final class BrowserWorkSpaceRuntime: ObservableObject {
 
     private func receive(_ id: String, state: EmbeddedBrowserNavigationState) {
         guard let uuid = UUID(uuidString: id), let tab = workTabs.first(where: { $0.id == uuid }), !tab.isSleeping else { return }
+        registry.setLoading(uuid, state.isLoading)
         if uuid == selectedID {
             error = state.visibleError?.message
             navigationTabID = uuid
@@ -322,7 +323,7 @@ struct BrowserWorkSpaceCEFSurface: View {
                 BrowserWorkSpaceNativeSurface(runtime: runtime, surfaceID: surfaceID, tabID: tabID, command: retryCommand ?? command, onPopup: onPopup, isGeometryDragInProgress: isGeometryDragInProgress)
                     .overlay(alignment: .bottom) {
                         if let owner = runtime.surfaceID, owner != surfaceID {
-                            Text("瀏覽器正在另一個視窗使用").font(.callout).padding(12)
+                            Text("瀏覽器正在另一個視窗使用").font(.callout).padding(BrowserSidebarMetrics.laneRowSpacing)
                         } else if runtime.navigationTabID == tabID {
                             BrowserSurfaceStateOverlay(navigationState: runtime.navigationState) {
                                 retryCommand = EmbeddedBrowserCommand(action: .reload)
@@ -394,13 +395,13 @@ enum BrowserSurfaceText {
 
 struct BrowserEngineUnavailablePlaceholder: View {
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: BrowserSidebarMetrics.rowHorizontalPadding) {
             Image(systemName: "exclamationmark.shield")
-                .font(.system(size: 22, weight: .semibold)).foregroundStyle(.secondary)
+                .font(.system(size: BrowserSidebarMetrics.stateIconSize, weight: .semibold)).foregroundStyle(.secondary)
             Text(BrowserSurfaceText.unavailable)
-                .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                .font(.system(size: BrowserSidebarMetrics.stateTitleFontSize, weight: .semibold)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-        }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.padding(BrowserSidebarMetrics.laneCardPadding).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -454,18 +455,18 @@ private struct BrowserSurfaceStateOverlay: View {
         color: Color,
         retry: (() -> Void)? = nil
     ) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: BrowserSidebarMetrics.rowHorizontalPadding) {
             Image(systemName: systemImage)
-                .font(.system(size: 22, weight: .semibold))
+                .font(.system(size: BrowserSidebarMetrics.stateIconSize, weight: .semibold))
                 .foregroundStyle(color)
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: BrowserSidebarMetrics.stateTitleFontSize, weight: .semibold))
             if !detail.isEmpty {
                 Text(detail)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 420)
+                    .frame(maxWidth: BrowserSidebarMetrics.stateDetailMaxWidth)
             }
             if let retry {
                 Button(BrowserSurfaceText.reload, action: retry)
@@ -473,7 +474,7 @@ private struct BrowserSurfaceStateOverlay: View {
                     .controlSize(.small)
             }
         }
-        .padding(20)
+        .padding(BrowserSidebarMetrics.laneCardPadding)
         .background(.regularMaterial)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

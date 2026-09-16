@@ -960,6 +960,9 @@ final class TatwoUltraworkAppDelegate: NSObject, NSApplicationDelegate {
         statusBarController = TatwoStatusBarController()
         islandShellController = TatwoIslandShellController()
         islandShellController?.show()
+        // install.sh reopens the new App after replacement. Refresh above uses
+        // that App's resources; present its pending differences only after Island mounts.
+        OSUpstreamUpdateModel.shared.reload(notify: true)
         externalReopenObserver = TatwoSingleInstanceGuard.registerExternalReopenObserver { [weak self] in
             self?.showDefaultSurfaceForUserOpen()
         }
@@ -3288,7 +3291,9 @@ struct TatwoWindowPageRail: View {
     var body: some View {
         HStack(spacing: WindowChromeMetrics.controlSpacing) {
             Color.clear
-                .frame(width: WindowChromeMetrics.trafficLightSafeWidth)
+                // Chat owns its titlebar controls, including Browser's space capsule.
+                // The AppKit drag region must not intercept clicks in that sidebar band.
+                .frame(width: showRightPanelToggle ? WindowChromeMetrics.trafficLightSafeWidth : WorkspaceSidebarMetrics.width)
                 .allowsHitTesting(false)
 
             TatwoWindowDragRegion()

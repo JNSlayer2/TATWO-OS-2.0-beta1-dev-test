@@ -10,6 +10,66 @@ import SwiftUI
 /// SwiftUI 原生無 shader 對應的欄位（distortion / chromaticAberration）以
 /// material 內建折射近似替代，不自造假 shader；差異見收據降級聲明。
 enum LiquidGlassTokens {
+    // W54_V10_TOKENS_BEGIN
+    static let browserInk = Color(red: 42 / 255, green: 39 / 255, blue: 36 / 255)
+    static let browserSecondaryInk = Color(red: 93 / 255, green: 86 / 255, blue: 77 / 255)
+    static let browserMutedInk = Color(red: 139 / 255, green: 128 / 255, blue: 116 / 255)
+    static let browserFieldFill = Color(red: 246 / 255, green: 242 / 255, blue: 234 / 255)
+    static let browserFolderFill = Color(red: 154 / 255, green: 163 / 255, blue: 173 / 255)
+    static let browserShadowColor = Color(red: 120 / 255, green: 90 / 255, blue: 70 / 255)
+    static let browserChipFill = Color(red: 228 / 255, green: 222 / 255, blue: 209 / 255)
+    static let browserGroundFill = Color(red: 233 / 255, green: 227 / 255, blue: 215 / 255)
+    static let browserSuccessFill = Color(red: 58 / 255, green: 90 / 255, blue: 63 / 255)
+    static let browserDownloadBadge = Color(red: 181 / 255, green: 101 / 255, blue: 74 / 255)
+    static let islandNoticeWidth: CGFloat = 346
+    static let islandNoticeRadius: CGFloat = 22
+    static let islandNoticeFill = Color(red: 21 / 255, green: 20 / 255, blue: 18 / 255)
+    static let islandNoticeTitleColor = Color(red: 243 / 255, green: 239 / 255, blue: 232 / 255)
+    static let islandNoticeDetailColor = Color(red: 184 / 255, green: 176 / 255, blue: 164 / 255)
+    static let islandNoticeCountdownColor = Color(red: 142 / 255, green: 134 / 255, blue: 122 / 255)
+    static let islandNoticeButtonFill = Color(red: 42 / 255, green: 40 / 255, blue: 37 / 255)
+    static let islandNoticeAllowFill = Color(red: 58 / 255, green: 90 / 255, blue: 63 / 255)
+    static let islandNoticeTitleSize: CGFloat = 13.5
+    static let islandNoticeDetailSize: CGFloat = 11.5
+    static let islandNoticeCountdownSize: CGFloat = 10.5
+    static let islandNoticeButtonSize: CGFloat = 30
+    static let islandNoticeButtonFontSize: CGFloat = 14
+    static let islandNoticeInfoSize: CGFloat = 26
+    static let islandNoticeInfoFontSize: CGFloat = 13
+    static let islandNoticeColumnSpacing: CGFloat = 12
+    static let islandNoticeLineSpacing: CGFloat = 2
+    static let islandNoticeButtonSpacing: CGFloat = 6
+    static let islandNoticeVerticalPadding: CGFloat = 12
+    static let islandNoticeLeadingPadding: CGFloat = 16
+    static let islandNoticeTrailingPadding: CGFloat = 14
+    static let islandNoticeTopInset: CGFloat = 36 // keep the notch clear
+    static let islandNoticeShadowOpacity: Double = 0.35
+    static let islandNoticeShadowRadius: CGFloat = 25 // CSS blur 50, native radius
+    static let islandNoticeShadowY: CGFloat = 18
+    static let islandBlankWidth: CGFloat = 596
+    static let islandBlankHeight: CGFloat = 124
+    // W54_V10_TOKENS_END
+
+    // W67_OMNIBOX_TOKENS_BEGIN
+    // Same Dashboard glass material/alpha in both appearances; never route
+    // this floating chrome through the opaque matte-theme surface.
+    static let browserOmniboxMaterial: Material = .ultraThinMaterial
+    static var browserOmniboxLightTint: Color { tint }
+    static var browserOmniboxDarkTint: Color { Color(nsColor: .windowBackgroundColor) }
+    static let browserOmniboxInk = Color.primary
+    static let browserOmniboxMutedInk = Color.secondary
+    static let browserOmniboxBorder = Color.primary
+    static var browserOmniboxTintOpacity: Double { tintOpacity }
+    static var browserOmniboxBorderOpacity: Double { strokeOpacity }
+    static var browserOmniboxSelectionOpacity: Double { tintOpacity }
+    static func browserOmniboxTint(for scheme: ColorScheme) -> Color {
+        switch scheme {
+        case .dark: browserOmniboxDarkTint
+        default: browserOmniboxLightTint
+        }
+    }
+    // W67_OMNIBOX_TOKENS_END
+
 
     // MARK: - Dashboard 原值（Shape / Radius / Tint / Alpha）
 

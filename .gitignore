@@ -58,3 +58,6 @@ output/
 !.tatwo-security/README.md
 docs/UI定位冊/截圖-2x/
 .build-sol/
+
+# 房間交付報告誤用 -o 當檔名（brief 用詞造成）；永遠不要進版控
+/-o

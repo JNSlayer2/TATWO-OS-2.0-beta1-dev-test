@@ -32,9 +32,9 @@ test('W24 network starts fail-closed, rejects expensive/constrained paths, allow
 
 test('W24 cache and Applications space gates run before bytes, after verification and before handoff', () => {
   assert.match(updater, /for volume in \[directory, URL\(fileURLWithPath: Self.destinationApp\).deletingLastPathComponent\(\)\]/);
-  assert.match(updater, /max\(2_000_000_000, candidateBytes \* 2\)/);
+  assert.match(updater, /max\(minimumFreeBytes, candidateBytes \* archiveSafetyMultiplier\)/);
   assert.match(updater, /\.systemFreeSize/);
-  assert.match(updater, /candidateBytes \+= size.int64Value/);
+  assert.match(updater, /candidateBytes = max\(candidateBytes, expandedBytes\)/);
   assert.match(updater, /try checkSpace\(\)[\s\S]*let plannedBytes/);
   assert.match(updater, /try checkSpace\(\) \} catch[\s\S]*handOff\(tag: tag, repository: prepared.repository/);
 });
@@ -65,14 +65,26 @@ test('W24 production Swift state methods: metered override, space gate, candidat
   const cancel = updater.slice(updater.indexOf('    func cancelUpdate()'), updater.indexOf('    func resumableBytes'));
   const swift = `import Foundation
 struct UpdateArchives {}
+@MainActor final class IslandNotice {
+ static let shared = IslandNotice()
+ var notices: [(String,String)] = []
+ func info(title: String, detail: String) { notices.append((title,detail)) }
+}
 @MainActor enum GitHubReleaseUpdateChecker { static let shared = Checker() }
 struct Checker { let repository = "fixture/repo" }
 final class Space {
  var free: Int64 = 10_000_000_000
+ var unknown = false
+ var targetFree: Int64?
+ var checked: [String] = []
  func createDirectory(at: URL, withIntermediateDirectories: Bool) throws {}
  var removed = 0
  func removeItem(at: URL) throws { removed += 1 }
- func attributesOfFileSystem(forPath: String) throws -> [FileAttributeKey:Any] { [.systemFreeSize:NSNumber(value:free)] }
+ func attributesOfFileSystem(forPath: String) throws -> [FileAttributeKey:Any] {
+   checked.append(forPath)
+   if unknown { return [:] }
+   return [.systemFreeSize:NSNumber(value: forPath.contains("Applications") ? (targetFree ?? free) : free)]
+ }
 }
 @MainActor final class Probe {
  enum Phase: Equatable { case idle, starting, ready, handedOff, failed(String) }
@@ -100,6 +112,17 @@ ${cancel}
   p.fileManager.free = 134 * 1024 * 1024
   p.prefetch(to:"v2.0.6", repository:repo, force:true)
   precondition(p.started == 0 && p.preparationReason.contains("空間不足"))
+  precondition(IslandNotice.shared.notices.last?.0 == "無法開始更新")
+  precondition(IslandNotice.shared.notices.last?.1.contains("空間不足") == true)
+  p.fileManager.unknown = true
+  p.prefetch(to:"v2.0.6", repository:repo, force:true)
+  precondition(p.started == 0 && IslandNotice.shared.notices.last?.1.contains("無法確認") == true)
+  p.fileManager.unknown = false
+  p.fileManager.free = 10_000_000_000; p.fileManager.targetFree = 1
+  p.prefetch(to:"v2.0.6", repository:repo, force:true)
+  precondition(p.started == 0 && IslandNotice.shared.notices.last?.1.contains("空間不足") == true)
+  precondition(p.fileManager.checked.contains("/fixture/Applications"))
+  p.fileManager.targetFree = nil
   p.fileManager.free = 10_000_000_000
   p.prefetch(to:"v2.0.6", repository:repo, force:true)
   precondition(p.started == 1 && p.phase == .starting && p.manualDownload)

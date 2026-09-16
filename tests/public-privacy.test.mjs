@@ -9,8 +9,10 @@ import test, { after } from 'node:test';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const scanner = join(repo, 'scripts/public-safety-scan.mjs');
-const exportRoot = resolve(process.env.TATWO_PUBLIC_EXPORT_ROOT || '/tmp/pe-w61');
 const scratch = mkdtempSync(join(tmpdir(), 'w61-privacy-'));
+// Each invocation exports its own source state. Another room must not replace
+// this tree between export, scan, grep and install.sh comparison.
+const exportRoot = join(scratch, 'export');
 const env = { ...process.env };
 delete env.TATWO_OS_IMAGE_SSH_HOST;
 delete env.TATWO_PRIMARY_SSH_HOST;

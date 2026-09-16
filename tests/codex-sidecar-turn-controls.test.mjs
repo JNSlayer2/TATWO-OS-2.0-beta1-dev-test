@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -9,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 test('resident Codex sidecar binds model, effort and speed to each queued turn', { timeout: 20_000 }, async () => {
-  const output = path.join(root, 'output', 'lightweight-repair');
+  const output = testScratch('codex-sidecar-turn-controls-');
   await fs.mkdir(output, { recursive: true });
   const fixture = await fs.mkdtemp(path.join(output, 'turn-controls-'));
   const bin = path.join(fixture, 'bin');

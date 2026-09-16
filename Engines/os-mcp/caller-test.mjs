@@ -39,7 +39,7 @@ try {
       const countBefore = calls.length;
       const reply = await rpc('tools/call', { name: tool.name, arguments: { callerThreadID: 'spoofed' } });
       // These stricter lanes reject supplied identity instead of stripping it.
-      if (tool.name.startsWith('computer_') || tool.name === 'os_binding_status') {
+      if (tool.name.startsWith('computer_') || tool.name === 'os_binding_status' || tool.name === 'code_impact') {
         assert.equal(reply.result.isError, true);
         assert.equal(calls.length, countBefore);
         continue;

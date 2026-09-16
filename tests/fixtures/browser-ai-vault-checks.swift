@@ -315,7 +315,7 @@ final class W58Secrets: BrowserSecretStore {
         try human.add(origin: "https://example.com", username: "human@example.com", password: "fixture-secret-human", title: "Personal", source: .manual)
         try ai.add(origin: "https://work.example", username: "assistant@example.com", password: "fixture-secret-ai", label: "工作帳號", allowedCallers: .anyEngine)
         try ai.add(origin: "https://tools.example", username: "research-bot", password: "fixture-secret-bot", label: "研究專用", allowedCallers: .bot(id: "research"))
-        let host = NSHostingView(rootView: ScrollView { BrowserPasswordsSettingsView(vault: human, aiVault: ai).padding(18) }
+        let host = NSHostingView(rootView: ScrollView { BrowserPasswordsSettingsView(vault: human).padding(18) }
             .frame(width: 680, height: 780).background(Color(nsColor: .windowBackgroundColor)))
         let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 680,height: 780), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host; window.orderBack(nil)

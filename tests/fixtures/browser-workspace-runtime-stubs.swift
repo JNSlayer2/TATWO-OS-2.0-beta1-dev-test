@@ -18,6 +18,7 @@ enum Engine { case chromiumCEF }
 struct EmbeddedBrowserCommand { let id = UUID() }
 struct EmbeddedBrowserNavigationState {
     static let blank = Self()
+    var isLoading = false
     var committedMainFrameURLString: String?
     var visibleError: Failure?
 }
@@ -49,6 +50,10 @@ struct BrowserTab {
     let changes = PassthroughSubject<Void, Never>()
     var tabs: [BrowserTab] = []
     var writes = 0
+    var loadingTabIDs: Set<UUID> = []
+    func setLoading(_ id: UUID, _ loading: Bool) {
+        if loading { loadingTabIDs.insert(id) } else { loadingTabIDs.remove(id) }
+    }
     func tabs(ownedBy owner: Owner) -> [BrowserTab] { tabs.filter { $0.owner == owner } }
     func selectedTab(ownedBy owner: Owner) -> BrowserTab? { tabs(ownedBy: owner).max { $0.lastActiveAt < $1.lastActiveAt } }
     func select(_ id: UUID) { touch(id) }

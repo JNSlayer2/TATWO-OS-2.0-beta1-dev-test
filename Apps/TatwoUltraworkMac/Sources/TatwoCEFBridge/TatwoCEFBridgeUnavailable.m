@@ -42,6 +42,12 @@ static NSString *const TatwoCEFErrorDomain = @"com.tatwo.ultrawork.cef";
 - (NSDictionary *)agentLoginState { return @{@"phase": @"failed", @"error": @"ai_login_engine_unavailable"}; }
 - (BOOL)fillCredentialForAgentUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g { return NO; }
 #pragma mark - W58 End
+#pragma mark - W59
+- (BOOL)fillOneTimeCodeForAgent:(NSString *)code navigationGeneration:(uint64_t)g { return NO; }
+- (BOOL)prepareAgentPasswordChange { return NO; }
+- (BOOL)fillAgentPasswordChangeCurrent:(NSString *)old newPassword:(NSString *)next navigationGeneration:(uint64_t)g { return NO; }
+- (BOOL)submitAgentPasswordChange:(uint64_t)g { return NO; }
+#pragma mark - W59 End
 #pragma mark - W57c End
 - (TatwoCEFBrowserActor)browserActor { return TatwoCEFBrowserActorAgent; }
 - (BOOL)agentControlled { return YES; }

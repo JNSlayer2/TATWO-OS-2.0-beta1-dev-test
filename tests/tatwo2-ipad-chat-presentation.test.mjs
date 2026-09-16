@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -20,7 +21,7 @@ test('iPad chat panel is presentation only, without discovery or authorization s
 test('native iPad chat presentation and thread-bound consent callbacks', {
   skip: process.platform !== 'darwin' ? 'Requires native macOS SwiftUI' : false,
 }, () => {
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('tatwo2-ipad-chat-presentation-');
   mkdirSync(output, { recursive: true });
   const root = mkdtempSync(path.join(output, 'ipad-chat-presentation.'));
   const run = (cmd, args, options = {}) => spawnSync(cmd, args, {

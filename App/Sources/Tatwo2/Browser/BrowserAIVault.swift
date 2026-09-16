@@ -10,6 +10,30 @@ struct AICredential: Codable, Identifiable, Equatable, Sendable {
     var createdAt: Date
     var lastUsedAt: Date?
     var useCount: Int
+    // Optional metadata keeps W58's schema-1 files backward compatible.
+    var hasTOTPSecret: Bool?
+    var authenticatorHeldByHuman: Bool?
+    var disabledAt: Date?
+    var twoFactorRequiredAt: Date?
+    var passwordChangeFailedAt: Date?
+    var breachedAt: Date?
+
+    /// Keychain-backed property, not a Codable field. Never retained in the published index.
+    /// Injected vaults use their own totpSecrets store through fillTOTPForApprovedLogin.
+    var totpSecret: String? {
+        get throws { try KeychainSecretStore(service: "TATWO OS AI Vault", accountSuffix: ".totp").get(id) }
+    }
+    enum AuthenticatorStatus: String { case managed = "OS 代管", humanHeld = "已綁・人持有", unbound = "未綁" }
+    var authenticatorStatus: AuthenticatorStatus {
+        hasTOTPSecret == true ? .managed : authenticatorHeldByHuman == true ? .humanHeld : .unbound
+    }
+    var statusTitle: String {
+        if disabledAt != nil { return "已停用" }
+        if passwordChangeFailedAt != nil { return "換密碼未完成" }
+        if breachedAt != nil { return "密碼曾外洩" }
+        if twoFactorRequiredAt != nil { return "2FA 需人接手" }
+        return "正常"
+    }
 }
 
 enum CallerScope: Codable, Equatable, Sendable {
@@ -76,24 +100,31 @@ final class BrowserAIVault: ObservableObject {
 
     @Published private(set) var credentials: [AICredential] = []
     @Published private(set) var storageError: String?
+    let passwordChanges = PassthroughSubject<UUID, Never>()
     private let indexURL: URL?
     private let secrets: BrowserSecretStore
+    private let totpSecrets: BrowserSecretStore
+    private let pendingSecrets: BrowserSecretStore
     private let authenticator: BrowserVaultAuthenticator
     // Metadata edits, including password-only edits, revoke pending login approvals.
     private(set) var revision: UInt64 = 0
     private struct Index: Codable {
-        var schemaVersion = 1
+        // W58 readers reject v2 instead of silently ignoring disabled accounts on downgrade.
+        var schemaVersion = 2
         let credentials: [AICredential]
     }
 
-    init(indexURL: URL?, secrets: BrowserSecretStore, authenticator: BrowserVaultAuthenticator) {
+    init(indexURL: URL?, secrets: BrowserSecretStore, authenticator: BrowserVaultAuthenticator,
+         totpSecrets: BrowserSecretStore? = nil, pendingSecrets: BrowserSecretStore? = nil) {
         self.indexURL = indexURL
         self.secrets = secrets
+        self.totpSecrets = totpSecrets ?? KeychainSecretStore(service: "TATWO OS AI Vault", accountSuffix: ".totp")
+        self.pendingSecrets = pendingSecrets ?? KeychainSecretStore(service: "TATWO OS AI Vault", accountSuffix: ".pending-change")
         self.authenticator = authenticator
         guard let indexURL else { return }
         do {
             let index = try JSONDecoder().decode(Index.self, from: Data(contentsOf: indexURL))
-            guard index.schemaVersion == 1,
+            guard [1, 2].contains(index.schemaVersion),
                   Set(index.credentials.map(\.id)).count == index.credentials.count else {
                 throw BrowserPasswordVaultError.indexUnavailable
             }
@@ -115,13 +146,13 @@ final class BrowserAIVault: ObservableObject {
         return credentials.filter {
             // Host/path normalization, but never cross-scheme or cross-port secret release.
             BrowserPasswordOrigin.normalized($0.origin) == BrowserPasswordOrigin.normalized(origin) &&
-                $0.allowedCallers.allows(caller)
+                $0.disabledAt == nil && $0.allowedCallers.allows(caller)
         }
     }
 
     @discardableResult
     func add(origin: String, username: String, password: String, label: String,
-             allowedCallers: CallerScope = .anyEngine) throws -> AICredential {
+             allowedCallers: CallerScope = .anyEngine, totpSecret: String? = nil) throws -> AICredential {
         try requireWritable()
         guard let origin = BrowserPasswordOrigin.normalized(origin), allowedCallers.isValid else {
             throw BrowserPasswordVaultError.invalidOrigin
@@ -130,28 +161,41 @@ final class BrowserAIVault: ObservableObject {
             throw BrowserPasswordVaultError.emptyPassword
         }
         if let existing = credentials.first(where: { $0.origin == origin && $0.username == username }) {
-            try update(existing.id, password: password, username: username, label: label, allowedCallers: allowedCallers)
+            try update(existing.id, password: password, username: username, label: label,
+                       allowedCallers: allowedCallers, totpSecret: totpSecret)
             return credentials.first { $0.id == existing.id }!
         }
-        let item = AICredential(id: UUID(), origin: origin, username: username, label: label,
+        var item = AICredential(id: UUID(), origin: origin, username: username, label: label,
             allowedCallers: allowedCallers, createdAt: Date(), lastUsedAt: nil, useCount: 0)
+        let totp = try totpSecret.map { try TOTP.secret(from: $0) }
+        item.hasTOTPSecret = totp != nil
         try secrets.set(password, for: item.id)
-        do { try persist(credentials + [item]) }
+        do {
+            if let totp { try totpSecrets.set(totp, for: item.id) }
+            try persist(credentials + [item])
+        }
         catch {
-            try rollback { try secrets.remove(item.id) }
+            try rollback {
+                try secrets.remove(item.id)
+                try totpSecrets.remove(item.id)
+            }
             throw error
         }
+        passwordChanges.send(item.id)
         return item
     }
 
     func update(_ id: UUID, password: String? = nil, username: String? = nil, label: String? = nil,
-                allowedCallers: CallerScope? = nil) throws {
+                allowedCallers: CallerScope? = nil, totpSecret: String? = nil) throws {
         try requireWritable()
         guard let i = credentials.firstIndex(where: { $0.id == id }) else { throw BrowserPasswordVaultError.notFound }
         if let password, password.isEmpty || password.utf8.count > 16_384 { throw BrowserPasswordVaultError.emptyPassword }
         if let allowedCallers, !allowedCallers.isValid { throw BrowserPasswordVaultError.invalidOrigin }
         if let username, username.utf8.count > 4_096 { throw BrowserPasswordVaultError.invalidOrigin }
         var next = credentials
+        if password != nil { next[i].breachedAt = nil; next[i].passwordChangeFailedAt = nil }
+        let totp = try totpSecret.map { try TOTP.secret(from: $0) }
+        if totp != nil { next[i].hasTOTPSecret = true; next[i].authenticatorHeldByHuman = false }
         if let username { next[i].username = username }
         if let label { next[i].label = label }
         if let allowedCallers { next[i].allowedCallers = allowedCallers }
@@ -159,16 +203,26 @@ final class BrowserAIVault: ObservableObject {
             throw BrowserPasswordVaultError.duplicateCredential
         }
         let old = try password == nil ? nil : secrets.get(id)
+        let oldTOTP = try totp == nil ? nil : totpSecrets.get(id)
         if let password { try secrets.set(password, for: id) }
-        do { try persist(next) }
+        do {
+            if let totp { try totpSecrets.set(totp, for: id) }
+            try persist(next)
+        }
         catch {
             if password != nil {
                 try rollback {
                     if let old { try secrets.set(old, for: id) } else { try secrets.remove(id) }
                 }
             }
+            if totp != nil {
+                try rollback {
+                    if let oldTOTP { try totpSecrets.set(oldTOTP, for: id) } else { try totpSecrets.remove(id) }
+                }
+            }
             throw error
         }
+        if password != nil { passwordChanges.send(id) }
     }
 
     /// Human settings only, following Island confirmation.
@@ -176,10 +230,20 @@ final class BrowserAIVault: ObservableObject {
         try requireWritable()
         guard credentials.contains(where: { $0.id == id }) else { throw BrowserPasswordVaultError.notFound }
         let old = try secrets.get(id)
-        try secrets.remove(id)
-        do { try persist(credentials.filter { $0.id != id }) }
+        let oldTOTP = try totpSecrets.get(id)
+        let oldPending = try pendingSecrets.get(id)
+        do {
+            try secrets.remove(id)
+            try totpSecrets.remove(id)
+            try pendingSecrets.remove(id)
+            try persist(credentials.filter { $0.id != id })
+        }
         catch {
-            if let old { try rollback { try secrets.set(old, for: id) } }
+            try rollback {
+                if let old { try secrets.set(old, for: id) }
+                if let oldTOTP { try totpSecrets.set(oldTOTP, for: id) }
+                if let oldPending { try pendingSecrets.set(oldPending, for: id) }
+            }
             throw error
         }
     }
@@ -187,6 +251,40 @@ final class BrowserAIVault: ObservableObject {
     func revealPassword(id: UUID, reason: String) async throws -> String {
         try await authenticate(reason)
         return try secret(id)
+    }
+
+    func stagePasswordChange(_ id: UUID, password: String) throws {
+        try requireWritable()
+        guard credentials.contains(where: { $0.id == id && $0.disabledAt == nil }) else {
+            throw BrowserPasswordVaultError.notFound
+        }
+        guard try pendingSecrets.get(id) == nil else { throw BrowserPasswordVaultError.duplicateCredential }
+        try pendingSecrets.set(password, for: id)
+    }
+    func beginPasswordChange(_ id: UUID) throws {
+        try requireWritable()
+        guard try pendingSecrets.get(id) == nil else { throw BrowserPasswordVaultError.duplicateCredential }
+        try metadata(id) { $0.passwordChangeFailedAt = nil }
+    }
+    func finishPasswordChange(_ id: UUID, password: String) throws {
+        guard try pendingSecrets.get(id) == password else { throw BrowserPasswordVaultError.secretUnavailable }
+        try update(id, password: password)
+        // A failed cleanup is not a failed password change. The current secret has committed.
+        try? pendingSecrets.remove(id)
+    }
+    func revealPendingPasswordChange(_ id: UUID) async throws -> String {
+        try await authenticate("顯示尚未確認的新密碼")
+        guard credentials.contains(where: { $0.id == id }),
+              let value = try pendingSecrets.get(id) else { throw BrowserPasswordVaultError.notFound }
+        return value
+    }
+    /// Settings-only human reconciliation, after an explicit Island confirmation.
+    func reconcilePendingPasswordChange(_ id: UUID, useNewPassword: Bool) async throws {
+        try await authenticate(useNewPassword ? "同步已確認的新密碼" : "放棄待確認新密碼")
+        guard credentials.contains(where: { $0.id == id && $0.passwordChangeFailedAt != nil }),
+              let pending = try pendingSecrets.get(id) else { throw BrowserPasswordVaultError.notFound }
+        if useNewPassword { try finishPasswordChange(id, password: pending) }
+        else { try pendingSecrets.remove(id) }
     }
 
     /// Native-only closure; no return-secret API is reachable from the agent transport.
@@ -205,8 +303,75 @@ final class BrowserAIVault: ObservableObject {
         guard let i = credentials.firstIndex(where: { $0.id == id }) else { throw BrowserPasswordVaultError.notFound }
         var next = credentials
         next[i].lastUsedAt = Date()
+        next[i].twoFactorRequiredAt = nil
         next[i].useCount = next[i].useCount == Int.max ? Int.max : next[i].useCount + 1
         try persist(next)
+    }
+
+    func bindAuthenticator(_ id: UUID, secret raw: String?, humanHeld: Bool) throws {
+        try requireWritable()
+        guard let i = credentials.firstIndex(where: { $0.id == id }) else { throw BrowserPasswordVaultError.notFound }
+        let value = try raw.map { try TOTP.secret(from: $0) }
+        guard !(value != nil && humanHeld) else { throw TOTP.Failure.invalidSecret }
+        let old = try totpSecrets.get(id)
+        var next = credentials
+        next[i].hasTOTPSecret = value != nil
+        next[i].authenticatorHeldByHuman = humanHeld
+        do {
+            if let value { try totpSecrets.set(value, for: id) } else { try totpSecrets.remove(id) }
+            try persist(next)
+        } catch {
+            try rollback {
+                if let old { try totpSecrets.set(old, for: id) } else { try totpSecrets.remove(id) }
+            }
+            throw error
+        }
+    }
+
+    func fillTOTPForApprovedLogin(_ id: UUID, caller: AICaller, origin: String,
+                                 fill: (String) -> Bool) throws -> Bool {
+        try requireWritable()
+        guard !caller.readOnly, let item = matches(origin: origin, caller: caller).first(where: { $0.id == id }),
+              item.hasTOTPSecret == true, let secret = try totpSecrets.get(id) else { return false }
+        return try fill(TOTP.code(secret: secret))
+    }
+
+    func setEnabled(_ id: UUID, enabled: Bool) throws {
+        try metadata(id) { $0.disabledAt = enabled ? nil : Date() }
+    }
+    func disableAll() throws {
+        try requireWritable()
+        var next = credentials
+        for i in next.indices { next[i].disabledAt = next[i].disabledAt ?? Date() }
+        try persist(next)
+    }
+    func recordTwoFactorRequired(_ id: UUID) throws { try metadata(id) { $0.twoFactorRequiredAt = Date() } }
+    func recordPasswordChangeFailure(_ id: UUID) throws { try metadata(id) { $0.passwordChangeFailedAt = Date() } }
+    func setBreached(_ id: UUID, breached: Bool) throws {
+        try metadata(id) { $0.breachedAt = breached ? ($0.breachedAt ?? Date()) : nil }
+    }
+    func withPasswordForSecurityCheck<T>(_ id: UUID, _ body: (String) throws -> T) throws -> T {
+        try requireWritable()
+        return try body(secret(id))
+    }
+    private func metadata(_ id: UUID, _ edit: (inout AICredential) -> Void) throws {
+        try requireWritable()
+        guard let i = credentials.firstIndex(where: { $0.id == id }) else { throw BrowserPasswordVaultError.notFound }
+        var next = credentials
+        edit(&next[i])
+        if next != credentials { try persist(next) }
+    }
+
+    func importICloud(_ items: [AIICloudImportItem]) throws -> Int {
+        var count = 0
+        for item in items {
+            try Task.checkCancellation()
+            let existing = credentials.first { $0.origin == item.origin && $0.username == item.username }
+            try add(origin: item.origin, username: item.username, password: item.password,
+                label: item.label, allowedCallers: existing?.allowedCallers ?? .anyEngine, totpSecret: item.totpSecret)
+            count += 1
+        }
+        return count
     }
 
     func importCSV(url: URL) throws -> (added: Int, updated: Int, skipped: Int) {

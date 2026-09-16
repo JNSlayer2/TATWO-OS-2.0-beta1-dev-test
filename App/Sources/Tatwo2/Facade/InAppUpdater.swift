@@ -257,12 +257,28 @@ final class InAppUpdater: ObservableObject {
     }
 
     private func checkSpace() throws {
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        for volume in [directory, URL(fileURLWithPath: Self.destinationApp).deletingLastPathComponent()] {
-            let free = (try fileManager.attributesOfFileSystem(forPath: volume.path)[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
-            let required = max(2_000_000_000, candidateBytes * 2)
-            guard free >= required else { throw NSError(domain: "Updater", code: 2, userInfo:
-                [NSLocalizedDescriptionKey: String(format: "空間不足，請清出至少 %.1f GB", Double(required - free) / 1_000_000_000)]) }
+        // 待接 todo #25 治理器的磁碟保留額。
+        let minimumFreeBytes: Int64 = 2_000_000_000
+        let archiveSafetyMultiplier: Int64 = 2
+        do {
+            guard candidateBytes >= 0, candidateBytes <= Int64.max / archiveSafetyMultiplier else {
+                throw NSError(domain: "Updater", code: 2, userInfo: [NSLocalizedDescriptionKey: "無法確認更新所需空間"])
+            }
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let required = max(minimumFreeBytes, candidateBytes * archiveSafetyMultiplier)
+            for volume in [directory, URL(fileURLWithPath: Self.destinationApp).deletingLastPathComponent()] {
+                guard let free = try fileManager.attributesOfFileSystem(forPath: volume.path)[.systemFreeSize] as? NSNumber,
+                      free.int64Value >= 0 else {
+                    throw NSError(domain: "Updater", code: 2, userInfo: [NSLocalizedDescriptionKey: "無法確認目標卷可用空間"])
+                }
+                guard free.int64Value >= required else {
+                    throw NSError(domain: "Updater", code: 2, userInfo: [NSLocalizedDescriptionKey:
+                        String(format: "空間不足，請清出至少 %.1f GB", Double(required - free.int64Value) / 1_000_000_000)])
+                }
+            }
+        } catch {
+            IslandNotice.shared.info(title: "無法開始更新", detail: error.localizedDescription)
+            throw NSError(domain: "Updater", code: 2, userInfo: [NSLocalizedDescriptionKey: error.localizedDescription])
         }
     }
 
@@ -336,6 +352,11 @@ final class InAppUpdater: ObservableObject {
                     if let next = pendingCandidate {
                         prefetch(to: next.tag, repository: next.repository, force: manualDownload)
                     }
+                    return
+                }
+                if (error as NSError).domain == "Updater", (error as NSError).code == 2 {
+                    self.prepared = nil
+                    phase = .failed(error.localizedDescription)
                     return
                 }
                 // Only cached metadata is removed; verified archives remain reusable after a fresh check.
@@ -729,6 +750,15 @@ final class InAppUpdater: ObservableObject {
             }
         if useDelta { archives = [try asset("TATWO-OS.manifest.json"), try asset(deltaName!)] }
         if !useDelta, !runtimeReusable, let runtime { archives.append(runtime) }
+        // Use the selected delta/layered/full route's bytes before any payload download.
+        // The checksum-bound uncompressed manifest below may only raise this estimate.
+        candidateBytes = 0
+        for archive in archives {
+            guard archive.size > 0, archive.size <= 1_000_000_000_000,
+                  candidateBytes <= 1_000_000_000_000 - archive.size else { throw failure("更新附件大小無效") }
+            candidateBytes += archive.size
+        }
+        try checkSpace()
         let folder = directory.appendingPathComponent("download/\(repository)/\(tag)", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try Data(repository.utf8).write(to: folder.appendingPathComponent("repository"), options: .atomic)
@@ -742,12 +772,15 @@ final class InAppUpdater: ObservableObject {
         guard try await Self.digest(manifestURL) == expected?.lowercased(),
               let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any],
               let files = manifest["files"] as? [[String: Any]], !files.isEmpty else { throw failure("無法確認候選 App 大小") }
-        candidateBytes = 0
+        var expandedBytes: Int64 = 0
         for file in files {
             guard let size = file["size"] as? NSNumber, size.int64Value >= 0,
-                  size.int64Value < 1_000_000_000_000, candidateBytes < 1_000_000_000_000 else { throw failure("候選大小無效") }
-            candidateBytes += size.int64Value
+                  size.int64Value < 1_000_000_000_000,
+                  expandedBytes <= 1_000_000_000_000 - size.int64Value else { throw failure("候選大小無效") }
+            expandedBytes += size.int64Value
         }
+        guard expandedBytes > 0 else { throw failure("候選大小無效") }
+        candidateBytes = max(candidateBytes, expandedBytes)
         try checkSpace()
         let marker = try String(contentsOf: folder.appendingPathComponent("TATWO-OS.install-ready"), encoding: .utf8)
         let bindings = marker.split(separator: "\n").map { $0.split(whereSeparator: { $0.isWhitespace }).map(String.init) }

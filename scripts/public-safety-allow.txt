@@ -317,3 +317,7 @@ tests/tatwo-skillet-cli-merge.test.sh | macos username | Source argument names, 
 tests/tatwo-skills-consumer-projection.test.sh | macos username | Source argument names, project or skill frontmatter in synthetic fixtures; not OS account data. | ^(?:archify)$
 tests/public-privacy.test.mjs | ssh host alias | Generic product word used to construct synthetic detector inputs. | ^(?:macbook)$
 scripts/tatwo-memory-stress.sh | macos username | Isolated stress-test process identity, not the host user. | ^(?:tatwo-memory-stress)$
+tests/fixtures/agent-accounts-checks.swift | macos username | W59 synthetic AI and human vault fixture identities on example domains only. | ^(?:example-ai|example-human|example-import|example-bot)$
+reference-core/.github/workflows/ci.yml | macos username | Public reference workflow name, not an operating system account. | ^public-core-check$
+reference-core/package.json | macos username | Public reference package name, not an operating system account. | ^tatwo-os-2-public$
+reference-core/skills/tatwo-ultrawork/SKILL.md | macos username | Public skill identifier, not an operating system account. | ^tatwo-ultrawork$

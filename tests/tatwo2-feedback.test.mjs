@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -183,7 +184,7 @@ func fails(_ expected: FeedbackFailure, _ body: () async throws -> Void) async {
 test('feedback service enforces review and preserves uncertain drafts (no real model or POST)', {
   skip: process.platform !== 'darwin', timeout: 180_000,
 }, () => {
-  const artifacts = path.join(root, 'output/lightweight-repair'); fs.mkdirSync(artifacts, { recursive: true });
+  const artifacts = testScratch('tatwo2-feedback-'); fs.mkdirSync(artifacts, { recursive: true });
   const dir = fs.mkdtempSync(path.join(artifacts, 'feedback-'));
   const source = path.join(dir, 'FeedbackTests.swift'); fs.writeFileSync(source, main);
   const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: 'utf8', timeout: 120_000,

@@ -290,7 +290,12 @@ ${policy}
   var phase = Phase.starting, downloadID = UUID(), downloadSource = ""
   var totalBytes: Int64 = 0, downloadProgress: Double?
   var candidateBytes: Int64 = 0
-  func checkSpace() throws { precondition(candidateBytes == 1000); IO.events.append("space") }
+  var spaceEstimates: [Int64] = []
+  func checkSpace() throws {
+    precondition(candidateBytes > 0)
+    spaceEstimates.append(candidateBytes)
+    IO.events.append("space")
+  }
   var downloadedBytes: Int64 = 0, downloadBytesPerSecond: Double = 0
   var speedSamples: [(TimeInterval, Int64)] = []
   let fileManager = FileManager.default, directory: URL
@@ -327,6 +332,15 @@ ${digest}
         precondition(!(try! String(contentsOf:result.privateInstaller!, encoding:.utf8)).contains("fixture-only"))
       }
     } catch { precondition(["malformedsha", "cancel", "legacy", "badgithub"].contains(IO.mode), "unexpected error: \\(error)") }
+    let selectedBytes: Int64 = IO.mode == "delta"
+      ? Int64(IO.bytes("TATWO-OS.manifest.json").count + IO.bytes("TATWO-OS-delta-v2.0.5-v9.9.9.zip").count)
+      : IO.mode == "legacy" ? Int64(IO.bytes("TATWO-OS.zip").count)
+      : 1000 + Int64(IO.bytes(IO.runtime).count)
+    precondition(probe.spaceEstimates.first == selectedBytes)
+    precondition(IO.events.firstIndex(of:"space") == 1) // Immediately after release metadata.
+    if probe.spaceEstimates.count == 2 {
+      precondition(probe.spaceEstimates[1] == max(selectedBytes,1000))
+    }
     if ["malformedsha", "legacy"].contains(IO.mode) { precondition(!IO.events.contains("discover")) }
     else {
       let index = IO.events.firstIndex(of: "discover")!

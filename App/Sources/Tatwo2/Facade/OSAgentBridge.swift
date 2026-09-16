@@ -48,6 +48,10 @@ final class OSAgentBridge: @unchecked Sendable {
     private let stateLock = NSLock()
     private var listenerFD: Int32 = -1
     private var listenerStarting = false
+    var isListening: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return listenerFD >= 0
+    }
     private var backgroundJobs: BackgroundJobManager?
     private var jobsTestThreads: Set<UUID> = []
     private var jobsTestArtifacts: TurnArtifacts?

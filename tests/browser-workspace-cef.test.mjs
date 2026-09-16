@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, writeFileSync, readdirSync } from 'node:fs';
@@ -46,7 +47,7 @@ do { try BrowserSettings().save(to: settingsURL); fatalError("corruption overwri
 check(try String(contentsOf: settingsURL, encoding: .utf8) == "broken")
 print("W47 policies passed")
 `);
-  const compile = spawnSync('swiftc', ['-num-threads', '2', new URL(browser + 'BrowserWorkSpacePolicies.swift', root).pathname, new URL(browser + 'BrowserMemoryPolicy.swift', root).pathname, new URL(browser + 'BrowserMemorySettings.swift', root).pathname, new URL(browser + 'BrowserNativeMemoryBudget.swift', root).pathname, new URL(browser + 'BrowserGeneralSettings.swift', root).pathname, new URL(browser + 'BrowserShortcuts.swift', root).pathname, source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
+  const compile = spawnSync('swiftc', ['-num-threads', '2', fileURLToPath(new URL(browser + 'BrowserWorkSpacePolicies.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemoryPolicy.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemorySettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserNativeMemoryBudget.swift', root)), fileURLToPath(new URL(browser + 'BrowserGeneralSettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserShortcuts.swift', root)), source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
   assert.equal(compile.status, 0, compile.stderr);
   const result = spawnSync(binary, [dir], { encoding: 'utf8', timeout: 15000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''} });
   assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -175,7 +176,7 @@ extension BrowserWorkSpaceRuntime {
     }
 }
 `);
-  const compile = spawnSync('swiftc', ['-parse-as-library', '-swift-version', '6', '-num-threads', '2', new URL(browser + 'BrowserWorkSpacePolicies.swift', root).pathname, new URL(browser + 'BrowserMemoryPolicy.swift', root).pathname, new URL(browser + 'BrowserMemorySettings.swift', root).pathname, new URL(browser + 'BrowserNativeMemoryBudget.swift', root).pathname, new URL(browser + 'BrowserGeneralSettings.swift', root).pathname, new URL(browser + 'BrowserShortcuts.swift', root).pathname, source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
+  const compile = spawnSync('swiftc', ['-parse-as-library', '-swift-version', '6', '-num-threads', '2', fileURLToPath(new URL(browser + 'BrowserWorkSpacePolicies.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemoryPolicy.swift', root)), fileURLToPath(new URL(browser + 'BrowserMemorySettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserNativeMemoryBudget.swift', root)), fileURLToPath(new URL(browser + 'BrowserGeneralSettings.swift', root)), fileURLToPath(new URL(browser + 'BrowserShortcuts.swift', root)), source, '-o', binary], { encoding: 'utf8', timeout: 90000 });
   assert.equal(compile.status, 0, compile.stderr);
   const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 15000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''} });
   assert.equal(result.status, 0, result.stdout + result.stderr);

@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
@@ -10,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 test('iPad MCP caller binding, image response and consent error propagation', { timeout: 15_000 }, async () => {
-  const output = path.join(root, 'output', 'ipad-use-tests');
+  const output = testScratch('ipad-mcp-');
   mkdirSync(output, { recursive: true });
   const scratch = mkdtempSync(path.join(output, 'mcp-'));
   const socketPath = path.join(scratch, 'os.sock');

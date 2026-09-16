@@ -43,7 +43,8 @@ struct TatwoSettingsShell<Content: View>: View {
             Divider()
             content
         }
-        .frame(width: 780, height: 560)
+        .frame(width: section == .agentAccounts ? 1080 : 780,
+               height: section == .agentAccounts ? 700 : 560)
     }
 
     private var leftNav: some View {
@@ -87,7 +88,7 @@ struct TatwoSettingsShell<Content: View>: View {
             }
             Spacer()
         }
-        .frame(width: 200)
+        .frame(width: section == .browserManagement ? BrowserSidebarMetrics.settingsNavWidth : 200)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Color.secondary.opacity(0.05))
     }
@@ -106,6 +107,7 @@ struct TatwoSettingsPage: View {
         case space
         case issueList
         case browserManagement
+        case agentAccounts
         case modelAccess
         case tatwoIsland
         case computerUse
@@ -122,6 +124,7 @@ struct TatwoSettingsPage: View {
             case .space: "Space"
             case .issueList: "Issue List"
             case .browserManagement: "瀏覽器"
+            case .agentAccounts: "代理帳戶＆錢包"
             case .modelAccess: "模型登入"
             case .tatwoIsland: "Tatwo Island"
             case .computerUse: "Computer Use"
@@ -138,6 +141,7 @@ struct TatwoSettingsPage: View {
             case .space: "square.grid.2x2"
             case .issueList: "tray.full"
             case .browserManagement: "globe.desk"
+            case .agentAccounts: "person.crop.rectangle.stack"
             case .modelAccess: "key"
             case .tatwoIsland: "capsule"
             case .computerUse: "cursorarrow.rays"
@@ -202,6 +206,13 @@ struct TatwoSettingsPage: View {
             issueListContent
         case .browserManagement:
             browserSettingsContent
+        case .agentAccounts:
+            AgentAccountsSettingsView(
+                changePassword: { id in BrowserAgentBridge.shared.changeAIPassword(id) },
+                activity: { browserDiagnosticsPresented = true })
+                .sheet(isPresented: $browserDiagnosticsPresented) {
+                    BrowserDiagnosticsView(registry: model.browserTabRegistry)
+                }
         case .modelAccess:
             EngineLoginCard(model: model)
         case .tatwoIsland:
@@ -240,7 +251,8 @@ struct TatwoSettingsPage: View {
 
     private var browserSettingsContent: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: BrowserSettingsMetrics.sectionSpacing) {
+            VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsSectionSpacing) {
+                Text("瀏覽器").font(.system(size: BrowserSidebarMetrics.settingsPageTitleFontSize, weight: .bold))
                 browserSettingsCard("Browser work space") { browserWorkSpaceSettings }
                 browserSettingsCard("快捷鍵") { BrowserShortcutsSettingsView() }
                 browserSettingsCard("Session 瀏覽器") { browserSessionSettings }
@@ -249,7 +261,7 @@ struct TatwoSettingsPage: View {
                 browserSettingsCard("擴充功能") {
                     Text("2.0.7 尚未支援 Chrome 擴充功能。TATWO OS 的內建瀏覽器以嵌入模式執行，Chromium 的擴充功能框架只能在獨立視窗模式運作；我們正在評估替代方案。")
                     Text("導入時只會列出你原本的擴充功能，不會安裝")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(LiquidGlassTokens.browserMutedInk)
                 }
                 browserSettingsCard("引擎與安全") { browserSecuritySettings }
                 browserSettingsCard("診斷") { browserDiagnosticsSettings }
@@ -257,7 +269,7 @@ struct TatwoSettingsPage: View {
                     Text(browserSettingsError).foregroundStyle(.red)
                 }
             }
-            .padding(BrowserSettingsMetrics.pagePadding)
+            .padding(BrowserSidebarMetrics.settingsPagePadding)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -265,109 +277,142 @@ struct TatwoSettingsPage: View {
     private func browserSettingsCard<Content: View>(
         _ title: String, @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
-            Text(title).font(.headline)
-            content().font(.callout)
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
+            BrowserSettingsSectionHeading(title: title, number: browserSectionNumber(title))
+            content().font(.system(size: BrowserSidebarMetrics.settingsBodyFontSize))
+                .buttonStyle(BrowserSettingsControlStyle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(BrowserSettingsMetrics.cardPadding)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: BrowserSettingsMetrics.cardRadius))
+        .foregroundStyle(LiquidGlassTokens.browserInk)
+        .padding(.vertical, BrowserSidebarMetrics.settingsCardVerticalPadding)
+        .padding(.horizontal, BrowserSidebarMetrics.settingsCardHorizontalPadding)
+        .background(LiquidGlassTokens.browserFieldFill, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.settingsCardRadius))
+    }
+
+    private func browserSectionNumber(_ title: String) -> Int? {
+        switch title {
+        case "Browser work space": 1
+        case "Session 瀏覽器": 2
+        case "密碼": 3
+        case "擴充功能": 4
+        case "引擎與安全": 5
+        case "診斷": 6
+        default: nil // W57e shortcuts remain available, without renumbering v10's six sections.
+        }
     }
 
     private var browserWorkSpaceSettings: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
             BrowserDefaultBrowserRow()
-            Picker("預設 space", selection: generalBinding(\.defaultSpaceID)) {
-                Text("自動").tag(nil as UUID?)
-                ForEach(model.browserTabRegistry.spaces.filter { !$0.isSessionSpace }) { space in
-                    Text(space.name).tag(Optional(space.id))
-                }
-                if let id = browserGeneral.defaultSpaceID,
-                   !model.browserTabRegistry.spaces.contains(where: { $0.id == id && !$0.isSessionSpace }) {
-                    Text("原 space 已移除，請重新選擇").tag(Optional(id))
-                }
-            }
-            Picker("預設搜尋引擎", selection: generalBinding(\.searchEngine)) {
-                ForEach(BrowserSearchEngine.allCases, id: \.self) { engine in
-                    Text(engine.title).tag(engine)
+            BrowserSettingsKVRow(title: "預設 space", value: model.browserTabRegistry.spaces.first { $0.id == browserGeneral.defaultSpaceID }?.name ?? "自動") {
+                Picker("預設 space", selection: generalBinding(\.defaultSpaceID)) {
+                    Text("自動").tag(nil as UUID?)
+                    ForEach(model.browserTabRegistry.spaces.filter { !$0.isSessionSpace }) { space in
+                        Text(space.name).tag(Optional(space.id))
+                    }
+                    if let id = browserGeneral.defaultSpaceID,
+                       !model.browserTabRegistry.spaces.contains(where: { $0.id == id && !$0.isSessionSpace }) {
+                        Text("原 space 已移除，請重新選擇").tag(Optional(id))
+                    }
                 }
             }
-            HStack {
-                Text("下載位置：~/Downloads")
-                Spacer()
+            BrowserSettingsKVRow(title: "預設搜尋引擎", value: browserGeneral.searchEngine.title) {
+                Picker("預設搜尋引擎", selection: generalBinding(\.searchEngine)) {
+                    ForEach(BrowserSearchEngine.allCases, id: \.self) { engine in
+                        Text(engine.title).tag(engine)
+                    }
+                }
+            }
+            BrowserSettingsKVRow(title: "下載位置", value: "~/Downloads") {
                 Button("在 Finder 顯示") {
                     NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads"))
                 }
             }
-            Button("匯出書籤 HTML", action: exportBrowserBookmarks)
-            Button("從其他瀏覽器導入…") {
-                onClose()
-                NotificationCenter.default.post(name: Notification.Name("tatwo.browser.openImport"), object: nil)
+            BrowserSettingsKVRow(title: "書籤", value: "HTML") {
+                Button("匯出書籤 HTML", action: exportBrowserBookmarks)
+            }
+            BrowserSettingsKVRow(title: "從其他瀏覽器導入", value: "Chrome、Arc、Brave、Edge、Opera、Vivaldi；Safari 僅書籤") {
+                Button("從其他瀏覽器導入…") {
+                    onClose()
+                    NotificationCenter.default.post(name: Notification.Name("tatwo.browser.openImport"), object: nil)
+                }
             }
         }
     }
 
     private var browserSessionSettings: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
-            Text("\(model.browserTabRegistry.openSessions.count) 條 session 開著瀏覽器")
-            Button("去 Session space 管理") {
-                onClose()
-                // W47/AppShell integration owns navigation; Fable connects this event.
-                NotificationCenter.default.post(name: Notification.Name("tatwo.browser.openSessionSpace"), object: nil)
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
+            BrowserSettingsKVRow(title: "開著的 session", value: "\(model.browserTabRegistry.openSessions.count) 條 session 開著瀏覽器") {
+                Button("去 Session space 管理") {
+                    onClose()
+                    NotificationCenter.default.post(name: Notification.Name("tatwo.browser.openSessionSpace"), object: nil)
+                }
             }
-            Picker("關閉 chat 時", selection: generalBinding(\.sessionRetention)) {
-                Text("保留分頁").tag(BrowserGeneralSettings.SessionRetention.keep)
-                Text("自動關閉").tag(BrowserGeneralSettings.SessionRetention.closeWithChat)
+            BrowserSettingsKVRow(title: "關閉 chat 時", value: browserGeneral.sessionRetention == .keep ? "保留分頁" : "自動關閉") {
+                Picker("關閉 chat 時", selection: generalBinding(\.sessionRetention)) {
+                    Text("保留分頁").tag(BrowserGeneralSettings.SessionRetention.keep)
+                    Text("自動關閉").tag(BrowserGeneralSettings.SessionRetention.closeWithChat)
+                }
             }
         }
     }
 
     private var browserSecuritySettings: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.sectionSpacing) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsSectionSpacing) {
             BrowserMemorySettingsView()
-            HStack(alignment: .top, spacing: BrowserSettingsMetrics.sectionSpacing) {
+            HStack(alignment: .top, spacing: BrowserSidebarMetrics.settingsSecurityColumnSpacing) {
                 browserHumanSecurityColumn
                 Divider()
                 browserAISecurityColumn
             }
-            Text("變更在下一個新分頁生效").font(.footnote).foregroundStyle(.secondary)
+            Text("變更在下一個新分頁生效").font(.footnote).foregroundStyle(LiquidGlassTokens.browserMutedInk)
             TatwoBrowserManagementView(model: model, provider: browserManagementProvider, onClose: onClose)
-                .frame(height: BrowserSettingsMetrics.managementHeight)
+                .frame(height: BrowserSidebarMetrics.settingsManagementHeight)
         }
     }
 
     private var browserHumanSecurityColumn: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
-            Text("人用分頁").font(.subheadline.bold())
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
+            Text("人用分頁").font(.system(size: BrowserSidebarMetrics.settingsControlFontSize, weight: .semibold))
             Toggle("擋第三方 cookie", isOn: securityBinding(\.blocksThirdPartyCookies))
             Toggle("擋廣告與追蹤", isOn: securityBinding(\.adBlock))
-            Text("區網連線：每個網站問一次")
-            Text("相機／麥克風／位置：詢問")
-            Text("下載：允許，存到下載項目")
+            browserPolicyRow("區網連線", "每個網站問一次")
+            browserPolicyRow("相機／麥克風／位置", "詢問")
+            browserPolicyRow("下載", "允許，存到下載項目")
         }
+        .font(.system(size: BrowserSidebarMetrics.settingsControlFontSize))
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private var browserAISecurityColumn: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
-            Text("AI 操作分頁").font(.subheadline.bold())
-            Text("第三方 cookie：封鎖")
-            Text("廣告與追蹤：唯讀（跟隨共用設定）")
-            Text("區網連線：封鎖")
-            Text("相機／麥克風／位置：封鎖")
-            Text("下載：封鎖")
+    private func browserPolicyRow(_ title: String, _ value: String) -> some View {
+        HStack(spacing: BrowserSidebarMetrics.settingsRowSpacing) {
+            Text(title).foregroundStyle(LiquidGlassTokens.browserMutedInk).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: BrowserSidebarMetrics.zero)
+            BrowserSettingsPolicyValue(value: value)
         }
-        .foregroundStyle(.secondary)
+    }
+
+    private var browserAISecurityColumn: some View {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
+            Text("AI 操作分頁").font(.system(size: BrowserSidebarMetrics.settingsControlFontSize, weight: .semibold))
+            browserPolicyRow("第三方 cookie", "封鎖")
+            browserPolicyRow("廣告與追蹤", "唯讀（跟隨共用設定）")
+            browserPolicyRow("區網連線", "封鎖")
+            browserPolicyRow("相機／麥克風／位置", "封鎖")
+            browserPolicyRow("下載", "封鎖")
+        }
+        .font(.system(size: BrowserSidebarMetrics.settingsControlFontSize))
+        .foregroundStyle(LiquidGlassTokens.browserMutedInk)
+        .disabled(true).allowsHitTesting(false)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private var browserDiagnosticsSettings: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
-            Text("引擎版本：\(BrowserRuntimeVersion.bundledDescription)")
-            Text("目前分頁數：\(model.browserTabRegistry.tabs.count)")
-            HStack {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
+            BrowserSettingsKVRow(title: "引擎", value: BrowserRuntimeVersion.bundledDescription) {
                 Button("打開診斷頁") { browserDiagnosticsPresented = true }
             }
+            BrowserSettingsKVRow(title: "目前分頁數", value: "\(model.browserTabRegistry.tabs.count)") { EmptyView() }
         }
         .sheet(isPresented: $browserDiagnosticsPresented) {
             BrowserDiagnosticsView(registry: model.browserTabRegistry)

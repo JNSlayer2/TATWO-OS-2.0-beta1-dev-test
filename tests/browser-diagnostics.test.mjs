@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,14 +21,18 @@ const run = (command, args, options = {}) => {
 test('swiftc: real ring, redaction, helper roles/process sampling, audit tail, throttle and report', {
   skip: process.platform !== 'darwin', timeout: 120000,
 }, () => {
-  const dir = path.join(root, '.build/w55/fixture');
+  const dir = testScratch('browser-diagnostics-');
   fs.mkdirSync(dir, {recursive:true});
   const source = path.join(dir, 'main.swift');
   const binary = path.join(dir, 'fixture');
   fs.writeFileSync(source, String.raw`
 import Foundation
 import Darwin
-if CommandLine.arguments.contains("--child") { sleep(30); exit(0) }
+if CommandLine.arguments.contains("--child") {
+    FileHandle.standardOutput.write(Data([1]))
+    _ = FileHandle.standardInput.readDataToEndOfFile()
+    exit(0)
+}
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
 let log = BrowserPolicyLog()
 for index in 0..<205 {
@@ -87,9 +92,14 @@ if !FileManager.default.fileExists(atPath:helper.path) {
 let child = Process()
 child.executableURL = helper
 child.arguments = ["--child", "--type=renderer"]
+let ready = Pipe(), lifetime = Pipe()
+child.standardOutput = ready
+child.standardInput = lifetime
 try child.run()
-defer { child.terminate(); child.waitUntilExit() }
-Thread.sleep(forTimeInterval:0.15)
+defer { lifetime.fileHandleForWriting.closeFile(); child.waitUntilExit() }
+// Process.run() is not a child-startup barrier. Wait for the owned helper's
+// explicit ready byte instead of assuming dyld/launch finishes within 150ms.
+precondition(ready.fileHandleForReading.readData(ofLength: 1) == Data([1]))
 let samples = BrowserProcessSampler.sample(helperRoot:helperRoot.path)
 precondition(samples.contains { $0.pid == getpid() && $0.role == "main" && ($0.footprintBytes ?? 0) > 0 })
 precondition(samples.contains { $0.pid == child.processIdentifier && $0.role == "renderer" && $0.isHelper && ($0.footprintBytes ?? 0) > 0 })
@@ -121,7 +131,7 @@ print("W55 pure diagnostics and real libproc sampling PASS")
 test('swiftc: sleep environment override is finite/positive and keeps selected tabs awake', {
   skip: process.platform !== 'darwin',
 }, () => {
-  const dir = path.join(root, '.build/w55/sleep');
+  const dir = testScratch('browser-diagnostics-');
   fs.mkdirSync(dir, {recursive:true});
   fs.writeFileSync(path.join(dir,'main.swift'), `import Foundation
 let expected = CommandLine.arguments[1] == "auto" ? BrowserMemoryPolicy.defaultSleepSeconds(physicalMemory: ProcessInfo.processInfo.physicalMemory) : Double(CommandLine.arguments[1])!
@@ -163,7 +173,7 @@ test('W55 change boundaries: policies identical after removing only logging / en
 test('swiftc: backend timestamps and actual diagnostics refresh stop when page task cancels', {
   skip: process.platform !== 'darwin', timeout:120000,
 }, () => {
-  const dir = path.join(root,'.build/w55/lifecycle');
+  const dir = testScratch('browser-diagnostics-');
   fs.mkdirSync(dir,{recursive:true});
   const fixture = path.join(dir,'Fixture.swift');
   fs.writeFileSync(fixture, `
@@ -286,7 +296,7 @@ test('perf script syntax and honest D-B6 measurement surfaces', () => {
   assert.equal(JSON.parse(invalid.stdout).status,'FAIL');
   assert.equal(invalid.stdout.trim().split('\n').length,1);
   if (process.platform === 'darwin') {
-    const dir = path.join(root,'.build/w55/perf-syntax');
+    const dir = testScratch('browser-diagnostics-');
     fs.mkdirSync(dir,{recursive:true});
     const appleScript = script.match(/<<'APPLESCRIPT'\n([\s\S]*?)\nAPPLESCRIPT/)?.[1];
     const swift = script.match(/<<'SWIFT'\n([\s\S]*?)\nSWIFT/)?.[1];

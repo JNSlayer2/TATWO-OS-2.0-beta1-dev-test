@@ -42,6 +42,7 @@ enum BrowserDiagnosticsAudit {
     struct Snapshot: Sendable {
         var lines: [String] = []
         var status = "尚無審計"
+        var lastCalledAt: Date? = nil
     }
 
     /// Fixed-size tail, no whole-file loading or raw-line fallback on malformed input.
@@ -65,10 +66,14 @@ enum BrowserDiagnosticsAudit {
         if lines.last == "" { lines.removeLast() }
         else if !lines.isEmpty { lines.removeLast() } // Writer has not completed the last record.
         let recent = lines.suffix(50)
+        var lastCalledAt: Date?
         let safe = recent.compactMap { line -> String? in
             guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   let date = object["time"] as? String,
                   let parsed = ISO8601DateFormatter().date(from: date) else { return nil }
+            if object["event"] as? String == "ai_login" || object["tool"] as? String != nil {
+                lastCalledAt = max(lastCalledAt ?? parsed, parsed)
+            }
             func field(_ key: String) -> String { BrowserDiagnosticsPrivacy.text(object[key] as? String ?? "—") }
             let host = BrowserDiagnosticsPrivacy.host(object["origin"] as? String)
             if object["event"] as? String == "ai_login" {
@@ -77,6 +82,7 @@ enum BrowserDiagnosticsAudit {
             // Whitelisted fields only: no arguments, results, description, paths or arbitrary JSON.
             return "\(parsed.formatted(.iso8601)) | \(host) | \(field("caller")) | \(field("tool")) | \(field("decision")) | \(field("outcome")) | \(field("error"))"
         }
-        return Snapshot(lines: safe, status: safe.count == recent.count ? "最近 \(safe.count) 條" : "最近 \(safe.count) 條；已略過無效紀錄")
+        return Snapshot(lines: safe, status: safe.count == recent.count ? "最近 \(safe.count) 條" : "最近 \(safe.count) 條；已略過無效紀錄",
+                        lastCalledAt: lastCalledAt)
     }
 }

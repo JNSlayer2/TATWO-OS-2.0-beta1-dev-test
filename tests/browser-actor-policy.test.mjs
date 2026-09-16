@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,7 +12,7 @@ const bridge = read('Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridg
 const section = (s, a, b) => s.slice(s.indexOf(a), s.indexOf(b, s.indexOf(a)));
 
 test('swiftc: human/agent matrix, private navigation, permissions, settings persistence and W44 alias', {skip: process.platform !== 'darwin'}, () => {
-  const dir = path.join(root, '.build/w45/actor-fixture');
+  const dir = testScratch('browser-actor-policy-');
   fs.mkdirSync(dir, {recursive: true});
   const security = read(app + 'Browser/EmbeddedBrowserSecurity.swift');
   const source = ['Browser/Diagnostics/BrowserDiagnosticsPrivacy.swift', 'Browser/Diagnostics/BrowserPolicyLog.swift',
@@ -105,7 +106,7 @@ test('human callbacks use bounded Island copy and process-local coalesced host c
 });
 
 test('swiftc: real host consent coalescing, bounded copy and download lifecycle without app UI', {skip: process.platform !== 'darwin'}, () => {
-  const dir = path.join(root, '.build/w45/interaction-fixture');
+  const dir = testScratch('browser-actor-policy-');
   fs.mkdirSync(dir, {recursive:true});
   const sources = ['Browser/Diagnostics/BrowserDiagnosticsPrivacy.swift','Browser/Diagnostics/BrowserPolicyLog.swift',
     'Chat/TatwoCodexSandboxMode.swift','Chat/TatwoPermissionPreset.swift','Browser/BrowserActor.swift',

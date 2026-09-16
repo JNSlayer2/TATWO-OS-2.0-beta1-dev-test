@@ -12,7 +12,7 @@ if [[ "${1:-}" == "--check-inputs" ]]; then
     Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/Resources/BrowserBlocklists
     App/Sources/Tatwo2/Resources/os-upstream.md)
   for engine in claude codex grok; do inputs+=("Engines/$engine-sidecar/sidecar.mjs"); done
-  inputs+=(Engines/claude-sidecar/package.json Engines/browser-mcp/server.mjs Engines/os-mcp/server.mjs)
+  inputs+=(Engines/claude-sidecar/package.json Engines/browser-mcp/server.mjs Engines/os-mcp/server.mjs scripts/impact.mjs)
   for input in "${inputs[@]}"; do
     [[ -e "$ROOT/$input" ]] || { echo "missing build input: $input" >&2; exit 1; }
   done
@@ -65,6 +65,8 @@ done
 cp -R "Engines/browser-mcp" "$CONTENTS/Resources/browser-mcp"
 # 內建派工 MCP（E1）同理。
 cp -R "Engines/os-mcp" "$CONTENTS/Resources/os-mcp"
+# The one-shot code_impact implementation is shared with the standalone CLI.
+cp "scripts/impact.mjs" "$CONTENTS/Resources/os-mcp/impact.mjs"
 bash "$ROOT/scripts/stage-ipad-use-device.sh" \
   "$ROOT/Device/iPadUseDevice" "$CONTENTS/Resources/iPadUseDevice"
 cp -R \

@@ -152,29 +152,38 @@ struct BotStudioRootView: View {
     }
 
     private var bottomBar: some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 8) {
+        HStack(spacing: WorkspaceSpaceControlMetrics.zero) {
+            Color.clear.frame(width: WorkspaceSpaceControlMetrics.footerAccessoryWidth).accessibilityHidden(true)
+            WorkspaceSpaceControls {
                 ForEach(Array(state.spaces.enumerated()), id: \.element.id) { index, space in
                     Button { state.selectSpace(index) } label: {
                         Circle()
                             .fill(index == state.spaceIndex
                                   ? Color.primary.opacity(0.75) : Color.primary.opacity(0.22))
-                            .frame(width: 6, height: 6)
+                            .frame(width: WorkspaceSpaceControlMetrics.dotSize, height: WorkspaceSpaceControlMetrics.dotSize)
+                            .frame(width: WorkspaceSpaceControlMetrics.cellWidth, height: WorkspaceSpaceControlMetrics.cellHeight)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(space.name)
+                    .accessibilityLabel(space.name)
+                    .accessibilityIdentifier("bot.space.\(space.id)")
                 }
                 Button { state.addSpace() } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: WorkspaceSpaceControlMetrics.plusFontSize, weight: .bold))
                         .foregroundStyle(.secondary)
+                        .frame(width: WorkspaceSpaceControlMetrics.cellWidth, height: WorkspaceSpaceControlMetrics.cellHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("新增一個 bot space")
+                .accessibilityLabel("新增 bot 空間")
+                .accessibilityIdentifier("bot.space.add")
             }
             .frame(maxWidth: .infinity, alignment: .center)
             TatwoOSMark(size: 13)
+                .frame(width: WorkspaceSpaceControlMetrics.footerAccessoryWidth)
         }
         .padding(.top, 10)
         .padding(.bottom, 12)

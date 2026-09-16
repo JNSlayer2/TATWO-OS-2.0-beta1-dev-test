@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,7 +12,7 @@ const file = 'App/Sources/Tatwo2/Facade/DispatchWatchdog.swift';
 const source = fs.readFileSync(file, 'utf8');
 const start = source.indexOf('    static func machineStats() -> MachineStats {');
 assert.ok(start > 0);
-const root = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/watchdog-pressure.'));
+const root = testScratch('watchdog-pressure.');
 const program = path.join(root, 'probe');
 fs.writeFileSync(path.join(root, 'probe.swift'), `
 import Foundation

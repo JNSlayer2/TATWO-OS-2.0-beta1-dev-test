@@ -354,8 +354,7 @@ struct BrowserPasswordVaultChecks {
                                ("empty", BrowserPasswordVault(indexURL: nil, secrets: InMemorySecretStore(),
                                                                authenticator: AlwaysAllowAuthenticator()))] {
             let host = NSHostingView(rootView: ScrollView {
-                BrowserPasswordsSettingsView(vault: store, aiVault: BrowserAIVault(indexURL: nil,
-                    secrets: InMemorySecretStore(), authenticator: AlwaysAllowAuthenticator())).padding(22)
+                BrowserPasswordsSettingsView(vault: store).padding(22)
             }.frame(width: 579, height: 560).background(Color(nsColor: .windowBackgroundColor)))
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 579, height: 560),
                                   styleMask: [.borderless], backing: .buffered, defer: false)

@@ -49,7 +49,7 @@ if (codexHome && codexHome !== codexSourceHome) {
     const dest = path.join(codexHome, 'config.toml');
     const src = path.join(codexSourceHome, 'config.toml');
     const destText = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
-    if (!/^\[mcp_servers\./m.test(destText) && fs.existsSync(src)) {
+    if (!/^# tatwo2-mcp-registry-managed$/m.test(destText) && !/^\[mcp_servers\./m.test(destText) && fs.existsSync(src)) {
       // Node 實跑證實：JS regex 沒有 \Z（會當成字面 "Z"），最後一段 MCP 若沒有後續非 MCP 標頭就抓不到、遇到 Z 字還會截斷。
       // 加一個 sentinel 標頭在結尾，讓每一段都有明確終點。
       const srcText = fs.readFileSync(src, 'utf8') + '\n[__tatwo2_end__]\n';
@@ -62,7 +62,7 @@ if (codexHome && codexHome !== codexSourceHome) {
         const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
         fs.writeFileSync(tmp, `${destText.trimEnd()}\n\n# 由 TATWO OS 從 ${src} 搬入的 MCP 定義\n${sections.join('\n\n')}\n`, { mode: fs.existsSync(dest) ? (fs.statSync(dest).mode & 0o777) : 0o600 });
         const latest = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : '';
-        if (/^\[mcp_servers\./m.test(latest)) fs.unlinkSync(tmp);   // 別人已經搬好了，用他的
+        if (/^# tatwo2-mcp-registry-managed$/m.test(latest) || /^\[mcp_servers\./m.test(latest)) fs.unlinkSync(tmp);   // 別人已經搬好了或移除登記，用他的
         else fs.renameSync(tmp, dest);
       }
     }

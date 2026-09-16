@@ -1,10 +1,11 @@
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, writeFileSync, mkdtempSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawnSync} from 'node:child_process';
-const root = new URL('../', import.meta.url).pathname;
+const root = fileURLToPath(new URL('../', import.meta.url));
 const b = 'App/Sources/Tatwo2/Browser/';
 const read = p => readFileSync(join(root,p),'utf8');
 
@@ -107,7 +108,7 @@ test('W57e production native recorder handles capture, Esc, Delete and responder
   const dir = mkdtempSync(join(tmpdir(),'w57e-recorder-'));
   const source = join(dir,'Recorder.swift'), binary = join(dir,'recorder');
   const adapter = 'extension BrowserKeyCombo {' + read(b+'BrowserDailyNavigationControls.swift').split('extension BrowserKeyCombo {')[1];
-  writeFileSync(source, [read(b+'BrowserShortcuts.swift'),read(b+'BrowserGeneralSettings.swift'),read(b+'BrowserSettingsMetrics.swift'),read(b+'BrowserShortcutsSettingsView.swift'),adapter,String.raw`
+  writeFileSync(source, [read(b+'BrowserShortcuts.swift'),read(b+'BrowserGeneralSettings.swift'),read('App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift'),read(b+'BrowserSettingsMetrics.swift'),read(b+'BrowserShortcutsSettingsView.swift'),adapter,String.raw`
 @main struct RecorderChecks {
  @MainActor static func main() {
     _ = NSApplication.shared

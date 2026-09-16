@@ -7,38 +7,45 @@ struct BrowserAIVaultSettingsView: View {
     @ObservedObject var vault: BrowserAIVault
     @State private var adding = false
     @State private var message: String?
-    @State private var exportTask: Task<Void, Never>?
+    let changePassword: (UUID) -> Void
+    @State private var importPreview: AIICloudImportPreview?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("AI 帳號").font(.headline)
+                Text("\(vault.credentials.count) 個帳號").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("新增") { adding = true }
-                Button("從 CSV 匯入", action: importCSV)
-                Button("匯出 CSV", action: exportCSV)
-                    .disabled(vault.credentials.isEmpty || exportTask != nil)
+                Button("匯入 iCloud", action: importICloud)
+                Button("CSV 匯入", action: importCSV)
+                Button("＋ 新增帳號") { adding = true }
             }
-            .buttonStyle(.bordered)
-            .font(.caption)
+            .buttonStyle(.bordered).font(.caption)
             .disabled(vault.storageError != nil)
-            Text("AI 只能用這些帳號登入，看不到密碼；不會填進你的分頁")
-                .font(.footnote).foregroundStyle(.secondary)
-            Text("兩步驟驗證下一輪").font(.footnote).foregroundStyle(.secondary)
             if let error = vault.storageError { Text(error).foregroundStyle(.red) }
-            if vault.credentials.isEmpty {
-                Text("尚未配置 AI 專屬帳號。").font(.footnote).foregroundStyle(.secondary)
-            }
-            LazyVStack(spacing: 0) {
-                ForEach(vault.credentials) { account in
-                    BrowserAIVaultSettingsRow(vault: vault, account: account)
-                    Divider().opacity(0.4)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    ForEach(["網站", "帳號", "標籤", "驗證器", "最近使用", "狀態", "⋯"], id: \.self) {
+                        Text($0).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                Divider().gridCellUnsizedAxes(.horizontal)
+                ForEach(vault.credentials) { account in
+                    BrowserAIVaultSettingsRow(vault: vault, account: account, changePassword: changePassword)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if vault.credentials.isEmpty {
+                Text("尚未配置 AI 專屬帳號。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 100)
             }
             if let message { Text(message).font(.footnote).foregroundStyle(.secondary) }
         }
         .sheet(isPresented: $adding) { BrowserAIVaultAddView(vault: vault) }
-        .onDisappear { exportTask?.cancel(); exportTask = nil }
+        .sheet(item: $importPreview) { preview in AIICloudImportView(vault: vault, preview: preview) }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func importCSV() {
@@ -50,30 +57,25 @@ struct BrowserAIVaultSettingsView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let result = try vault.importCSV(url: url)
-            message = "新增 \(result.added)；更新 \(result.updated)；略過 \(result.skipped)"
+            message = "新增 \(result.added)；更新 \(result.updated)；略過 \(result.skipped)。請自行刪除含明文密碼的 CSV 原檔。"
         } catch { message = "匯入失敗；先前成功的項目已保留。請檢查 CSV 與鑰匙圈。" }
     }
 
-    private func exportCSV() {
-        let panel = NSSavePanel()
+    private func importICloud() {
+        let panel = NSOpenPanel()
         panel.allowedContentTypes = [.commaSeparatedText]
-        panel.nameFieldStringValue = "TATWO-ai-accounts.csv"
-        panel.message = "CSV 會包含未加密的密碼，請存放在安全的位置。"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "選擇 Apple「密碼」App 匯出的 CSV；下一步逐一勾選給 AI 的帳號，預設全不勾。"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        exportTask = Task { @MainActor in
-            defer { exportTask = nil }
-            do {
-                let data = try await vault.exportCSV(reason: "匯出 AI 帳號密碼")
-                try Task.checkCancellation()
-                try BrowserPasswordCSVFileWriter.write(data, to: url)
-            } catch is CancellationError {
-            } catch { message = "無法匯出，請確認身分驗證與儲存位置。" }
-        }
+        do { importPreview = try AIICloudImportPreview.read(url) }
+        catch { message = "無法讀取 CSV，請確認檔案格式。" }
     }
+
 }
 
 @MainActor
-private struct BrowserAIVaultAddView: View {
+struct BrowserAIVaultAddView: View {
     @ObservedObject var vault: BrowserAIVault
     @Environment(\.dismiss) private var dismiss
     @State private var origin = ""
@@ -125,30 +127,50 @@ private struct BrowserAIVaultAddView: View {
 private struct BrowserAIVaultSettingsRow: View {
     @ObservedObject var vault: BrowserAIVault
     let account: AICredential
+    let changePassword: (UUID) -> Void
+    @State private var editing: AIAccountEditKind?
     @State private var revealed: String?
     @State private var task: Task<Void, Never>?
     @State private var hideTask: Task<Void, Never>?
     @State private var failed = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(URL(string: account.origin)?.host ?? account.origin).font(.subheadline.weight(.medium))
-                    Text("\(account.username) · \(account.label)").font(.footnote)
-                    Text(account.allowedCallers.title).font(.caption).foregroundStyle(.secondary)
-                    Text("最近使用：\(account.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? "尚未使用") · \(account.useCount) 次")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(revealed ?? "••••••••").font(.system(.footnote, design: .monospaced)).privacySensitive()
+        GridRow(alignment: .top) {
+            Text(URL(string: account.origin)?.host ?? account.origin).lineLimit(1).help(account.origin)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(account.username).lineLimit(1).help(account.username).privacySensitive()
+                if let revealed {
+                    Text(revealed).font(.system(.caption, design: .monospaced)).privacySensitive()
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Button(revealed == nil ? "顯示密碼" : "隱藏", action: reveal)
-                Button("刪除", role: .destructive, action: delete)
+                if failed { Text("操作未完成").foregroundStyle(.red) }
             }
-            .buttonStyle(.bordered).font(.caption).disabled(task != nil)
-            if failed { Text("操作未完成，請確認身分驗證或鑰匙圈。").font(.caption).foregroundStyle(.red) }
+            Text(account.label).lineLimit(1).help(account.allowedCallers.title)
+            Text(account.authenticatorStatus.rawValue)
+                .foregroundStyle(account.authenticatorStatus == .managed ? .green : .secondary)
+            Text(account.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? "—")
+                .foregroundStyle(.secondary)
+            Text(account.statusTitle).foregroundStyle(account.statusTitle == "正常" ? .green : .orange)
+            Menu {
+                Button("快速修改密碼") { changePassword(account.id) }.disabled(account.disabledAt != nil)
+                Button(revealed == nil ? "顯示密碼（Touch ID）" : "隱藏密碼", action: reveal)
+                if account.passwordChangeFailedAt != nil {
+                    Button("顯示待確認新密碼（Touch ID）") { reveal(pending: true) }
+                    Button("網站已採用新密碼，同步保險庫…") { reconcile(useNew: true) }
+                    Button("網站仍使用舊密碼，放棄候選…") { reconcile(useNew: false) }
+                }
+                Button("綁定驗證器") { editing = .authenticator }
+                Button("改標籤") { editing = .label }
+                Button("只允許某條對話") { editing = .scope }
+                Button(account.disabledAt == nil ? "停用" : "啟用") {
+                    do { try vault.setEnabled(account.id, enabled: account.disabledAt != nil) }
+                    catch { failed = true }
+                }
+                Button("刪除", role: .destructive, action: delete)
+            } label: { Image(systemName: "ellipsis").accessibilityLabel("帳號操作") }
+            .menuStyle(.borderlessButton).fixedSize().disabled(task != nil || vault.storageError != nil)
         }
-        .padding(.vertical, 8)
+        .font(.system(size: 12))
+        .sheet(item: $editing) { kind in AIAccountEditView(vault: vault, account: account, kind: kind) }
         .onDisappear(perform: cancel)
         .onChange(of: account) { _, _ in cancel() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
@@ -162,13 +184,16 @@ private struct BrowserAIVaultSettingsRow: View {
         revealed = nil
     }
 
-    private func reveal() {
+    private func reveal() { reveal(pending: false) }
+
+    private func reveal(pending: Bool) {
         if revealed != nil { cancel(); return }
         failed = false
         task = Task { @MainActor in
             defer { task = nil }
             do {
-                let value = try await vault.revealPassword(id: account.id, reason: "顯示 AI 帳號密碼")
+                let value = try await pending ? vault.revealPendingPasswordChange(account.id) :
+                    vault.revealPassword(id: account.id, reason: "顯示 AI 帳號密碼")
                 try Task.checkCancellation()
                 guard NSApplication.shared.isActive else { return }
                 revealed = value
@@ -191,6 +216,18 @@ private struct BrowserAIVaultSettingsRow: View {
                 confirmLabel: "刪除", cancelLabel: "取消")
             guard confirmed, !Task.isCancelled else { return }
             do { try vault.delete(account.id) } catch { failed = true }
+        }
+    }
+
+    private func reconcile(useNew: Bool) {
+        task = Task { @MainActor in
+            defer { task = nil }
+            guard await IslandNotice.shared.confirm(title: useNew ? "同步新密碼？" : "放棄待確認的新密碼？",
+                detail: useNew ? "請先確認網站已接受新密碼；這會替換本機舊密碼，並需要 Touch ID。" :
+                    "請先確認網站仍接受舊密碼。這只移除本機候選，不能復原網站上的密碼變更。",
+                confirmLabel: "確認", cancelLabel: "取消"), !Task.isCancelled else { return }
+            do { try await vault.reconcilePendingPasswordChange(account.id, useNewPassword: useNew) }
+            catch { failed = true }
         }
     }
 }

@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
-test('production attachment tiles render previews without overflowing adjacent files', { timeout: 120_000 }, t => {
+test('production attachment tiles render previews without overflowing adjacent files', { timeout: 180_000 }, t => {
   if (process.platform !== 'darwin') return t.skip('requires AppKit');
   const leaf = fs.readFileSync(path.join(repo, 'App/Sources/Tatwo2/Chat/ChatPageLeafViews.swift'), 'utf8');
   const derived = fs.readFileSync(path.join(repo, 'App/Sources/Tatwo2/Chat/ChatPageLeafViews+MessageDerived.swift'), 'utf8');
@@ -26,7 +27,7 @@ test('production attachment tiles render previews without overflowing adjacent f
   const composerEnd = composer.indexOf('    /// 停止鈕', composerStart);
   assert.ok(start >= 0 && end > start && attachmentStart >= 0 && attachmentEnd > attachmentStart);
   assert.ok(composerStart >= 0 && composerEnd > composerStart);
-  const scratch = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/attachment-render.'));
+  const scratch = testScratch('attachment-render.');
   const source = `
 import SwiftUI
 import AppKit
@@ -60,12 +61,13 @@ ${fs.readFileSync(path.join(repo, 'tests/fixtures/attachment-render-checks.swift
   fs.writeFileSync(path.join(scratch, 'checks.swift'), source);
   const build = spawnSync('/bin/bash', ['-c', `
 set -euo pipefail
-receipt=$(bash scripts/tatwo-build-lock.sh acquire --timeout 0 --pid $$)
+# Serialize the compiler phase; a busy compiler is not a rendering failure.
+receipt=$(bash scripts/tatwo-build-lock.sh acquire --timeout 120 --pid $$)
 token=$(printf '%s\\n' "$receipt" | sed -n 's/^token=//p')
 trap 'bash scripts/tatwo-build-lock.sh release --token "$token" >/dev/null' EXIT
 nice -n 10 xcrun swiftc -num-threads 2 "$1" -o "$2"
 `, 'attachment-render', path.join(scratch, 'checks.swift'), path.join(scratch, 'checks')], {
-    cwd: repo, encoding: 'utf8', timeout: 100_000, env: { ...process.env, TMPDIR: scratch },
+    cwd: repo, encoding: 'utf8', timeout: 150_000, env: { ...process.env, TMPDIR: scratch },
   });
   fs.writeFileSync(path.join(scratch, 'build.log'), build.stdout + build.stderr);
   assert.equal(build.status, 0, build.stderr || String(build.error));

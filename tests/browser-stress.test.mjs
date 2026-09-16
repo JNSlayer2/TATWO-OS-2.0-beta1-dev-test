@@ -1,3 +1,4 @@
+import { testScratch, stageFixtureFiles } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,13 +11,13 @@ const browser = 'App/Sources/Tatwo2/Browser/';
 const read = p => fs.readFileSync(path.join(root, p), 'utf8');
 const bridge = read('Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridge.mm');
 const backend = read(browser + 'ChromiumCEFBackend.swift');
-const run = (cmd, args) => {
-  const r = spawnSync(cmd, args, {cwd:root, encoding:'utf8', timeout:150000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''}});
+const run = (cmd, args, options = {}) => {
+  const r = spawnSync(cmd, args, {cwd:root, encoding:'utf8', timeout:150000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''}, ...options});
   assert.equal(r.status, 0, `${r.error ?? ''}\n${r.stdout}\n${r.stderr}`);
   return r.stdout;
 };
 function fixture(name, source, files) {
-  const dir = path.join(root, '.build/w60/stress', name);
+  const dir = path.join(testScratch('browser-stress-'), name);
   fs.mkdirSync(dir, {recursive:true});
   const file = path.join(dir, 'Checks.swift'), binary = path.join(dir, 'checks');
   fs.writeFileSync(file, source);
@@ -229,7 +230,14 @@ extension BrowserWorkSpaceRuntime {
 test('W60 production scheduler obeys immediate/delayed/cancel/overdue/shutdown semantics', {
   skip:process.platform !== 'darwin', timeout:180000,
 }, () => {
-  assert.match(run('bash', ['scripts/browser-pump-probe.sh','--checks']), /scheduler checks PASS/);
+  const sandbox = stageFixtureFiles([
+    'scripts/browser-pump-probe.sh', 'scripts/browser-pump-probe.mjs',
+    'scripts/tatwo-build-lock.sh', 'tests/fixtures/browser-pump-probe.mm.in',
+    'Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridge.mm',
+  ]);
+  // The real script still serializes compilers with the shared build lock.
+  assert.match(run('bash', ['scripts/browser-pump-probe.sh','--checks'],
+    { cwd: sandbox, timeout: 220000 }), /scheduler checks PASS/);
 });
 
 test('W60 quiet UI and lifetime boundaries stay wired to production', () => {

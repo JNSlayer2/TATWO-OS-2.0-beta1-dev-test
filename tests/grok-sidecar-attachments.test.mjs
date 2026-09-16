@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -32,7 +33,7 @@ function screenshot() {
 }
 
 async function fixture(t, { hold = false, missingBinary = false } = {}) {
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('grok-sidecar-attachments-');
   await fs.mkdir(output, { recursive: true });
   const root = await fs.mkdtemp(path.join(output, 'grok-attachments.'));
   const tmp = path.join(root, 'tmp');

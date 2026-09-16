@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,7 +14,7 @@ test('image preview presentation renders thumbnail, overlay and failure states w
   const sourcePath = 'App/Sources/Tatwo2/Chat/ChatAttachmentPreviewSurface.swift';
   const source = fs.readFileSync(path.join(repo, sourcePath), 'utf8');
   assert.doesNotMatch(source, /FileManager|contentsOfFile|URLSession|Process\(|Task\.detached/);
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('tatwo2-attachment-preview-surface-');
   fs.mkdirSync(output, { recursive: true });
   const scratch = fs.mkdtempSync(path.join(output, 'attachment-preview-ui.'));
   fs.writeFileSync(path.join(scratch, 'main.swift'), source + '\n' +

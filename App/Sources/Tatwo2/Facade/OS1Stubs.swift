@@ -202,7 +202,10 @@ struct TatwoPluginRegistryStore {
     static func loadDefaultEntries() -> [PluginRegistryEntry] { PluginsSource.load() }
     static func defaultStore() -> TatwoPluginRegistryStore { .init() }
     func register(kind: RegistryKind, path: String, plainPurpose: String, name: String?) throws -> PluginRegistryEntry { .init(id: path, name: name ?? path, kind: kind, purpose: plainPurpose, path: path, trigger: "", safetyLevel: .medium, installState: .unknown, smokeCommand: nil, publicInstallHint: "") }
-    func remove(id: String) throws -> PluginRegistryEntry { PluginsFixture.entries.first ?? .init(id: id, name: id, kind: .plugin, purpose: "", path: nil, trigger: "", safetyLevel: .low, installState: .unknown, smokeCommand: nil, publicInstallHint: "") }
+    func remove(id: String) throws -> PluginRegistryEntry {
+        if PluginsSource.mcpEngine(from: id) != nil { return try PluginsSource.removeRegistration(id: id) }
+        return PluginsFixture.entries.first ?? .init(id: id, name: id, kind: .plugin, purpose: "", path: nil, trigger: "", safetyLevel: .low, installState: .unknown, smokeCommand: nil, publicInstallHint: "")
+    }
     func syncClaudeMCPConfig() throws -> TatwoClaudeMCPSyncReceiptV1 { .init() }
 }
 enum TatwoIdentityCatalog { static let scenarioProfiles = ModesFixture.scenarioProfiles }
@@ -453,9 +456,13 @@ struct TatwoGoalRevisionPredecessor { let attachment: TatwoSessionAttachment?; l
 enum TatwoGoalRevisionPredecessorResolver { static func resolve(pointer: TatwoGoalPointer, scenarioBook: TatwoScenarioConfigBookV1, goalStore: TatwoGoalRunStore, sessionStore: TatwoSessionStore) throws -> TatwoGoalRevisionPredecessor { .init(attachment: nil, requiresBindingRevision: false) } }
 
 // 以下三個型別取合併前主線（HEAD）的完整版，供 PluginsPage / Modes 使用
-enum RegistryKind: String, Sendable { case plugin, skill, mcp, app, localRuntime }
+enum RegistryKind: String, Sendable { case plugin, skill, mcp, app, localRuntime, builtin }
 struct PluginRegistryEntry: Identifiable, Equatable, Sendable {
     let id: String; let name: String; let kind: RegistryKind; let purpose: String; let path: String?; let trigger: String; let safetyLevel: PluginSafetyLevel; let installState: InstallState; let smokeCommand: String?; let publicInstallHint: String
+    var liveness: PluginLivenessResult = .init(state: .unknown)
+    var toolCount: Int? = nil
+    var lastCalledAt: Date? = nil
+    var availableTo: [String] = []
 }
 // TatwoWorkOSContractV1：已由照搬檔提供，stub 移除
 

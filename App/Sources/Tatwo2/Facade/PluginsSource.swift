@@ -1,16 +1,17 @@
 // 來源：房間 skills-usage.md；只讀 skills 與 MCP 設定，匯出環境固定使用 PluginsFixture
 import Foundation
+import CryptoKit
 
 enum PluginsSource {
-    enum MCPEngine: String { case codex, claude, grok }
+    enum MCPEngine: String, CaseIterable, Sendable { case codex, claude, grok }
     /// 使用者 2026-09-05：blender／gbrain 需要才開；預設只開 OS 自己的工具與瀏覽器橋
     static let defaultOnPatterns = ["tatwo_ultrawork", "tatwo2_os", "browser"]
     private static let githubMCPPrefix = "github-"
     private static let noneSentinel = "__tatwo_none__"
-    private static let statusLock = NSLock()
-    private static var liveStatuses: [String: String] = [:]
+    private static let probeLock = NSLock()
+    private static let livenessCache = PluginLivenessCache()
 
-    /// 啟動時不碰外接卷（會被 macOS 權限詢問卡住主執行緒）：先回快取（沒有就先回假資料），真正的掃描丟到背景，掃完寫快取，下次啟動生效。
+    /// 技能沿用啟動快取；MCP 不從舊磁碟快取宣稱連線，背景探測後重建卡片。
     static func load(environment: [String: String] = ProcessInfo.processInfo.environment) -> [PluginRegistryEntry] {
         guard NativeStagingIsolation.validationError(environment) == nil else { return [] }
         guard !isExport(environment) else { return PluginsFixture.entries }
@@ -23,26 +24,30 @@ enum PluginsSource {
                 writeCache(fresh, environment: environment)
             }
         }
-        return cached ?? (NativeStagingIsolation.isEnabled(environment) ? [] : PluginsFixture.entries)
+        // Cache only the expensive skill scan. MCP definitions and their liveness must not
+        // resurrect stale registration/status text from an older App process.
+        return (cached?.filter { $0.kind == .skill }
+                ?? (NativeStagingIsolation.isEnabled(environment) ? [] : PluginsFixture.entries.filter { $0.kind == .skill }))
+            + builtinEntries(environment: environment) + mcpEntries(environment: environment)
     }
 
     static func scanNow(environment: [String: String] = ProcessInfo.processInfo.environment) -> [PluginRegistryEntry] {
         guard NativeStagingIsolation.validationError(environment) == nil else { return [] }
-        let entries = skillEntries(environment: environment) + mcpEntries(environment: environment)
-        return entries.isEmpty && !NativeStagingIsolation.isEnabled(environment) ? PluginsFixture.entries : entries.sorted {
-            if $0.kind == $1.kind { return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            return $0.kind == .skill
-        }
+        let skills = skillEntries(environment: environment).sorted { $0.name < $1.name }
+        return skills + builtinEntries(environment: environment) + mcpEntries(environment: environment)
     }
 
-    /// 在背景向 Claude Agent SDK sidecar 詢問一次真實 MCP 連線狀態，再重建資訊卡資料。
-    static func refreshNow(environment: [String: String] = ProcessInfo.processInfo.environment) -> [PluginRegistryEntry] {
+    /// Claude has a real SDK handshake. Codex only reports configured/disabled;
+    /// Grok has no status operation. Neither of those is connection evidence.
+    static func refreshNow(environment: [String: String] = ProcessInfo.processInfo.environment,
+                           force: Bool = false) -> [PluginRegistryEntry] {
         guard NativeStagingIsolation.validationError(environment) == nil else { return [] }
-        let statuses = probeClaudeStatuses(environment: environment)
-        statusLock.lock()
-        liveStatuses = statuses ?? [:]
-        statusLock.unlock()
-        return scanNow(environment: environment)
+        guard !isExport(environment) else { return PluginsFixture.entries }
+        probeLock.lock(); defer { probeLock.unlock() }
+        for engine in MCPEngine.allCases { _ = probeStatuses(engine: engine, environment: environment, force: force) }
+        let entries = scanNow(environment: environment)
+        writeCache(entries, environment: environment)
+        return entries
     }
 
     private struct CacheRow: Codable { var id, name, kind, purpose, path, trigger, safety, install, hint: String; var smoke: String? }
@@ -64,6 +69,11 @@ enum PluginsSource {
         let rows = entries.map { e in CacheRow(id: e.id, name: e.name, kind: e.kind.rawValue, purpose: e.purpose, path: e.path ?? "", trigger: e.trigger,
                                                safety: e.safetyLevel.rawValue, install: e.installState.rawValue, hint: e.publicInstallHint, smoke: e.smokeCommand) }
         if let data = try? JSONEncoder().encode(rows) { try? data.write(to: cacheURL(environment: environment), options: .atomic) }
+    }
+
+    static func invalidateLivenessAfterRemoval(environment: [String: String]) {
+        livenessCache.invalidate()
+        writeCache(scanNow(environment: environment), environment: environment)
     }
 
     static func sourceTestLine(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
@@ -121,7 +131,7 @@ enum PluginsSource {
         switch engine {
         case .codex: return Array(Set(codexServerNames(environment: environment) + githubNames)).sorted()
         case .claude: return Array(Set(Array(claudeConfiguredServers(environment: environment).keys) + githubNames)).sorted()
-        case .grok: return []
+        case .grok: return Array(configuredServers(engine: .grok, environment: environment).keys).sorted()
         }
     }
 
@@ -226,126 +236,141 @@ enum PluginsSource {
     }
 
     private static func mcpEntries(environment: [String: String]) -> [PluginRegistryEntry] {
-        var result: [PluginRegistryEntry] = []
-        for engine in [MCPEngine.codex, .claude] {
-            for name in mcpNames(for: engine, environment: environment) {
-                let status: String
-                if engine == .claude {
-                    statusLock.lock()
-                    let raw = liveStatuses[name]
-                    statusLock.unlock()
-                    switch raw {
-                    case "connected": status = "已連線・常駐"
-                    case "pending": status = "連線中"
-                    case "needs-auth": status = "未連線・需登入"
-                    case "failed": status = "未連線"
-                    default: status = "已設定・等待狀態"
-                    }
-                } else {
-                    status = NativeStagingIsolation.isEnabled(environment)
-                        ? "已設定・尚未驗證連線" : "已設定・常駐"
-                }
-                result.append(.init(
-                    id: pluginID(engine: engine, name: name),
-                    name: name,
-                    kind: .mcp,
-                    purpose: "\(engine == .codex ? "Codex" : "Claude")・\(status)",
+        MCPEngine.allCases.flatMap { engine in
+            let definitions = configuredServers(engine: engine, environment: environment)
+            let statuses = livenessCache.value(for: probeKey(engine: engine, environment: environment)) ?? [:]
+            return mcpNames(for: engine, environment: environment).map { name in
+                let enabled = definitions[name]?.enabled ?? true
+                return PluginRegistryEntry(
+                    id: pluginID(engine: engine, name: name), name: name, kind: .mcp,
+                    purpose: "\(engine.rawValue.capitalized)・外部 MCP",
                     path: "mcp:\(engine.rawValue):\(name)",
                     trigger: "由 \(engine.rawValue) sidecar 啟動時載入。",
-                    safetyLevel: .medium,
-                    installState: .installed,
-                    smokeCommand: nil,
-                    publicInstallHint: "從本機設定唯讀載入"))
+                    safetyLevel: .medium, installState: .installed, smokeCommand: nil,
+                    publicInstallHint: "從本機設定唯讀載入",
+                    liveness: enabled ? (statuses[name] ?? .init(state: .unknown)) : .init(state: .disabled),
+                    availableTo: [engine.rawValue.capitalized])
             }
         }
-        return result
     }
 
-    private static func probeClaudeStatuses(environment: [String: String]) -> [String: String]? {
-        guard let config = sidecarMCPConfig(engine: .claude, stored: [], environment: environment),
-              !mcpNames(for: .claude, environment: environment).isEmpty
-        else { return [:] }
-        let process = Process()
-        var processEnvironment = environment
-        if NativeStagingIsolation.isEnabled(environment) {
-            let paths = EnginePaths(environment: environment)
-            let resources = paths.runtimeBinDirectory.deletingLastPathComponent().deletingLastPathComponent()
-            let node = paths.runtimeBinDirectory.appendingPathComponent("node")
-            let script = resources.appendingPathComponent("claude-sidecar/sidecar.mjs")
-            // No repo, UserDefaults, or host PATH fallback in normal staging.
-            guard NativeStagingIsolation.allowsRead(node, within: resources),
-                  NativeStagingIsolation.allowsRead(script, within: resources),
-                  FileManager.default.isExecutableFile(atPath: node.path),
-                  FileManager.default.fileExists(atPath: script.path)
-            else { return nil }
-            process.executableURL = node
-            process.arguments = [script.path, "--cwd", paths.userHome.path, "--mcp-config", config]
-            process.currentDirectoryURL = paths.userHome
-            processEnvironment = NativeStagingIsolation.isolateClaude(
-                processEnvironment, configDirectory: paths.claudeConfigDirectory.path)
-            processEnvironment["PATH"] = paths.runtimeBinDirectory.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["node", ClaudeSidecar.scriptPath(for: .claude), "--cwd", NSTemporaryDirectory(), "--mcp-config", config]
-            processEnvironment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (processEnvironment["PATH"] ?? "/usr/bin:/bin")
+    private static func probePath(environment: [String: String]) -> String {
+        let paths = EnginePaths(environment: environment)
+        let runtime = environment["TATWO2_RUNTIME_BIN"] ?? paths.runtimeBinDirectory.path
+        if NativeStagingIsolation.isEnabled(environment) { return runtime + ":/usr/bin:/bin:/usr/sbin:/sbin" }
+        return runtime + ":/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+    }
+
+    private static func probeKey(engine: MCPEngine, environment: [String: String]) -> String {
+        // Bind results to engine + source content + executable search scope; never cross isolated homes.
+        let files = configurationURLs(engine: engine, environment: environment)
+        var data = Data((engine.rawValue + probePath(environment: environment)).utf8)
+        for file in files {
+            data.append(Data(file.path.utf8))
+            if let contents = try? Data(contentsOf: file) { data.append(contents) }
         }
-        process.environment = processEnvironment
-        let input = Pipe()
-        let output = Pipe()
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = Pipe()
-        let semaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var buffer = Data()
-        var result: [String: String]?
-        output.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            lock.lock()
-            buffer.append(data)
-            while let newline = buffer.firstIndex(of: 0x0A) {
-                let line = buffer.subdata(in: buffer.startIndex..<newline)
-                buffer.removeSubrange(buffer.startIndex...newline)
-                guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                      object["ev"] as? String == "mcp_status",
-                      let servers = object["servers"] as? [[String: Any]]
-                else { continue }
-                result = Dictionary(uniqueKeysWithValues: servers.compactMap {
-                    guard let name = $0["name"] as? String, let status = $0["status"] as? String else { return nil }
-                    return (name, status)
-                })
-                semaphore.signal()
+        data.append(Data(mcpNames(for: engine, environment: environment).joined(separator: "\n").utf8))
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    @discardableResult
+    static func probeStatuses(engine: MCPEngine, environment: [String: String], force: Bool = false) -> [String: PluginLivenessResult] {
+        guard NativeStagingIsolation.validationError(environment) == nil, !isExport(environment) else { return [:] }
+        let names = mcpNames(for: engine, environment: environment)
+        guard !names.isEmpty else { return [:] }
+        return livenessCache.resolve(key: probeKey(engine: engine, environment: environment), force: force) {
+            var definitions = configuredServers(engine: engine, environment: environment)
+            for (name, object) in githubMCPServers(environment: environment, includeTokensFor: []) {
+                if engine != .grok, let object = object as? [String: Any] { definitions[name] = .init(object) }
             }
-            lock.unlock()
+            var results = Dictionary(uniqueKeysWithValues: names.map { name in
+                let definition = definitions[name] ?? .init([:])
+                return (name, PluginProbe.executableCheck(command: definition.command, args: definition.args,
+                    path: definition.path ?? probePath(environment: environment),
+                    cwd: EnginePaths(environment: environment).userHome, enabled: definition.enabled))
+            })
+            guard engine == .claude else { return results }
+            let candidates = names.filter { results[$0]?.state == .unknown }
+            guard !candidates.isEmpty else { return results }
+            // Explicitly request every configured, enabled candidate, not the default-on subset.
+            guard let config = sidecarMCPConfig(engine: engine, stored: candidates, environment: environment) else { return results }
+            let process = Process()
+            let paths = EnginePaths(environment: environment)
+            var env = environment
+            env["PATH"] = probePath(environment: environment)
+            if NativeStagingIsolation.isEnabled(environment) {
+                let resources = paths.runtimeBinDirectory.deletingLastPathComponent().deletingLastPathComponent()
+                let node = paths.runtimeBinDirectory.appendingPathComponent("node")
+                let script = resources.appendingPathComponent("claude-sidecar/sidecar.mjs")
+                guard NativeStagingIsolation.allowsRead(node, within: resources),
+                      NativeStagingIsolation.allowsRead(script, within: resources),
+                      FileManager.default.isExecutableFile(atPath: node.path),
+                      FileManager.default.fileExists(atPath: script.path) else {
+                    for name in candidates { results[name] = .init(state: .unreachable, detail: "探測程序不可用", probedAt: Date()) }
+                    return results
+                }
+                process.executableURL = node
+                process.arguments = [script.path, "--cwd", paths.userHome.path, "--mcp-config", config]
+                env = NativeStagingIsolation.isolateClaude(env, configDirectory: paths.claudeConfigDirectory.path)
+            } else {
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                process.arguments = ["node", ClaudeSidecar.scriptPath(for: .claude), "--cwd", paths.userHome.path, "--mcp-config", config]
+                env["CLAUDE_CONFIG_DIR"] = paths.claudeConfigDirectory.path
+                env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = NativeStagingIsolation.sidecarClaudeNamespace(
+                    environment: env, configDirectory: paths.claudeConfigDirectory.path)
+            }
+            process.currentDirectoryURL = paths.userHome
+            process.environment = env
+            let reply = PluginProbe.sidecar(process)
+            // Replacement, not merge: an omitted/failed reply must never retain an old green light.
+            for name in candidates {
+                results[name] = PluginProbe.result(named: name, in: reply)
+            }
+            return results
         }
-        do {
-            try process.run()
-            let request = try JSONSerialization.data(withJSONObject: ["op": "mcp_status"])
-            input.fileHandleForWriting.write(request + Data([0x0A]))
-            _ = semaphore.wait(timeout: .now() + 12)
-            let close = try JSONSerialization.data(withJSONObject: ["op": "close"])
-            input.fileHandleForWriting.write(close + Data([0x0A]))
-        } catch {
-            output.fileHandleForReading.readabilityHandler = nil
-            if process.isRunning { process.terminate() }
-            return nil
+    }
+
+    static func configurationURLs(engine: MCPEngine, environment: [String: String]) -> [URL] {
+        let paths = EnginePaths(environment: environment)
+        let staging = NativeStagingIsolation.isEnabled(environment)
+        let urls: [URL]
+        switch engine {
+        case .claude:
+            urls = [staging ? paths.claudeAccountFile : paths.userHome.appendingPathComponent(".claude.json")]
+        case .codex:
+            let isolated = paths.codexHome.appendingPathComponent("config.toml")
+            // Same precedence as codex-sidecar: once seeded, the isolated config is authoritative.
+            if staging || (try? String(contentsOf: isolated, encoding: .utf8)).map({
+                $0.contains(PluginServerConfiguration.managedMarker) || !PluginServerConfiguration.parseTOML($0).isEmpty
+            }) == true {
+                urls = [isolated]
+            } else {
+                // ClaudeSidecar.prepareEngineHomes pins the source to the original CODEX_HOME.
+                let source = environment["TATWO2_CODEX_SOURCE_HOME"] ?? environment["CODEX_HOME"]
+                let root = source.map { URL(fileURLWithPath: $0) } ?? paths.userHome.appendingPathComponent(".codex")
+                urls = [root.appendingPathComponent("config.toml")]
+            }
+        case .grok:
+            let root = environment["TATWO2_GROK_HOME"].map { URL(fileURLWithPath: $0) } ?? paths.grokHome
+            urls = [root.appendingPathComponent(".grok/config.toml")]
         }
-        output.fileHandleForReading.readabilityHandler = nil
-        if process.isRunning { process.terminate() }
-        lock.lock()
-        let final = result
-        lock.unlock()
-        return final
+        return urls.filter { !staging || NativeStagingIsolation.allowsRead($0, within: paths.enginesRoot) }
+    }
+
+    static func configuredServers(engine: MCPEngine, environment: [String: String]) -> [String: PluginServerConfiguration] {
+        if engine == .claude {
+            return claudeConfiguredServers(environment: environment).compactMapValues { ($0 as? [String: Any]).map(PluginServerConfiguration.init) }
+        }
+        var servers: [String: PluginServerConfiguration] = [:]
+        for file in configurationURLs(engine: engine, environment: environment) {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            servers.merge(PluginServerConfiguration.parseTOML(text)) { first, _ in first }
+        }
+        return servers
     }
 
     private static func claudeConfiguredServers(environment: [String: String]) -> [String: Any] {
-        let manager = FileManager.default
-        let staging = NativeStagingIsolation.isEnabled(environment)
-        let paths = EnginePaths(environment: environment)
-        let claude = staging ? paths.claudeAccountFile
-            : manager.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
-        if staging && !NativeStagingIsolation.allowsRead(claude, within: paths.enginesRoot) { return [:] }
+        guard let claude = configurationURLs(engine: .claude, environment: environment).first else { return [:] }
         if let data = try? Data(contentsOf: claude),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let servers = object["mcpServers"] as? [String: Any]
@@ -394,22 +419,7 @@ enum PluginsSource {
     }
 
     private static func codexServerNames(environment: [String: String]) -> [String] {
-        var names = Set<String>()
-        let manager = FileManager.default
-        let staging = NativeStagingIsolation.isEnabled(environment)
-        let paths = EnginePaths(environment: environment)
-        let codexPaths = staging ? [paths.codexHome.appendingPathComponent("config.toml")] : [
-            manager.homeDirectoryForCurrentUser.appendingPathComponent(".codex/config.toml"),
-            URL(fileURLWithPath: "\(NSHomeDirectory())/Library/Application Support/tatwo2/CliHome/config.toml"),
-        ]
-        for path in codexPaths where manager.fileExists(atPath: path.path) {
-            if staging && !NativeStagingIsolation.allowsRead(path, within: paths.enginesRoot) { continue }
-            guard let text = try? String(contentsOf: path, encoding: .utf8) else { continue }
-            for match in text.matches(of: #/^\s*\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*$/#.anchorsMatchLineEndings()) {
-                names.insert(String(match.1))
-            }
-        }
-        return names.sorted()
+        Array(configuredServers(engine: .codex, environment: environment).keys).sorted()
     }
 
     private static func skillMetadata(at url: URL) -> (name: String, description: String) {

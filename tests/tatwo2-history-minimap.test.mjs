@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -39,7 +40,7 @@ test('native display builder, preview projection and SwiftUI surface', {
   // Previously measured ~372 MiB for this isolated fixture; remain serial.
   // This does not admit full App builds under warning/unknown pressure.
   assert.ok(pressure === '1' || pressure === '2', `defer fixture at pressure=${pressure}`);
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('tatwo2-history-minimap-');
   mkdirSync(output, { recursive: true });
   const scratch = mkdtempSync(path.join(output, 'minimap-regression.'));
   const lockScript = path.join(repo, 'scripts/tatwo-build-lock.sh');

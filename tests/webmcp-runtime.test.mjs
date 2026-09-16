@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -47,7 +48,7 @@ test('runtime replaces stub, shared MCP wiring and caller-owned policy remain fe
 test('swiftc production runtime: snapshots, limits, effect/policy matrices, consent, stale, audit, cancellation', {
   skip: process.platform !== 'darwin', timeout: 120000,
 }, () => {
-  const dir = path.join(root, '.build/w48/runtime-fixture');
+  const dir = testScratch('webmcp-runtime-');
   fs.mkdirSync(dir, { recursive: true });
   const security = read(app + 'Browser/EmbeddedBrowserSecurity.swift');
   const sources = ['Chat/TatwoCodexSandboxMode.swift', 'Chat/TatwoPermissionPreset.swift',
@@ -161,7 +162,7 @@ ${section(read(app + 'Facade/BrowserAgentBridge.swift'), '    private static fun
 });
 
 test('real stdio catalog + UNIX socket forwards exact WebMCP methods and rejects authority overrides', { timeout: 15000 }, async t => {
-  const dir = path.join(root, '.build/w48');
+  const dir = testScratch('webmcp-runtime-');
   fs.mkdirSync(dir, { recursive: true });
   // Keep sun_path short even when the fixture runs in a long worktree path.
   const socketPath = path.join(dir, `m${process.pid}.sock`);

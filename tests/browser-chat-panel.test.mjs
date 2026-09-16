@@ -322,7 +322,11 @@ test('W53b production action counter balances nested and throwing methods and ma
 }, () => {
   const bridge = read('App/Sources/Tatwo2/Facade/BrowserAgentBridge.swift');
   const counter = bridge.slice(bridge.indexOf('    private var agentActionCount'), bridge.indexOf('    private var activeRequest:'));
-  const dispatch = bridge.slice(bridge.indexOf('    private func onMain<T>'), bridge.lastIndexOf('\n}'));
+  // The class body ends at onMain; later `extension BrowserAgentBridge` blocks (W59 custody)
+  // are outside the counter's scope, so slice to the class's closing brace, not the file's.
+  const onMainStart = bridge.indexOf('    private func onMain<T>');
+  const classEnd = bridge.indexOf('\n}\n', onMainStart);
+  const dispatch = bridge.slice(onMainStart, classEnd);
   const dir = mkdtempSync(join(tmpdir(), 'w53b-counter-'));
   const source = join(dir, 'Checks.swift'), binary = join(dir, 'checks');
   writeFileSync(source, `import Foundation

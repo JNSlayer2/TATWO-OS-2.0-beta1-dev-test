@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, writeFileSync, mkdirSync} from 'node:fs';
@@ -133,7 +134,7 @@ test('W57c actual submit/Enter capture is trusted, memory-only, deduplicated and
 test('W57c real Swift coordinator/vault/planners: Island allow/deny, save/update/none, settings and stale replies', {
   timeout: 150000, skip: process.platform !== 'darwin',
 }, () => {
-  const dir = join(root, '.build/w57c/fill-fixture');
+  const dir = testScratch('browser-password-fill-');
   mkdirSync(dir, {recursive: true});
   const profile = read(app + 'EmbeddedBrowserProfile.swift');
   const metadata = profile.slice(profile.indexOf('struct EmbeddedBrowserPasswordFormMetadata:'),

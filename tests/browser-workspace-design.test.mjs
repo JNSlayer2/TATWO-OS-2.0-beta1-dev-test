@@ -1,3 +1,5 @@
+import { writeBrowserVisualRenderer } from './helpers/browser-visual-render.mjs';
+import { writeBrowserVisualTokens, expandBrowserMetrics } from './helpers/browser-visual-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -8,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const read = file => readFileSync(join(root, file), 'utf8');
-const design = read('App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift');
+const design = expandBrowserMetrics(read('App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift'));
 const registrySources = ['Browser/TatwoBrowserLaneCore.swift', 'Browser/BrowserTabRegistry.swift', 'Browser/BrowserDailyNavigationPolicy.swift'].map(p => join(root, 'App/Sources/Tatwo2', p));
 const constants = read('App/Sources/Tatwo2/Chat/ChatPageConstants.swift');
 const panels = read('App/Sources/Tatwo2/Chat/ChatPage+Panels.swift');
@@ -59,12 +61,16 @@ test('browser rejoins the shared chat sidebar shell and footer with no private s
   for (const token of ['WorkspaceSidebarShell', 'workspaceModeSection', 'workspaceSidebarFooter', 'BrowserWorkSpaceSidebarList(store: browserWorkSpaceStore)']) assert.ok(browser.includes(token));
   assert.match(browser, /workspaceModeSection\s*\.padding\(\.top, WorkspaceSidebarMetrics.headerTopInset\)/);
   assert.match(browser, /overlay\(alignment: \.topLeading\)/);
-  assert.match(browser, /frame\(height: WorkspaceSidebarMetrics.headerTopInset\)/);
+  // 這一列現在是「膠囊＋側欄收合＋側欄固定」三件（W66-fix）。膠囊改用扣掉兩顆鈕的
+  // 衍生 token，整列總寬仍受 spaceSwitcherWidth 約束，才不會撐出紅綠燈帶。
+  assert.match(sidebar, /frame\(width: WorkspaceSidebarMetrics.spaceSwitcherMenuWidth, height: WorkspaceSidebarMetrics.spaceSwitcherHeight\)/);
+  assert.match(read('App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift'),
+    /spaceSwitcherMenuWidth: CGFloat =\s*\n?\s*spaceSwitcherWidth - 2 \* \(sidebarControlSize \+ sidebarControlGap\)/);
   assert.match(browser, /frame\(maxHeight: \.infinity, alignment: \.topLeading\)/);
   assert.match(browser, /ForEach\(browserWorkSpaceStore.spaces\)/);
   assert.match(browser, /Button\("新增空間", action: browserWorkSpaceStore.addSpace\)/);
   assert.match(browser, /Button\("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport\)/);
-  assert.match(browser, /12\.5, weight: \.bold/);
+  assert.match(browser, /WorkspaceSidebarMetrics.spaceSwitcherFontSize, weight: \.bold/);
   assert.doesNotMatch(design, /sidebarHeader|sidebarFooter|TatwoOSMark|WorkspaceSidebarShell|WorkspaceSidebarModePicker/);
   assert.match(host, /let workspaceOwnsSidebar = model\.mode == \.bot\n/);
   assert.match(host, /isChatProjectRailPinned \|\| model.mode == \.browser/);
@@ -88,7 +94,8 @@ test('v6 sidebar has five ordered sections, white selection and no chat or searc
   assert.doesNotMatch(store, /folderNames|Dia 對照稿|Sign in successful|Device Activation|platform\.claude\.com/);
   assert.match(store, /registry\.spaces\.map/);
   assert.match(design, /Image\(systemName: "folder.fill"\)\.foregroundStyle\(folderFill\)/);
-  assert.match(design, /Text\(folder.name\)\.fontWeight\(\.bold\)\s*chevron/);
+  assert.match(design, /BrowserBookmarkFolderRow\(store: store, folder: folder\)/);
+  assert.match(read('App/Sources/Tatwo2/Browser/BrowserBookmarkRows.swift'), /Text\(folder.name\).fontWeight\(\.bold\)/);
   assert.match(design, /background\(selected \? fieldFill : \.clear, in: RoundedRectangle\(cornerRadius: 9\)\)/);
   assert.match(design, /shadowColor.opacity\(selected \? 0.14 : 0\)/);
   assert.match(design, /store\.select\(tab.id\)/);
@@ -103,20 +110,22 @@ test('v6 sidebar has five ordered sections, white selection and no chat or searc
   assert.doesNotMatch(design, /sidebar.left/);
 });
 
-test('W38 split downloads and traffic-light aligned space menu', () => {
-  const downloads = section(design, 'private var downloadsPopover:', '// MARK: - Sidebar sections:');
-  for (const token of ['TextField("Search", text: $downloadQuery)', 'line.3.horizontal.decrease', '["今天", "昨天", "Earlier"]', 'downloadArtwork', 'downloadPreview', '選一個檔案預覽', 'width: 660, height: 520', 'LiquidGlassPanelCard']) assert.ok(downloads.includes(token));
-  const menu = section(downloads, '.contextMenu {', 'private var downloadPreview:');
-  assert.match(menu, /Button\("在 Finder 顯示"/);
-  assert.match(menu, /Button\("快速預覽"/);
+test('W54 compact downloads retain search, grouping, selection, clear and native file actions', () => {
+  const downloads = section(read('App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift'), 'private var downloadsPopover:', '// MARK: - Sidebar sections:');
+  for (const token of ['TextField("Search", text: $downloadQuery)', 'line.3.horizontal.decrease', '["今天", "昨天", "Earlier"]',
+    'BrowserSidebarMetrics.downloadsWidth', 'BrowserSidebarMetrics.downloadsCornerRadius',
+    'BrowserSidebarMetrics.downloadProgressHeight', 'LiquidGlassTokens.browserFieldFill']) assert.ok(downloads.includes(token), token);
+  assert.match(downloads, /Button\("在 Finder 顯示"/);
+  assert.match(downloads, /Button\("快速預覽"/);
   assert.match(downloads, /disabled\(!download.done\)/);
   assert.match(downloads, /selected \|\| hoveredDownloadID == download.id/);
-  assert.match(downloads, /RoundedRectangle\(cornerRadius: 5\).fill\(download.isImage \? folderFill : \.white\)/);
+  assert.match(downloads, /if !download.done/);
+  assert.doesNotMatch(downloads, /downloadPreview|width: 660/);
   assert.doesNotMatch(design, /尚無分頁/);
-  assert.match(design, /store.toggleFolder\(folder.id\)/);
+  assert.match(read('App/Sources/Tatwo2/Browser/BrowserBookmarkRows.swift'), /store.toggleFolder\(folder.id\)/);
   const browser = section(read('App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift'), 'var browserSidebar:', 'var chatSidebar:');
   assert.match(browser, /overlay\(alignment: \.topLeading\)/);
-  assert.match(browser, /padding\(\.leading, 70\)/);
+  assert.match(browser, /padding\(\.leading, WindowChromeMetrics.appControlLeadingX\)/);
   assert.ok(browser.indexOf('Text(browserWorkSpaceStore.selectedSpace.name)') < browser.indexOf('Image(systemName: "chevron.down")'));
 });
 
@@ -176,6 +185,7 @@ function run(command, args, options = {}) {
   assert.equal(result.status, 0, `${command}: ${result.error ?? ''}\n${result.stdout}\n${result.stderr}`);
   return result.stdout;
 }
+const windowChrome = section(read('App/Sources/Tatwo2/Shell/WindowChrome.swift'), 'enum WindowChromeMetrics {', 'extension TatwoWorkOSWindow');
 const modeStubs = `
 enum TatwoChatCommandMode { case chat, cli }
 @MainActor final class SpaceWorkspaceController {
@@ -398,9 +408,11 @@ struct LiquidGlassPanelCard<Content: View>: View {
     init(cornerRadius: CGFloat, @ViewBuilder content: () -> Content) { self.content = content() }
     var body: some View { content }
 }
+${windowChrome}
 struct ChatPage: View {
-    @StateObject var browserWorkSpaceStore = BrowserWorkSpaceStore()
+    @ObservedObject var browserWorkSpaceStore: BrowserWorkSpaceStore
     @StateObject var model = ChatPageModel()
+    init(store: BrowserWorkSpaceStore) { browserWorkSpaceStore = store }
     var workspaceSidebarFooter: some View { Text("Footer signature") }
     var body: some View { browserSidebar }
 ${browserSidebar}
@@ -427,7 +439,9 @@ extension View {
 `);
   const toolbar = join(dir, 'Toolbar.swift');
   writeFileSync(toolbar, 'import SwiftUI\n' + read('App/Sources/Tatwo2/Browser/EmbeddedBrowserToolbar.swift').split('struct EmbeddedBrowserToolbar: View')[1].replace(/^/, 'struct EmbeddedBrowserToolbar: View'));
-  run('swiftc', ['-typecheck', '-num-threads', '2', ...registrySources, stubs, toolbar,
+  const viewSources = ['-num-threads', '2', writeBrowserVisualTokens(dir, { includeOmnibox: true }), ...registrySources, stubs, toolbar,
+    ...['BrowserOmniboxMetrics.swift', 'BrowserOmniboxInteraction.swift', 'BrowserOmniboxGlass.swift']
+      .map(name => join(root, 'App/Sources/Tatwo2/Browser', name)),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserNavigationProgress.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserDailyNavigationControls.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/Import/BrowserHistoryStore.swift'),
@@ -439,7 +453,18 @@ extension View {
     join(root, 'App/Sources/Tatwo2/Browser/BrowserGeneralSettings.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserShortcuts.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserTabRow.swift'),
-    join(root, 'App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift')]);
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserBookmarkRows.swift'),
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserSidebarControls.swift'),
+    join(root, 'App/Sources/Tatwo2/Shell/WorkspaceSpaceControls.swift'),
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift')];
+  run('swiftc', ['-typecheck', ...viewSources]);
+  if (process.env.W54_BROWSER_UI_EVIDENCE_DIR) {
+    const binary = join(dir, 'visual-renderer');
+    run('swiftc', ['-parse-as-library', ...viewSources,
+      join(root, 'App/Sources/Tatwo2/Browser/BrowserSettingsComponents.swift'),
+      writeBrowserVisualRenderer(dir), '-o', binary]);
+    console.log(run(binary, [process.env.W54_BROWSER_UI_EVIDENCE_DIR]));
+  }
 });
 
 
@@ -463,15 +488,15 @@ test('W39 Browser-only shortcut, bookmark drops, blank-area menu and add-space c
   assert.match(design, /TextField\("資料夾名稱"/);
   const controls = section(design, 'private var spaceControls:', 'private var downloadsPopover:');
   assert.match(controls, /Button\(action: store.addSpace\)/);
-  assert.match(controls, /Image\(systemName: "plus"\).font\(\.system\(size: 12\)\).foregroundStyle\(\.secondary\)/);
+  assert.match(controls, /WorkspaceSpaceControlMetrics.plusFontSize/);
   const browser = section(read('App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift'), 'var browserSidebar:', 'var chatSidebar:');
-  assert.match(browser, /frame\(maxHeight: \.infinity, alignment: \.center\)/);
+  assert.doesNotMatch(browser, /frame\(maxHeight: \.infinity, alignment: \.center\)/);
 });
 
 test('space name next to the traffic lights is 12.5pt bold, name before chevron', () => {
   const sidebar = readFileSync(new URL('../App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift', import.meta.url), 'utf8');
   const menu = sidebar.slice(sidebar.indexOf('browserWorkSpaceStore.selectedSpace.name'), sidebar.indexOf('browserWorkSpaceStore.selectedSpace.name') + 400);
-  assert.match(menu, /\.font\(\.system\(size: 12\.5, weight: \.bold\)\)/, '空間名稱 12.5 粗體');
+  assert.match(menu, /\.font\(\.system\(size: WorkspaceSidebarMetrics.spaceSwitcherFontSize, weight: \.bold\)\)/, '空間名稱 12.5 粗體');
   assert.ok(menu.indexOf('selectedSpace.name') < menu.indexOf('chevron.down'), '名稱在 chevron 前');
 });
 

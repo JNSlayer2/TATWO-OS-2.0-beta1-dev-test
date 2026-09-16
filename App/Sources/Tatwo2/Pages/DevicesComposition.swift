@@ -318,12 +318,9 @@ enum DevicesExportSyncFixture {
     }
 
     static func localInventoryForDisplay() -> TatwoDeviceHostInventoryV1 {
-        DevicesPagePresentation.mergedHostInventory(
-            collected: TatwoDeviceHostInventoryCollector.collectOnce(
-                connectionStatus: .local
-            ),
-            projected: localInventory()
-        ) ?? localInventory()
+        if isActive() { return localInventory() }
+        return TatwoDeviceHostInventoryCollector.collectOnce(connectionStatus: .local)
+            ?? TatwoDeviceHostInventoryV1()
     }
 }
 
@@ -645,11 +642,11 @@ enum DevicesPagePresentation {
         ramLabel: String?
     ) -> String {
         let parts = [model, chip, ramLabel]
-            .compactMap { value -> String? in
+            .map { value -> String in
                 let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                return trimmed.isEmpty ? nil : trimmed
+                return trimmed.isEmpty ? "—" : trimmed
             }
-        return parts.isEmpty ? "型號未回報" : parts.joined(separator: " · ")
+        return parts.allSatisfy { $0 == "—" } ? "—" : parts.joined(separator: " · ")
     }
 
     static func formatLastCheck(_ date: Date, now: Date) -> String {
@@ -703,23 +700,10 @@ enum DevicesPagePresentation {
         collected: TatwoDeviceHostInventoryV1?,
         projected: TatwoDeviceHostInventoryV1?
     ) -> TatwoDeviceHostInventoryV1? {
-        if collected == nil && projected == nil { return nil }
-        let inventory = TatwoDeviceHostInventoryV1(
-            hardwareModel: firstNonEmpty(
-                collected?.hardwareModel,
-                projected?.hardwareModel
-            ),
-            chipName: firstNonEmpty(collected?.chipName, projected?.chipName),
-            ramTotalBytes: collected?.ramTotalBytes ?? projected?.ramTotalBytes,
-            cpuPercent: collected?.cpuPercent ?? projected?.cpuPercent,
-            memoryPressureLevel: collected?.memoryPressureLevel
-                ?? projected?.memoryPressureLevel,
-            connectionStatus: collected?.connectionStatus == .local
-                ? .local
-                : (projected?.connectionStatus ?? collected?.connectionStatus ?? .local),
-            activeLoopCount: collected?.activeLoopCount ?? projected?.activeLoopCount
-        )
-        return inventory.isEmpty ? nil : inventory
+        // A fresh observation is authoritative, including missing fields. Never fill a
+        // failed live sensor from stale projections or snapshot-only fixture values.
+        if let collected { return collected.isEmpty ? nil : collected }
+        return projected
     }
 
     static func identityCards(

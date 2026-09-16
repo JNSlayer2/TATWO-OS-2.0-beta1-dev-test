@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, writeFileSync, mkdirSync} from 'node:fs';
@@ -114,7 +115,7 @@ test('W57d Print/PDF fallback remains human, document-bound and signature-checke
 test('W57d production UA pure function and file dialog callback fixture', {
   skip: process.platform !== 'darwin', timeout: 90000,
 }, () => {
-  const dir = join(root, '.build/w57d/web-fixture');
+  const dir = testScratch('browser-web-features-');
   mkdirSync(dir, {recursive: true});
   let source = read('tests/fixtures/browser-web-features.mm.in');
   for (const [name, code] of Object.entries({
@@ -137,7 +138,7 @@ test('W57d production UA pure function and file dialog callback fixture', {
 test('W57d actual AppKit coordinator: filters, fullscreen owner/focus/restore and silent PDF revocation', {
   skip: process.platform !== 'darwin', timeout: 90000,
 }, () => {
-  const dir = join(root, '.build/w57d/coordinator-fixture');
+  const dir = testScratch('browser-web-features-');
   mkdirSync(dir, {recursive: true});
   const source = read('tests/fixtures/browser-web-features-checks.swift')
     .replace('// INSERT coordinator', swift.replace('import TatwoCEFBridge\n', ''));

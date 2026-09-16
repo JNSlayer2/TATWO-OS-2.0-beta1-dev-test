@@ -1,5 +1,6 @@
-// 來源：TatwoDomainContractsV1.swift:20,917；TatwoDeviceHostInventoryCollector.swift:6；TatwoAppPressureService.swift:531；TatwoSyncModulesRegistry.swift:87,146；DeviceSyncOutbox.swift:117,2703,2739；DeviceLocalActionOutbox.swift:11；TatwoActiveOriginLeaseProjector.swift:5；只保留設備畫面欄位，全部為本機假資料
+// 來源：TatwoDomainContractsV1.swift:20,917；TatwoDeviceHostInventoryCollector.swift:6；TatwoAppPressureService.swift:531；TatwoSyncModulesRegistry.swift:87,146；DeviceSyncOutbox.swift:117,2703,2739；DeviceLocalActionOutbox.swift:11；TatwoActiveOriginLeaseProjector.swift:5；只保留設備畫面欄位，其餘舊 plumbing 為 fixture；host inventory 使用真實 OS 採集
 import Foundation
+import Darwin
 
 
 // MARK: - Domain device snapshot values
@@ -58,13 +59,122 @@ struct TatwoDeviceHostInventoryV1: Codable, Sendable, Equatable {
     var isEmpty: Bool { hardwareModel == nil && chipName == nil && ramTotalBytes == nil && cpuPercent == nil && memoryPressureLevel == nil && connectionStatus == nil && activeLoopCount == nil }
     static func activeLoopCount(workers: [TatwoPressureWorkerV1], activeLoopID: String?) -> Int { activeLoopID == nil ? workers.count : max(1, workers.count) }
 }
-enum TatwoDeviceHostInventoryCollector { static func collectOnce(activeLoopCount: Int? = nil, connectionStatus: TatwoDeviceConnectionStatusV1 = .local) -> TatwoDeviceHostInventoryV1? { .init(hardwareModel: "Mac16,10", chipName: "Apple M4", ramTotalBytes: 24 * 1_024 * 1_024 * 1_024, cpuPercent: 12, memoryPressureLevel: .normal, connectionStatus: connectionStatus, activeLoopCount: activeLoopCount ?? 1) } }
+// HOST-INVENTORY-COLLECTOR-BEGIN
+enum TatwoDeviceHostInventoryCollector {
+    struct Sources {
+        var string: (String) -> String?
+        var memorySize: () -> UInt64?
+        var pressure: () -> Int32?
+        var cpu: () -> Double?
+
+        static var live: Self {
+            .init(string: sysctlString,
+                  memorySize: { sysctlValue("hw.memsize", initial: UInt64(0)) },
+                  pressure: { sysctlValue("kern.memorystatus_vm_pressure_level", initial: Int32(0)) },
+                  cpu: { cpuSampler.sample() })
+        }
+    }
+
+    // Shared only for the interval CPU counter; the lock covers the sample and previous tick.
+    // First observation (or a failed sample) is nil, never a since-boot average or a guess.
+    private static let cpuSampler = CPUSampler()
+
+    static func collectOnce(activeLoopCount: Int? = nil,
+                            connectionStatus: TatwoDeviceConnectionStatusV1 = .local) -> TatwoDeviceHostInventoryV1? {
+        collectOnce(activeLoopCount: activeLoopCount, connectionStatus: connectionStatus, sources: .live)
+    }
+
+    static func collectOnce(activeLoopCount: Int? = nil,
+                            connectionStatus: TatwoDeviceConnectionStatusV1 = .local,
+                            sources: Sources) -> TatwoDeviceHostInventoryV1? {
+        func text(_ name: String) -> String? {
+            guard let value = sources.string(name)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else { return nil }
+            return value
+        }
+        let ram = sources.memorySize()
+        let cpu = sources.cpu()
+        return .init(hardwareModel: text("hw.model"), chipName: text("machdep.cpu.brand_string"),
+                     ramTotalBytes: ram.flatMap { $0 > 0 ? $0 : nil },
+                     cpuPercent: cpu.flatMap { $0.isFinite && (0...100).contains($0) ? $0 : nil },
+                     memoryPressureLevel: sources.pressure().flatMap(memoryPressureLevel),
+                     connectionStatus: connectionStatus, activeLoopCount: activeLoopCount)
+    }
+
+    static func memoryPressureLevel(_ raw: Int32) -> TatwoHostMemoryPressureLevelV1? {
+        // XNU exports dispatch levels here, NOT its internal normal=0/warning=1 enum.
+        switch raw {
+        case Int32(DispatchSource.MemoryPressureEvent.normal.rawValue): return .normal
+        case Int32(DispatchSource.MemoryPressureEvent.warning.rawValue): return .warn
+        case Int32(DispatchSource.MemoryPressureEvent.critical.rawValue): return .critical
+        default: return nil
+        }
+    }
+
+    private static func sysctlString(_ name: String) -> String? {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 1, size <= 4096 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: size)
+        guard sysctlbyname(name, &bytes, &size, nil, 0) == 0, size > 1, size <= bytes.count,
+              bytes[size - 1] == 0 else { return nil }
+        return String(bytes: bytes.prefix(size - 1), encoding: .utf8)
+    }
+
+    private static func sysctlValue<T: FixedWidthInteger>(_ name: String, initial: T) -> T? {
+        var value = initial, size = MemoryLayout<T>.size
+        let result = withUnsafeMutableBytes(of: &value) {
+            sysctlbyname(name, $0.baseAddress, &size, nil, 0)
+        }
+        guard result == 0, size == MemoryLayout<T>.size else { return nil }
+        return value
+    }
+
+    final class CPUSampler: @unchecked Sendable {
+        struct Ticks {
+            let user: UInt32, system: UInt32, idle: UInt32, nice: UInt32
+        }
+        private let lock = NSLock()
+        private var previous: Ticks?
+
+        func sample(read: () -> Ticks? = CPUSampler.readTicks) -> Double? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let current = read() else { previous = nil; return nil }
+            defer { previous = current }
+            guard let previous else { return nil }
+            let idle = UInt64(current.idle &- previous.idle)
+            let busy = UInt64(current.user &- previous.user) + UInt64(current.system &- previous.system)
+                + UInt64(current.nice &- previous.nice)
+            let total = idle + busy
+            guard total > 0 else { return nil }
+            return Double(busy) / Double(total) * 100
+        }
+
+        static func readTicks() -> Ticks? {
+            var info = host_cpu_load_info_data_t()
+            let expected = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
+            var count = expected
+            let host = mach_host_self()
+            defer { mach_port_deallocate(mach_task_self_, host) }
+            let result = withUnsafeMutablePointer(to: &info) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(expected)) {
+                    host_statistics(host, HOST_CPU_LOAD_INFO, $0, &count)
+                }
+            }
+            guard result == KERN_SUCCESS, count == expected else { return nil }
+            return .init(user: info.cpu_ticks.0, system: info.cpu_ticks.1,
+                         idle: info.cpu_ticks.2, nice: info.cpu_ticks.3)
+        }
+    }
+}
+// HOST-INVENTORY-COLLECTOR-END
+
 enum TatwoPressureClassificationV1: String, Codable, Sendable, Equatable { case green, yellow, red, unknown }
 struct TatwoPressureUIProjectionV1: Codable, Sendable, Equatable {
     let schema: String; let deviceID: String; let displayClassification: TatwoPressureClassificationV1; let lastObservedAt: Date?; let activeLoopID: String?; let workerIDs: [String]; let stopReason: String?; let canRequestLightLoop: Bool; let canRequestHeavyLoop: Bool; let hostInventory: TatwoDeviceHostInventoryV1?
     init(schema: String = "TatwoPressureUIProjectionV1", deviceID: String, displayClassification: TatwoPressureClassificationV1, lastObservedAt: Date?, activeLoopID: String?, workerIDs: [String], stopReason: String?, canRequestLightLoop: Bool, canRequestHeavyLoop: Bool, hostInventory: TatwoDeviceHostInventoryV1? = nil) { self.schema=schema; self.deviceID=deviceID; self.displayClassification=displayClassification; self.lastObservedAt=lastObservedAt; self.activeLoopID=activeLoopID; self.workerIDs=workerIDs; self.stopReason=stopReason; self.canRequestLightLoop=canRequestLightLoop; self.canRequestHeavyLoop=canRequestHeavyLoop; self.hostInventory=hostInventory }
 }
-struct TatwoPressureReadback { let projection = TatwoPressureUIProjectionV1(deviceID: "fixture-local", displayClassification: .green, lastObservedAt: Date(), activeLoopID: "fixture-loop", workerIDs: [], stopReason: nil, canRequestLightLoop: true, canRequestHeavyLoop: true, hostInventory: DevicesExportSyncFixture.localInventory()); let runtimeRunning = true; let registryGeneration: UInt64? = 1 }
+struct TatwoPressureReadback { let projection = TatwoPressureUIProjectionV1(deviceID: "fixture-local", displayClassification: .green, lastObservedAt: Date(), activeLoopID: "fixture-loop", workerIDs: [], stopReason: nil, canRequestLightLoop: true, canRequestHeavyLoop: true, hostInventory: nil); let runtimeRunning = true; let registryGeneration: UInt64? = 1 }
 enum TatwoAppPressureAdmissionBridgeV1 { static func currentReadback() async -> TatwoPressureReadback { .init() } }
 struct TatwoRemoteDeviceExecutionPolicyV1: Equatable, Sendable { let autoBorrowEnabled: Bool }
 struct TatwoRemoteBorrowAuthorizationStore: Sendable {

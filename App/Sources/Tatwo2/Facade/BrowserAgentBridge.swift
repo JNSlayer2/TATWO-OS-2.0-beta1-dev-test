@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import WebKit
 import TatwoCEFBridge
@@ -15,6 +16,10 @@ final class BrowserAgentBridge: @unchecked Sendable {
     private var listenerFD: Int32 = -1
     private var listenerLeaseFD: Int32 = -1
     private var listenerStarting = false
+    var isListening: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return listenerFD >= 0
+    }
     private var requestEpoch: UInt64 = 0
     private var agentActionCount = 0
     private var lastAgentAction: TimeInterval?
@@ -48,6 +53,9 @@ final class BrowserAgentBridge: @unchecked Sendable {
     private var screenshotGeometry: BrowserNativeInput.ScreenshotGeometry?
     private static let pageToolMethods: Set<String> = ["browser_tabs", "page_tools_list", "page_tool_call", "browser_login"]
     @MainActor private var aiLoginViews: [String: WeakLoginView] = [:]
+    @MainActor private var passwordChangeTask: Task<Void, Never>?
+    @MainActor private var passwordChangeQueue: [(UUID, Bool)] = []
+    @MainActor private var custodyOwnsBrowser = false
     private final class WeakLoginView {
         weak var view: TatwoCEFBrowserView?
         init(_ view: TatwoCEFBrowserView) { self.view = view }
@@ -1674,6 +1682,7 @@ final class BrowserAgentBridge: @unchecked Sendable {
 
     @MainActor
     private func validateRequestOnMain(_ request: BrowserAgentRequest) throws {
+        guard !custodyOwnsBrowser else { throw AIVaultLoginError("browser_custody_confirmation_in_progress") }
         let scope = request.aiVaultLogin ? model?.aiVaultRequestScope(request.caller)
             : request.pageTools ? model?.webMCPRequestScope(request.caller) : model?.browserAgentRequestScope(request.caller)
         try request.validate(currentScope: scope,
@@ -2010,5 +2019,203 @@ final class BrowserAgentBridge: @unchecked Sendable {
     private func onMain<T>(_ body: @escaping @MainActor () -> T) -> T {
         if Thread.isMainThread { return MainActor.assumeIsolated(body) }
         return DispatchQueue.main.sync { MainActor.assumeIsolated(body) }
+    }
+}
+
+// W59: Settings-owned custody flow. No new agent tool or credential-returning socket method.
+extension BrowserAgentBridge {
+    @MainActor
+    private func custodyCaller() -> AICaller? {
+        guard let model, model.isLive, model.selectedRemote == nil,
+              let id = model.selectedThreadID, let thread = model.live?.threadRecord(id),
+              !thread.isArchived, thread.roomReadOnly != true, thread.deviceID == nil,
+              let engine = thread.engine, !engine.isEmpty else { return nil }
+        let preset = thread.botPermissionPreset == .configFile ? model.permissionPreset
+            : (thread.botPermissionPreset ?? model.permissionPreset)
+        return AICaller(engine: engine, botID: model.botIDForBridge(threadID: id), threadID: id.uuidString, preset: preset)
+    }
+
+    @MainActor
+    func changeAIPassword(_ id: UUID, automaticallyAssisted: Bool = false) {
+        guard !passwordChangeQueue.contains(where: { $0.0 == id }) else { return }
+        passwordChangeQueue.append((id, automaticallyAssisted))
+        guard passwordChangeTask == nil else { return }
+        passwordChangeTask = Task { @MainActor in
+            defer { passwordChangeTask = nil; custodyOwnsBrowser = false }
+            while !passwordChangeQueue.isEmpty && !Task.isCancelled {
+                let (id, automatic) = passwordChangeQueue.removeFirst()
+                await performPasswordChange(id, automatic: automatic)
+            }
+        }
+    }
+
+    @MainActor
+    private func performPasswordChange(_ id: UUID, automatic: Bool) async {
+        let vault = BrowserAIVault.shared
+        guard let model, let caller = custodyCaller(),
+              let account = vault.credentials.first(where: { $0.id == id && $0.disabledAt == nil }),
+              account.allowedCallers.allows(caller), let threadID = caller.threadID,
+              let destination = AIPasswordChange.destination(origin: account.origin) else {
+            try? vault.recordPasswordChangeFailure(id)
+            IslandNotice.shared.info(title: "換密碼未完成", detail: "請選擇此帳號允許的本機可寫對話，再從設定重試。")
+            return
+        }
+        // Revoke and drain prior agent inputs before keeping a proposed password in a page.
+        custodyOwnsBrowser = true
+        revokeRequests()
+        defer { custodyOwnsBrowser = false }
+        let host = URL(string: account.origin)?.host ?? ""
+        let owner: BrowserTabOwner = caller.botID.map { .bot(botID: $0) } ?? .chatSession(sessionID: threadID)
+        var revision = vault.revision
+        var tabID: UUID?
+        var view: TatwoCEFBrowserView?
+        var formGeneration: UInt64 = 0
+        let flow = AIPasswordChange()
+        do { try vault.beginPasswordChange(id); revision = vault.revision }
+        catch {
+            try? vault.recordPasswordChangeFailure(id)
+            IslandNotice.shared.info(title: "請先處理待確認的新密碼",
+                detail: "帳號選單可顯示、同步或放棄候選；未確認前不會覆寫它。")
+            return
+        }
+        let revocation = vault.$credentials.sink { [weak self] entries in
+            guard let latest = entries.first(where: { $0.id == id }),
+                  latest.disabledAt == nil, latest.allowedCallers == account.allowedCallers,
+                  latest.origin == account.origin, latest.username == account.username else {
+                self?.passwordChangeQueue = []
+                self?.passwordChangeTask?.cancel()
+                return
+            }
+        }
+        defer { revocation.cancel() }
+        let autoPermission = BreachDetector.shared.$automaticallyAssistAI.sink { [weak self] enabled in
+            if automatic && !enabled {
+                self?.passwordChangeQueue = []
+                self?.passwordChangeTask?.cancel()
+            }
+        }
+        defer { autoPermission.cancel() }
+        func current() -> Bool {
+            guard self.custodyCaller() == caller, !Task.isCancelled, vault.revision == revision,
+                  !automatic || BreachDetector.shared.automaticallyAssistAI,
+                  vault.matches(origin: account.origin, caller: caller).contains(where: { $0.id == id }) else { return false }
+            if let tabID {
+                guard model.browserTabRegistry.tabs.contains(where: { $0.id == tabID && $0.owner == owner && $0.usesAgentContext }),
+                      model.browserTabRegistry.selectedTab(ownedBy: owner)?.id == tabID else { return false }
+                if let view { return self.aiLoginViews[tabID.uuidString]?.view === view && view.aiLoginIsAgent }
+            }
+            return true
+        }
+        func waitFor(_ condition: () -> Bool, timeout: TimeInterval = 12) async throws {
+            let end = ProcessInfo.processInfo.systemUptime + timeout
+            while !condition() {
+                guard current(), ProcessInfo.processInfo.systemUptime < end else { throw AIPasswordChange.Failure.stale }
+                try await Task.sleep(for: .milliseconds(80))
+            }
+            guard current() else { throw AIPasswordChange.Failure.stale }
+        }
+        func sameOrigin() -> Bool {
+            BrowserPasswordOrigin.normalized(view?.aiLoginOrigin ?? "") == account.origin
+        }
+        func prepareChange() async throws -> Bool {
+            guard let view, sameOrigin() else { return false }
+            try await waitFor { sameOrigin() && view.prepareAgentPasswordChange() }
+            try await waitFor { view.aiLoginState.phase != "preparing" }
+            return view.aiLoginState.phase == "change_ready"
+        }
+        await flow.run(origin: account.origin, automaticallyAssisted: automatic, operations: .init(
+            current: current,
+            generate: AIPasswordChange.strongPassword,
+            open: { url in
+                try await waitFor { self.inFlightAgentActions == 0 }
+                let tab = model.browserTabRegistry.openTab(owner: owner, url: url, title: "修改密碼", isAgentTab: true)
+                tabID = tab.id
+                model.browserTabRegistry.select(tab.id)
+                model.requestOpenAccountBrowser = true
+                try await waitFor {
+                    guard let mounted = self.aiLoginViews[tab.id.uuidString]?.view,
+                          mounted.aiLoginIsAgent, mounted.navigationGeneration > 0 else { return false }
+                    view = mounted
+                    return true
+                }
+                try await waitFor { sameOrigin() }
+            },
+            ask: {
+                await IslandNotice.shared.ask(title: "要在 \(host) 換密碼嗎",
+                    detail: "OS 產生 20 字強密碼；最後送出前仍會請你確認及 Touch ID。",
+                    allowLabel: "允許", timeout: 30) == .allow
+            },
+            login: {
+                guard let target = view else { throw AIPasswordChange.Failure.unsupported }
+                // An authenticated settings session may already show a change form.
+                if try await prepareChange() { return }
+                target.cancelAgentLogin()
+                _ = try await BrowserAILogin.login(target: target, origin: account.origin,
+                    username: account.username, caller: caller, vault: vault, current: current,
+                    ask: { title, detail in
+                        // The saved auto-assist setting grants this one login, not an engine-wide preset.
+                        if automatic { return true }
+                        return await IslandNotice.shared.ask(title: title, detail: detail, allowLabel: "登入", timeout: 30) == .allow
+                    }, notice: { IslandNotice.shared.info(title: $0, detail: "") },
+                    audit: { host, username, decision in
+                        try BrowserDiagnosticsAudit.appendAILogin(caller: "custody", origin: host, username: username, decision: decision)
+                    })
+                revision = vault.revision // Only the just-completed login's recordUse advances the lease.
+                let previous = target.navigationGeneration
+                target.loadURLString(destination.absoluteString)
+                try await waitFor { target.navigationGeneration > previous && sameOrigin() }
+                // Browser navigation commit and DOM readiness are distinct; bounded retry only scans, never fills.
+                var ready = false
+                let end = ProcessInfo.processInfo.systemUptime + 12
+                while !ready && ProcessInfo.processInfo.systemUptime < end {
+                    guard current() else { throw AIPasswordChange.Failure.stale }
+                    ready = try await prepareChange()
+                    if !ready { try await Task.sleep(for: .milliseconds(150)) }
+                }
+                guard ready else { throw AIPasswordChange.Failure.unsupported }
+            },
+            fill: { proposed in
+                guard let view, current(), sameOrigin(), view.aiLoginState.phase == "change_ready" else {
+                    throw AIPasswordChange.Failure.stale
+                }
+                formGeneration = view.navigationGeneration
+                let accepted = try vault.withPasswordForSecurityCheck(id) { old in
+                    view.fillAgentPasswordChange(current: old, newPassword: proposed, navigationGeneration: formGeneration)
+                }
+                guard accepted else { throw AIPasswordChange.Failure.unsupported }
+                try await waitFor { view.aiLoginState.phase != "change_filling" }
+                guard view.aiLoginState.phase == "change_filled" else { throw AIPasswordChange.Failure.unsupported }
+            },
+            confirm: {
+                await IslandNotice.shared.confirm(title: "送出 \(host) 的新密碼？",
+                    detail: "已找到改密碼欄位；確認及 Touch ID 後才填入並送出。網站結果還需你核對，才同步保險庫。",
+                    confirmLabel: "確認送出", cancelLabel: "取消", timeout: 60)
+            },
+            authenticate: { try await LocalAuthenticator().authenticate(reason: "修改 \(host) 的密碼") },
+            stageSecret: { try vault.stagePasswordChange(id, password: $0) },
+            submit: {
+                guard let view, sameOrigin(), view.navigationGeneration == formGeneration,
+                      view.submitAgentPasswordChange(formGeneration) else { throw AIPasswordChange.Failure.stale }
+            },
+            verify: {
+                guard let view else { return false }
+                try await waitFor({ ["complete", "failed"].contains(view.aiLoginState.phase) }, timeout: 30)
+                guard sameOrigin(), view.navigationGeneration > formGeneration,
+                      view.aiLoginState.phase == "complete", view.aiLoginState.error.isEmpty else { return false }
+                let verifiedGeneration = view.navigationGeneration
+                let verifiedURL = view.aiLoginState.finalURL
+                let confirmed = await IslandNotice.shared.confirm(title: "網站已確認新密碼生效？",
+                    detail: "請核對 \(host) 的結果。確定成功才同步保險庫；不確定請取消，舊密碼與候選都會保留。",
+                    confirmLabel: "已成功，同步", cancelLabel: "不確定，保留", timeout: 60)
+                return confirmed && current() && sameOrigin() && view.navigationGeneration == verifiedGeneration &&
+                    view.aiLoginState.phase == "complete" && view.aiLoginState.error.isEmpty &&
+                    view.aiLoginState.finalURL == verifiedURL
+            },
+            commit: { try vault.finishPasswordChange(id, password: $0) },
+            cancel: { view?.cancelAgentLogin() },
+            failed: { try? vault.recordPasswordChangeFailure(id) }
+        ))
+        IslandNotice.shared.info(title: flow.stage == .complete ? "已修改密碼並同步保險庫" : "換密碼未完成",
+            detail: flow.stage == .complete ? host : "舊密碼已保留，不會自動重送。若已送出但結果不明，可在帳號選單經 Touch ID 查看待確認的新密碼。")
     }
 }

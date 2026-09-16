@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ const source = fs.readFileSync(path.join(repo,
 const start = source.indexOf('void UpdateLoadingState(TatwoCEFBrowserView *view, bool is_loading) {');
 const end = source.indexOf('\nvoid PublishMainFrameLoadStart(', start);
 assert.ok(start > 0 && end > start);
-const root = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/loading-state.'));
+const root = testScratch('loading-state.');
 const program = path.join(root, 'probe');
 fs.writeFileSync(path.join(root, 'probe.mm'), `
 #import <Foundation/Foundation.h>

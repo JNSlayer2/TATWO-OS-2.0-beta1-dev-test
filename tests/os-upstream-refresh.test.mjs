@@ -30,18 +30,20 @@ test('four normal outcomes and a non-throwing failure outcome exist', () => {
 
 test('marker protects unmarked and edited content; writes are atomic', () => {
   assert.match(refresh, /os-upstream\.installed\.sha256/);
-  assert.match(refresh, /guard let installed, installed\.contains\(current\) else/);
+  assert.match(refresh, /guard markerText == current else/);
   assert.match(refresh, /if current == digest/);
   assert.match(refresh, /os-upstream\.update-available\.md/);
-  assert.match(refresh, /installed\?\.contains\(digest\)/);
+  assert.doesNotMatch(refresh, /installed\?\.contains|installed\.contains/);
+  assert.match(refresh, /keptChoice\(in: directory\) == current \+ "\\n" \+ digest/);
   assert.ok((refresh.match(/options: \.atomic/g) ?? []).length >= 4);
 });
 
-test('backup uses UTC sortable filename and is copied before replacement', () => {
+test('backup uses UTC sortable filename and saves exclusive preimage bytes before replacement', () => {
   assert.match(refresh, /TimeZone\(secondsFromGMT: 0\)/);
   assert.match(refresh, /"yyyyMMdd'T'HHmmssSSS'Z'"/);
   assert.match(refresh, /"os-upstream\.md\.bak-\\\(formatter\.string\(from: now\)\)"/);
-  assert.match(refresh, /try fm\.copyItem\(at: runtime, to: backup\)[\s\S]*try writeManaged\(content/);
+  assert.match(refresh, /Darwin\.open\(backup\.path, O_WRONLY \| O_CREAT \| O_EXCL, mode_t\(0o600\)\)/);
+  assert.match(refresh, /try handle\.write\(contentsOf: preimage\)[\s\S]*try handle\.synchronize\(\)[\s\S]*try writeManaged\(content/);
 });
 
 test('App delegate refreshes once before services, logs once without a dialog', () => {

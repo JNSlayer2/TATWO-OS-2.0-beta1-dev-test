@@ -128,6 +128,7 @@ final class ChatPageModel: ObservableObject {
     @Published var requestOpenInfoCard = false
     @Published var requestOpenLoopsPanel = false
     @Published var requestOpenBrowserPanel = false
+    @Published var requestOpenAccountBrowser = false // Native Settings only; no MCP grant.
     @Published private(set) var requestedBrowserAgentURL: String?
     private var pendingBrowserAgentNavigation: BrowserAgentNavigation?
     private(set) var browserTabRegistry: BrowserTabRegistry = BrowserTabRegistry()
@@ -904,6 +905,10 @@ final class ChatPageModel: ObservableObject {
                 self.applySpaceRuntimePreferences()
             }
             BrowserAgentBridge.shared.start(model: self)
+            BreachDetector.shared.onAssistAI = { id in
+                BrowserAgentBridge.shared.changeAIPassword(id, automaticallyAssisted: true)
+            }
+            BreachDetector.shared.start()
             OSAgentBridge.shared.start(model: self)
             configureRemoteSessions()
             return

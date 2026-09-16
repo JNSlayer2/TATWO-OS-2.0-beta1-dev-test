@@ -12,18 +12,18 @@ struct BrowserShortcutsSettingsView: View {
     @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
             HStack(alignment: .top) {
                 Text("預設只有 ⌘T 新分頁；其餘功能請自行指定").foregroundStyle(.secondary)
                 Spacer()
                 Button("全部還原預設") { recording = nil; save(.defaults) }
             }
             ForEach(["分頁", "導覽", "檢視", "工具"], id: \.self) { group in
-                Text(group).font(.subheadline.bold()).padding(.top, BrowserSettingsMetrics.rowSpacing)
+                Text(group).font(.subheadline.bold()).padding(.top, BrowserSidebarMetrics.settingsRowSpacing)
                 ForEach(BrowserAction.allCases.filter { $0.group == group }, id: \.self) { action in
                     HStack {
                         Text(action.title)
-                        Spacer(minLength: BrowserSettingsMetrics.rowSpacing)
+                        Spacer(minLength: BrowserSidebarMetrics.settingsRowSpacing)
                         Text(display(action)).foregroundStyle(.secondary).monospaced()
                         Button(recording == action ? "取消" : "設定…") {
                             error = nil; recording = recording == action ? nil : action

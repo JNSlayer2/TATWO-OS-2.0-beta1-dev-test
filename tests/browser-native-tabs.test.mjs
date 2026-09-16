@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
@@ -45,7 +46,7 @@ test('actual tab host and close aggregation with controlled native callbacks', {
   const lock=path.join(repo,'scripts/tatwo-build-lock.sh');
   const acquired=run('/bin/bash',[lock,'acquire','--pid',String(process.pid),'--timeout','1']);
   const token=acquired.match(/^token=([0-9a-f]+)$/m)?.[1];assert.ok(token);
-  const output=path.join(repo,'output/lightweight-repair');mkdirSync(output,{recursive:true});
+  const output=testScratch('browser-native-tabs-');mkdirSync(output,{recursive:true});
   const root=mkdtempSync(path.join(output,'browser-native-tabs.'));
   try {
     const container=part(sources.backend,'@MainActor\nfinal class TatwoCEFContainerView','\nstruct EmbeddedChromiumBrowserMountIdentity');
@@ -58,13 +59,15 @@ struct EmbeddedChromiumBrowserMountIdentity: Equatable {
     let profile: EmbeddedBrowserRuntimeProfile
     var profilePolicyTag: Int { 1 }
 }
-struct EmbeddedBrowserCommand { enum Action { case load(URL), goBack, goForward, reload }; let id=UUID();let action:Action; var agentNavigation:BrowserAgentNavigation? = nil }
+struct EmbeddedBrowserCommand { enum Action { case load(URL), goBack, goForward, reload, stopLoading, printPage, printPDF, openPDF, find(String, forward:Bool, matchCase:Bool), stopFinding, zoom(Double) }; let id=UUID();let action:Action; var agentNavigation:BrowserAgentNavigation? = nil }
 final class BrowserAgentNavigation { let url=URL(string:"https://example.test/")!; let request=UUID() }
 struct BrowserAgentRequestError: Error { init(_ message:String) {} }
 @MainActor final class BrowserAgentBridge {
     static let shared=BrowserAgentBridge()
     var agentActionState:(inFlight:Int,lastAgentActionAt:TimeInterval?)=(0,nil)
     func revokeRequests() {}
+    func attachAILogin(tabID:String, view:TatwoCEFBrowserView) {}
+    func detachAILogin(tabID:String) {}
     func isRequestCurrent(_ request:UUID)->Bool { true }
     func enqueueCEFNavigation(_ navigation:BrowserAgentNavigation,on browser:TatwoCEFBrowserView,profileID:UUID?)throws { browser.loadURLString(navigation.url.absoluteString) }
 }
@@ -72,6 +75,17 @@ struct BrowserAgentRequestError: Error { init(_ message:String) {} }
     static let shared=BrowserHumanInteraction()
     func configure(_ browser:TatwoCEFBrowserView, onPopup:@escaping(URL)->Void) {}
 }
+// New collaborators are outside this host lifecycle test and never access host data.
+@MainActor final class BrowserPasswordAssist { init(bridge:TatwoCEFBrowserView) {}; func invalidate() {} }
+@MainActor final class BrowserWebFeatures { init(browser:TatwoCEFBrowserView,container:NSView) {}; func invalidate() {}; func requestPDF(download:Bool) { preconditionFailure("not a PDF test") } }
+enum TatwoActivePalette { struct Palette { let canvasBase=Color.white }; static let current=Palette() }
+struct BrowserGeneralSettings {
+ struct Engine { let title="Search"; func queryURL(_ text:String)->URL { URL(string:"https://example.test/")! } }
+ var zoomByHost:[String:Double]=[:]; let searchEngine=Engine()
+ static func load()->Self { .init() }; func save() throws { preconditionFailure("not a settings test") }
+}
+actor BrowserHistoryStore { static let shared=BrowserHistoryStore(); func recordVisit(url:URL,title:String) throws { preconditionFailure("not a history test") } }
+struct BrowserMemorySettings { static func load()->Self { .init() }; func limit()->Int? { 8 } }
 struct VisibleError { let message:String; static func runtimeMessage(_ s:String)->Self { .init(message:s) } }
 struct EmbeddedBrowserNavigationState {
     var urlString:String?; var canGoBack:Bool; var canGoForward:Bool; var visibleError:VisibleError?
@@ -108,10 +122,24 @@ enum TatwoCEFGeometrySyncThrottlePolicy { static func delay(lastSyncUptime:TimeI
 enum TatwoCEFBrowserActor { case human,agent }
 enum TatwoCEFBrowserPhase { case creating,finished }
 enum TatwoCEFBrowserErrorKind { case none }
-@MainActor enum TatwoCEFRuntime { static func initialize(withRootCachePath:String,helperExecutablePath:String,logFilePath:String,bundledDenyListPath:String)throws {} }
+@MainActor enum TatwoCEFRuntime { static func configureRendererProcessLimit(_ limit:Int) {}
+    static func initialize(withRootCachePath:String,helperExecutablePath:String,logFilePath:String,bundledDenyListPath:String)throws {} }
 @MainActor final class TatwoCEFBrowserView:NSView {
     static var created:[TatwoCEFBrowserView]=[]
     var browserActor=TatwoCEFBrowserActor.human
+    var contextSearchEngineTitle="Search"
+    var onDailyShortcut:((String)->Void)?
+    var onFindResult:((Int,Int)->Void)?
+    var onContextMenuAction:((String,String)->Void)?
+    func cancelWebFeatures() {}
+    func cancelAgentLogin() {}
+    func stopFinding() {}
+    func stopLoading() {}
+    func findText(_ text:String,forward:Bool,matchCase:Bool) { preconditionFailure("not a find test") }
+    func printPage() { preconditionFailure("not a print test") }
+    func setZoomLevel(_ level:Double) { preconditionFailure("not a zoom test") }
+    func performContextEdit(_ kind:String) { preconditionFailure("not a clipboard test") }
+    func downloadImageURL(_ url:String) { preconditionFailure("not a download test") }
     var agentControlled=false, humanPreferencesDeferred=false
     var navigationGeneration:UInt64=1
     var currentURLString:String? { current }
@@ -214,7 +242,8 @@ MainActor.assumeIsolated { verify() }
 `;
     const main=path.join(root,'main.swift');const binary=path.join(root,'tab-fixture');
     const telemetry=readFileSync(path.join(repo,'App/Sources/Tatwo2/Browser/Diagnostics/BrowserEngineStartupTelemetry.swift'),'utf8');
-    const swift=modelStubs+nativeStubs+telemetry+recovery+container+host+checks;writeFileSync(main,swift);
+    const memoryBudget=readFileSync(path.join(repo,'App/Sources/Tatwo2/Browser/BrowserNativeMemoryBudget.swift'),'utf8');
+    const swift=modelStubs+nativeStubs+memoryBudget+telemetry+recovery+container+host+checks;writeFileSync(main,swift);
     run('/usr/bin/xcrun',['swiftc','-swift-version','5','-j','1',main,'-o',binary]);
     const result=run(binary,[]);assert.match(result,/BROWSERTABS RESULT checks=32 failures=0/);
     // Check the exact production host against the actual Objective-C interface,
@@ -222,7 +251,7 @@ MainActor.assumeIsolated { verify() }
     const moduleDir=path.join(root,'bridge-module');mkdirSync(moduleDir);
     writeFileSync(path.join(moduleDir,'module.modulemap'),`module TatwoCEFBridge { header "${path.join(repo,files.header)}" export * }`);
     const typecheck=path.join(root,'native-interface.swift');
-    writeFileSync(typecheck,'import TatwoCEFBridge\n'+modelStubs+telemetry+recovery+container+host);
+    writeFileSync(typecheck,'import TatwoCEFBridge\n'+modelStubs+memoryBudget+telemetry+recovery+container+host);
     run('/usr/bin/xcrun',['swiftc','-swift-version','5','-j','1','-typecheck','-I',moduleDir,typecheck]);
     for (const [name,file] of Object.entries(files)) assert.equal(sha(readFileSync(path.join(repo,file),'utf8')),sha(sources[name]),`${name} drifted`);
     writeFileSync(path.join(root,'receipt.json'),JSON.stringify({at:new Date().toISOString(),sourceHashes:Object.fromEntries(Object.entries(sources).map(([k,v])=>[k,sha(v)])),result,scope:'Actual Swift host/container with fake CEF callbacks plus actual Objective-C header typecheck. Not real CEF DOM/auth or formal App acceptance.'},null,2));

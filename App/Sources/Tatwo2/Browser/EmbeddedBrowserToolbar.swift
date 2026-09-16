@@ -1,4 +1,4 @@
-// 照搬自 Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/EmbeddedBrowserToolbar.swift；改動 3 行（原因：加入照搬來源標記；移除薄殼不可依賴的 TatwoCEFBridge、TatwoUltraworkCore import）
+// 源自 Apps/TatwoUltraworkMac 的同名檔；W67 僅重構共用網址列，保留原註解／書籤模型與儲存行為。
 import AppKit
 import SwiftUI
 import WebKit
@@ -467,8 +467,15 @@ final class EmbeddedBrowserBookmarkStore:
     }
 }
 
-/// Chat's only address controls. Bookmark management lives in Browser work space.
+/// Shared compact address controls. Bookmark management lives in Browser work space.
 struct EmbeddedBrowserToolbar: View {
+    /// 使用者實際綁定的「聚焦網址列」快捷鍵；沒綁就回 nil，提示不顯示任何按鍵。
+    static func focusAddressHint(
+        map: BrowserShortcutMap = BrowserGeneralSettings.load().shortcuts
+    ) -> String? {
+        map.combos(for: .focusAddressBar).first?.display
+    }
+
     @Binding var addressText: String
     var addressFieldFocused: FocusState<Bool>.Binding
     let state: EmbeddedBrowserNavigationState
@@ -478,6 +485,14 @@ struct EmbeddedBrowserToolbar: View {
 
     var openTabs: [BrowserAddressSuggestion] = []
     var onSelectTab: (String) -> Void = { _ in }
+    // FocusState cannot request focus while its TextField is unmounted.
+    // Consume an explicit request from the existing browser shortcut action.
+    var expansionRequest: Binding<Bool> = .constant(false)
+    // 提示只能顯示使用者實際綁定的快捷鍵。⌘L 是系統保留鍵且不在 defaults 裡，
+    // 寫死「⌘L 編輯」等於向使用者宣告一個按下去沒反應的功能。
+    @State private var addressShortcutHint: String? = EmbeddedBrowserToolbar.focusAddressHint()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isExpanded = false
     @State private var history: [BrowserHistoryEntry] = []
     @State private var selection = -1
     private struct Choice: Identifiable {
@@ -487,9 +502,12 @@ struct EmbeddedBrowserToolbar: View {
         let url: String?
         let tabID: String?
     }
+    private var editHint: String {
+        addressShortcutHint.map { "\($0) 編輯 · Esc 還原" } ?? "Esc 還原"
+    }
     private var choices: [Choice] {
         let query = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard addressFieldFocused.wrappedValue, !query.isEmpty else { return [] }
+        guard isExpanded, !query.isEmpty else { return [] }
         let tabs = openTabs.filter { $0.title.localizedCaseInsensitiveContains(query) || $0.url.localizedCaseInsensitiveContains(query) }
             .prefix(6).map { Choice(id: "tab-" + $0.id, section: "開啟中的分頁", title: $0.title, url: nil, tabID: $0.id) }
         let visits = BrowserHistoryStore.suggestions(history, matching: query).map {
@@ -500,22 +518,85 @@ struct EmbeddedBrowserToolbar: View {
             url: engine.queryURL(query).absoluteString, tabID: nil)]
     }
     private func choose(_ choice: Choice) {
+        isExpanded = BrowserOmniboxPresentation.isExpanded(after: .submit)
         if let id = choice.tabID { onSelectTab(id); addressFieldFocused.wrappedValue = false }
-        else if let url = choice.url { addressText = url; onSubmit() }
+        else if let url = choice.url { addressText = url; onSubmit(); addressFieldFocused.wrappedValue = false }
         selection = -1
     }
+
     var body: some View {
-        VStack(spacing: 0) {
-        HStack(spacing: BrowserSidebarMetrics.childGap) {
+        HStack(spacing: BrowserOmniboxMetrics.controlGap) {
             control("chevron.left", "上一頁", enabled && state.canGoBack, .goBack)
             control("chevron.right", "下一頁", enabled && state.canGoForward, .goForward)
             control(state.isLoading ? "xmark" : "arrow.clockwise", state.isLoading ? "停止載入" : "重新載入", enabled, state.isLoading ? .stopLoading : .reload)
+            Button(action: expandEditor) {
+                HStack(spacing: BrowserOmniboxMetrics.controlGap) {
+                    Image(systemName: BrowserOmniboxPresentation.symbol(for: state.urlString))
+                        .font(.system(size: BrowserOmniboxMetrics.iconSize))
+                        .accessibilityHidden(true)
+                    Text(BrowserOmniboxPresentation.domain(for: state.urlString))
+                        .font(.system(size: BrowserOmniboxMetrics.domainFontSize))
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, minHeight: BrowserOmniboxMetrics.collapsedHeight)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(!enabled)
+            .help(editHint)
+            .accessibilityLabel("網址").accessibilityIdentifier("browser.omnibox")
+            .accessibilityHidden(isExpanded)
+        }
+        .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
+        .padding(.horizontal, BrowserOmniboxMetrics.horizontalInset)
+        .frame(height: BrowserOmniboxMetrics.collapsedHeight)
+        .modifier(BrowserOmniboxGlass(cornerRadius: BrowserOmniboxMetrics.collapsedRadius))
+        .background(NonWindowDraggingView())
+        .accessibilityIdentifier("browser-navigation-bar")
+        .overlay(alignment: .top) {
+            if isExpanded {
+                editorPanel
+                    .offset(y: BrowserOmniboxMetrics.collapsedHeight + BrowserOmniboxMetrics.panelGap)
+                    .transition(reduceMotion ? .identity : .move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: BrowserOmniboxMetrics.expansionDuration), value: isExpanded)
+        .onChange(of: expansionRequest.wrappedValue, initial: true) { _, requested in
+            guard requested else { return }
+            expansionRequest.wrappedValue = false
+            expandEditor()
+        }
+        .onChange(of: addressFieldFocused.wrappedValue) { _, focused in
+            if focused {
+                isExpanded = BrowserOmniboxPresentation.isExpanded(after: .focusRequested)
+            } else if isExpanded {
+                dismissEditor(.focusLost)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: BrowserShortcutMap.changed)) { _ in
+            addressShortcutHint = EmbeddedBrowserToolbar.focusAddressHint()
+        }
+        .task(id: isExpanded ? addressText : nil) {
+            guard isExpanded else { return }
+            do { try await Task.sleep(for: BrowserOmniboxMetrics.historyDebounce) }
+            catch { return }
+            history = (try? await BrowserHistoryStore.shared.entries()) ?? []
+        }
+    }
+
+    private var editorPanel: some View {
+        VStack(alignment: .leading, spacing: BrowserOmniboxMetrics.panelGap) {
             TextField("搜尋或輸入網址", text: $addressText)
                 .textFieldStyle(.plain)
-                .font(.system(size: BrowserSidebarMetrics.rowFontSize))
+                .font(.system(size: BrowserOmniboxMetrics.editorFontSize, design: .monospaced))
                 .focused(addressFieldFocused)
+                .frame(height: BrowserOmniboxMetrics.expandedFieldHeight)
                 .onSubmit {
-                    if choices.indices.contains(selection) { choose(choices[selection]) } else { onSubmit() }
+                    if choices.indices.contains(selection) { choose(choices[selection]) }
+                    else {
+                        isExpanded = BrowserOmniboxPresentation.isExpanded(after: .submit)
+                        onSubmit()
+                        addressFieldFocused.wrappedValue = false
+                    }
                 }
                 .onMoveCommand { direction in
                     guard !choices.isEmpty else { return }
@@ -525,49 +606,71 @@ struct EmbeddedBrowserToolbar: View {
                 .onChange(of: addressText) { _, _ in selection = -1 }
                 .onExitCommand {
                     addressText = state.urlString ?? ""
-                    addressFieldFocused.wrappedValue = false
+                    dismissEditor(.escape)
                 }
-                .padding(BrowserSidebarMetrics.rowHorizontalPadding)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowCornerRadius))
-                .accessibilityLabel("網址").accessibilityIdentifier("browser-address-field")
+                .accessibilityLabel("網址").accessibilityIdentifier("browser.omnibox")
                 .disabled(!enabled)
-        }
-        .padding(.horizontal, BrowserSidebarMetrics.rowHorizontalPadding)
-        .padding(.vertical, BrowserSidebarMetrics.rowVerticalPadding)
-        .background(NonWindowDraggingView())
-        .accessibilityIdentifier("browser-navigation-bar")
-        if !choices.isEmpty {
-            VStack(spacing: 0) {
-                ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
-                    Button { choose(choice) } label: {
-                        HStack {
-                            Text(choice.section).font(.caption).foregroundStyle(.secondary)
-                            Text(choice.title).lineLimit(1)
-                            Spacer(minLength: 0)
-                        }.padding(8).contentShape(Rectangle())
-                            .background(index == selection ? Color.accentColor.opacity(0.15) : .clear)
-                    }.buttonStyle(.plain)
+                .onAppear { addressFieldFocused.wrappedValue = true }
+            Text(editHint)
+                .font(.system(size: BrowserOmniboxMetrics.hintFontSize))
+                .foregroundStyle(LiquidGlassTokens.browserOmniboxMutedInk)
+                .allowsHitTesting(false)
+            if !choices.isEmpty {
+                ScrollView {
+                    VStack(spacing: BrowserOmniboxMetrics.zero) {
+                        ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
+                            Button { choose(choice) } label: {
+                                HStack(spacing: BrowserOmniboxMetrics.controlGap) {
+                                    Text(choice.section).font(.caption)
+                                        .foregroundStyle(LiquidGlassTokens.browserOmniboxMutedInk)
+                                    Text(choice.title).lineLimit(1)
+                                    Spacer(minLength: BrowserOmniboxMetrics.zero)
+                                }
+                                .padding(BrowserOmniboxMetrics.panelPadding)
+                                .frame(height: BrowserOmniboxMetrics.suggestionRowHeight)
+                                .contentShape(Rectangle())
+                                .background(index == selection
+                                    ? Color.accentColor.opacity(LiquidGlassTokens.browserOmniboxSelectionOpacity) : .clear)
+                            }.buttonStyle(.plain).focusable(false)
+                        }
+                    }
                 }
-            }.accessibilityLabel("網址建議")
+                .frame(height: min(CGFloat(choices.count) * BrowserOmniboxMetrics.suggestionRowHeight,
+                    BrowserOmniboxMetrics.suggestionMaximumHeight))
+                .accessibilityLabel("網址建議")
+            }
         }
-        }
-        .task(id: addressText) {
-            guard addressFieldFocused.wrappedValue else { return }
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
-            history = (try? await BrowserHistoryStore.shared.entries()) ?? []
-        }
+        .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
+        .padding(BrowserOmniboxMetrics.panelPadding)
+        .frame(maxWidth: BrowserOmniboxMetrics.panelMaximumWidth, minHeight: BrowserOmniboxMetrics.panelMinimumHeight)
+        .fixedSize(horizontal: false, vertical: true)
+        .modifier(BrowserOmniboxGlass(cornerRadius: BrowserOmniboxMetrics.panelRadius))
+        .background(BrowserOmniboxDismissMonitor { dismissEditor(.focusLost) })
+    }
+
+    private func expandEditor() {
+        guard enabled else { return }
+        guard !isExpanded else { addressFieldFocused.wrappedValue = true; return }
+        addressText = state.urlString ?? ""
+        selection = -1
+        isExpanded = BrowserOmniboxPresentation.isExpanded(after: .click)
+    }
+
+    private func dismissEditor(_ event: BrowserOmniboxPresentation.Event) {
+        isExpanded = BrowserOmniboxPresentation.isExpanded(after: event)
+        addressText = state.urlString ?? ""
+        addressFieldFocused.wrappedValue = false
+        selection = -1
     }
 
     private func control(_ symbol: String, _ label: String, _ enabled: Bool,
                          _ action: EmbeddedBrowserCommand.Action) -> some View {
         Button {
-            addressFieldFocused.wrappedValue = false
-            addressText = state.urlString ?? ""
+            dismissEditor(.focusLost)
             onCommand(action)
         } label: {
-            Image(systemName: symbol).font(.system(size: BrowserSidebarMetrics.rowFontSize))
-                .frame(width: BrowserSidebarMetrics.controlHitSize, height: BrowserSidebarMetrics.controlHitSize)
+            Image(systemName: symbol).font(.system(size: BrowserOmniboxMetrics.iconSize))
+                .frame(width: BrowserOmniboxMetrics.collapsedHeight, height: BrowserOmniboxMetrics.collapsedHeight)
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).disabled(!enabled).help(label).accessibilityLabel(label)
     }

@@ -70,8 +70,8 @@ struct IslandNoticeContent: View {
 struct IslandBlankTemplate: View {
     var body: some View {
         Color.clear
-            .frame(width: 596, height: 124)
-            .padding(.top, 36)
+            .frame(width: LiquidGlassTokens.islandBlankWidth, height: LiquidGlassTokens.islandBlankHeight)
+            .padding(.top, LiquidGlassTokens.islandNoticeTopInset)
     }
 }
 
@@ -110,139 +110,95 @@ final class ComputerUseIslandNotice: ObservableObject {
     }
 }
 
-/// Island notice card (no allow/deny): TATWO arrow logo · title · one line · a single dismiss button.
+/// One visual layout for ask, confirm, info and the legacy heads-up facade.
+private struct IslandNoticeCardLayout<Actions: View, Countdown: View>: View {
+    let title: String
+    let detail: String
+    let info: Bool
+    @ViewBuilder let actions: () -> Actions
+    @ViewBuilder let countdown: () -> Countdown
+
+    var body: some View {
+        HStack(spacing: LiquidGlassTokens.islandNoticeColumnSpacing) {
+            if info {
+                Image(systemName: "info")
+                    .font(.system(size: LiquidGlassTokens.islandNoticeInfoFontSize, weight: .semibold))
+                    .frame(width: LiquidGlassTokens.islandNoticeInfoSize, height: LiquidGlassTokens.islandNoticeInfoSize)
+                    .background(LiquidGlassTokens.islandNoticeButtonFill, in: Circle())
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: LiquidGlassTokens.islandNoticeLineSpacing) {
+                Text(title).font(.system(size: LiquidGlassTokens.islandNoticeTitleSize, weight: .bold))
+                    .foregroundStyle(LiquidGlassTokens.islandNoticeTitleColor).lineLimit(1)
+                Text(detail).font(.system(size: LiquidGlassTokens.islandNoticeDetailSize))
+                    .foregroundStyle(LiquidGlassTokens.islandNoticeDetailColor)
+                    .lineLimit(1).truncationMode(.tail)
+                countdown()
+                    .font(.system(size: LiquidGlassTokens.islandNoticeCountdownSize))
+                    .monospacedDigit().foregroundStyle(LiquidGlassTokens.islandNoticeCountdownColor)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            actions().fixedSize()
+        }
+        .foregroundStyle(LiquidGlassTokens.islandNoticeTitleColor)
+        .padding(.vertical, LiquidGlassTokens.islandNoticeVerticalPadding)
+        .padding(.leading, LiquidGlassTokens.islandNoticeLeadingPadding)
+        .padding(.trailing, LiquidGlassTokens.islandNoticeTrailingPadding)
+        .frame(width: LiquidGlassTokens.islandNoticeWidth)
+        .background(LiquidGlassTokens.islandNoticeFill,
+                    in: RoundedRectangle(cornerRadius: LiquidGlassTokens.islandNoticeRadius))
+        .shadow(color: .black.opacity(LiquidGlassTokens.islandNoticeShadowOpacity),
+                radius: LiquidGlassTokens.islandNoticeShadowRadius, y: LiquidGlassTokens.islandNoticeShadowY)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+    }
+}
+
 struct ComputerUseNoticeCard: View {
     let message: ComputerUseIslandNotice.Message
 
     var body: some View {
-        HStack(spacing: 18) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.white.opacity(0.55))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
-                    }
-                    .shadow(color: .black.opacity(0.05), radius: 7, y: 4)
-                ComputerUseArrowGlyph(style: .aurora, spin: .zero)
-                    .frame(width: 34, height: 38)
-                    .offset(x: 4, y: 1.5)
-            }
-            .frame(width: 56, height: 56)
-            .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(message.title)
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(consentColor(0x2B2521))
-                Text(message.detail)
-                    .font(.system(size: 12))
-                    .foregroundStyle(consentColor(0x7B6F65))
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
+        IslandNoticeCardLayout(title: message.title, detail: message.detail, info: true) {
             Button { ComputerUseIslandNotice.shared.dismiss() } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(consentColor(0x5E554E))
-                    .frame(width: 32, height: 32)
-                    .background(Color.white.opacity(0.72), in: Circle())
-                    .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .help("知道了")
-            .accessibilityLabel("知道了")
-        }
-        .padding(.horizontal, 8)
-        .frame(width: 596, height: 124)
-        .padding(.top, 36)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(message.title)
+                    .font(.system(size: LiquidGlassTokens.islandNoticeButtonFontSize))
+                    .frame(width: LiquidGlassTokens.islandNoticeButtonSize, height: LiquidGlassTokens.islandNoticeButtonSize)
+                    .background(LiquidGlassTokens.islandNoticeButtonFill, in: Circle())
+            }.buttonStyle(.plain).help("知道了").accessibilityLabel("知道了")
+        } countdown: { EmptyView() }
+        .padding(.top, LiquidGlassTokens.islandNoticeTopInset)
     }
 }
 
-private func consentColor(_ value: UInt32, _ alpha: Double = 1) -> Color {
-    Color(.sRGB, red: Double((value >> 16) & 0xFF) / 255, green: Double((value >> 8) & 0xFF) / 255,
-          blue: Double(value & 0xFF) / 255, opacity: alpha)
-}
-
-/// Logo (TATWO's own arrow) · title · one line · ✓ / ✕ round buttons at the bottom right · countdown.
 struct ComputerUseConsentCard: View {
     let request: ComputerUseConsentPrompt.Request
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            HStack(spacing: 18) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.white.opacity(0.55))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
-                        }
-                        .shadow(color: .black.opacity(0.05), radius: 7, y: 4)
-                    // optical centre: the arrow's weight sits on its straight left edge
-                    ComputerUseArrowGlyph(style: .aurora, spin: .zero)
-                        .frame(width: 34, height: 38)
-                        .offset(x: 4, y: 1.5)
-                }
-                .frame(width: 56, height: 56)
-                .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(request.title)
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(consentColor(0x2B2521))
-                    Text(request.detail)
-                        .font(.system(size: 12))
-                        .foregroundStyle(consentColor(0x7B6F65))
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 96)
-            }
-            .frame(maxHeight: .infinity)
-            HStack(spacing: 10) {
-                if request.kind != .info {
+        IslandNoticeCardLayout(title: request.title, detail: request.detail, info: request.kind == .info) {
+            if request.kind != .info {
+                HStack(spacing: LiquidGlassTokens.islandNoticeButtonSpacing) {
                     Button { IslandNotice.shared.resolve(.allow, id: request.id) } label: {
                         Image(systemName: "checkmark")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 32, height: 32)
-                            .background(LiquidGlassTokens.brandAccent, in: Circle())
-                            .shadow(color: LiquidGlassTokens.brandAccent.opacity(0.25), radius: 4, y: 3)
+                            .font(.system(size: LiquidGlassTokens.islandNoticeButtonFontSize, weight: .bold))
+                            .frame(width: LiquidGlassTokens.islandNoticeButtonSize, height: LiquidGlassTokens.islandNoticeButtonSize)
+                            .background(LiquidGlassTokens.islandNoticeAllowFill, in: Circle())
                     }
-                    .buttonStyle(.plain)
-                    .help(request.allowLabel)
-                    .accessibilityLabel(request.allowLabel)
+                    .buttonStyle(.plain).help(request.allowLabel).accessibilityLabel(request.allowLabel)
                     Button { IslandNotice.shared.resolve(.cancel, id: request.id) } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(consentColor(0x5E554E))
-                            .frame(width: 32, height: 32)
-                            .background(Color.white.opacity(0.72), in: Circle())
-                            .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 1))
+                            .font(.system(size: LiquidGlassTokens.islandNoticeButtonFontSize, weight: .bold))
+                            .frame(width: LiquidGlassTokens.islandNoticeButtonSize, height: LiquidGlassTokens.islandNoticeButtonSize)
+                            .background(LiquidGlassTokens.islandNoticeButtonFill, in: Circle())
                     }
-                    .buttonStyle(.plain)
-                    .help(request.cancelLabel)
-                    .accessibilityLabel(request.cancelLabel)
+                    .buttonStyle(.plain).help(request.cancelLabel).accessibilityLabel(request.cancelLabel)
                 }
             }
-            .padding(.bottom, 2)
-        }
-        .overlay(alignment: .bottom) {
+        } countdown: {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let left = max(0, Int(request.deadline.timeIntervalSince(context.date).rounded(.up)))
                 Text(request.kind == .info ? "\(left) 秒後收起" : "\(left) 秒後自動取消")
-                    .font(.system(size: 11, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(consentColor(0xA39889))
             }
-            .padding(.bottom, 2)
         }
-        .padding(.horizontal, 8)
-        .frame(width: 596, height: 124)
-        .padding(.top, 36)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(request.title)
+        .padding(.top, LiquidGlassTokens.islandNoticeTopInset)
     }
 }

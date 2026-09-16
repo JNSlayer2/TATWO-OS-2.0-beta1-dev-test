@@ -13,11 +13,8 @@ struct BrowserPasswordsSettingsView: View {
     @State private var errorMessage: String?
     @State private var passwordAssist = BrowserGeneralSettings.load().passwordAssist
     @State private var passwordFillRequiresAuth = BrowserGeneralSettings.load().passwordFillRequiresAuth
-    private let aiVault: BrowserAIVault
-
-    init(vault: BrowserPasswordVault? = nil, aiVault: BrowserAIVault? = nil) {
+    init(vault: BrowserPasswordVault? = nil) {
         self.vault = vault ?? .shared
-        self.aiVault = aiVault ?? .shared
     }
 
     private var filteredCredentials: [BrowserCredential] {
@@ -30,10 +27,10 @@ struct BrowserPasswordsSettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.downloadActionSpacing) {
             HStack {
-                Text("密碼").font(.headline)
-                Spacer(minLength: 8)
+                BrowserSettingsSectionHeading(title: "密碼", number: 3)
+                Spacer(minLength: BrowserSidebarMetrics.rowHorizontalPadding)
                 Button("匯出 CSV") { exportCSV() }
                     .disabled(exporting || vault.credentials.isEmpty || vault.storageError != nil)
                 Button("從其他瀏覽器導入…") {
@@ -41,8 +38,8 @@ struct BrowserPasswordsSettingsView: View {
                         name: Notification.Name("tatwo.browser.openImport"), object: nil)
                 }
             }
-            .buttonStyle(.bordered)
-            .font(.caption)
+            .buttonStyle(BrowserSettingsControlStyle())
+            .font(.system(size: BrowserSidebarMetrics.settingsControlFontSize))
 
             Toggle("自動填入與儲存提示", isOn: $passwordAssist)
                 .onChange(of: passwordAssist) { _, enabled in
@@ -61,7 +58,7 @@ struct BrowserPasswordsSettingsView: View {
                     }
                 }
             Text("同一分頁、同一網站驗證後 5 分鐘內免重驗；不支援 Touch ID 時使用系統登入密碼。")
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(LiquidGlassTokens.browserMutedInk)
 
             TextField("搜尋網站或使用者名稱", text: $search)
                 .textFieldStyle(.roundedBorder)
@@ -71,24 +68,25 @@ struct BrowserPasswordsSettingsView: View {
                 Text(error).font(.footnote).foregroundStyle(.red)
             } else if filteredCredentials.isEmpty {
                 Text(search.isEmpty ? "尚未儲存密碼。" : "找不到符合的密碼。")
-                    .font(.footnote).foregroundStyle(.secondary)
+                    .font(.footnote).foregroundStyle(LiquidGlassTokens.browserMutedInk)
             } else {
-                LazyVStack(spacing: 0) {
+                LazyVStack(spacing: BrowserSidebarMetrics.zero) {
                     ForEach(filteredCredentials) { credential in
                         BrowserPasswordSettingsRow(vault: vault, credential: credential)
-                        Divider().opacity(0.4)
+                        Divider().opacity(BrowserSidebarMetrics.passwordDividerOpacity)
                     }
                 }
             }
             if let errorMessage {
                 Text(errorMessage).font(.footnote).foregroundStyle(.red)
             }
-            Divider()
-            // AI 帳號 use a separate index and Keychain service, never the human list.
-            BrowserAIVaultSettingsView(vault: aiVault)
         }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .foregroundStyle(LiquidGlassTokens.browserInk)
+        .font(.system(size: BrowserSidebarMetrics.settingsBodyFontSize))
+        .padding(.vertical, BrowserSidebarMetrics.settingsCardVerticalPadding)
+        .padding(.horizontal, BrowserSidebarMetrics.settingsCardHorizontalPadding)
+        .background(LiquidGlassTokens.browserFieldFill, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.settingsCardRadius))
+        .environment(\.colorScheme, .light)
         .onDisappear {
             exportTask?.cancel()
             exportTask = nil
@@ -162,34 +160,34 @@ private struct BrowserPasswordSettingsRow: View {
     private var host: String { URL(string: credential.origin)?.host ?? credential.origin }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.passwordRowSpacing) {
+            HStack(alignment: .top, spacing: BrowserSidebarMetrics.downloadActionSpacing) {
+                VStack(alignment: .leading, spacing: BrowserSidebarMetrics.passwordDetailSpacing) {
                     Text(host).font(.subheadline.weight(.medium)).lineLimit(1)
                         .help(credential.origin)
                     Text(credential.username.isEmpty ? "未填使用者名稱" : credential.username)
-                        .font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                        .font(.footnote).foregroundStyle(LiquidGlassTokens.browserMutedInk).lineLimit(1)
                     Text(revealedPassword ?? "••••••••")
                         .font(.system(.footnote, design: .monospaced))
                         .fixedSize(horizontal: false, vertical: true)
                         .privacySensitive()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 6) {
+                HStack(spacing: BrowserSidebarMetrics.settingsRowSpacing) {
                     Button(revealedPassword == nil ? "顯示" : "隱藏") { reveal() }
                     Button(copied ? "已拷貝" : "拷貝") { copy() }
                         .help("驗證後拷貝，60 秒後清除剪貼簿")
                     Button("刪除", role: .destructive) { delete() }
                 }
-                .buttonStyle(.bordered)
-                .font(.caption)
+                .buttonStyle(BrowserSettingsControlStyle())
+                .font(.system(size: BrowserSidebarMetrics.settingsControlFontSize))
                 .disabled(busy)
             }
             if let errorMessage {
-                Text(errorMessage).font(.caption).foregroundStyle(.red)
+                Text(errorMessage).font(.system(size: BrowserSidebarMetrics.settingsControlFontSize)).foregroundStyle(.red)
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, BrowserSidebarMetrics.passwordRowPadding)
         .onDisappear { concealAndCancel() }
         .onChange(of: credential.updatedAt) { _, _ in concealAndCancel() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in

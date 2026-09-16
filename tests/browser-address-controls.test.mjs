@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -72,7 +73,7 @@ test('native address projection keeps draft and committed navigation distinct', 
     return result.stdout;
   };
   assert.equal(run('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level']).trim(), '1');
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('browser-address-controls-');
   mkdirSync(output, { recursive: true });
   const root = mkdtempSync(path.join(output, 'browser-address.'));
   const lock = path.join(repo, 'scripts/tatwo-build-lock.sh');

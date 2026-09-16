@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, copyFileSync, existsSync, readdirSync } from 'node:fs';
@@ -369,22 +370,19 @@ test('W26 SIGKILL inside production rename window is recovered by the next insta
   assert.ok(!existsSync(dest+'.new')); assert.ok(existsSync(join(stage,'interrupted-new.app.disabled')));
 });
 
-test('W26 24-hour cleanup trashes only stale owned temp directories and writes restore manifest', () => {
+test('W26/W64 retention leaves legacy temp directories outside UpdateArchives untouched', () => {
   const dir=mkdtempSync(join(tmpdir(),'w26-retention-'));
   for(const name of ['tatwo-install.old','tatwo-install.active','tatwo-install.fresh','keep-other']) mkdirSync(join(dir,name));
   writeFileSync(join(dir,'tatwo-install.active/owner'),String(process.pid));
-  for(const name of ['tatwo-install.old','tatwo-install.active','keep-other']) {
-    assert.equal(spawnSync('touch',['-t','202001010000',join(dir,name)]).status,0);
-  }
   const code=install.split('# TEMP-RETENTION-BEGIN\n')[1].split('# TEMP-RETENTION-END')[0];
+  const hygiene=install.split('# UPDATE-ARCHIVE-HYGIENE-BEGIN\n')[1].split('# UPDATE-ARCHIVE-HYGIENE-END')[0];
   const r=spawnSync('bash',['-c',`set -eu
-    trash() { command mv "$1" "$TMPDIR/retained-trash"; }
+    trash() { exit 90; }
+    ${hygiene}
     ${code}
-    archive_old_downloads`],{encoding:'utf8',env:{...process.env,TMPDIR:dir}});
-  assert.equal(r.status,0,r.stderr); assert.ok(existsSync(join(dir,'retained-trash')));
-  for(const name of ['tatwo-install.active','tatwo-install.fresh','keep-other']) assert.ok(existsSync(join(dir,name)));
-  const manifest=readdirSync(dir).find(n=>n.endsWith('.md'));
-  assert.match(readFileSync(join(dir,manifest),'utf8'),/Restore from macOS Trash/);
+    archive_old_downloads`],{encoding:'utf8',env:{...process.env,HOME:dir,TMPDIR:dir,DEST:join(dir,'App.app')}});
+  assert.equal(r.status,0,r.stderr);
+  for(const name of ['tatwo-install.old','tatwo-install.active','tatwo-install.fresh','keep-other']) assert.ok(existsSync(join(dir,name)));
 });
 
 test('W24 disk preflight uses candidate uncompressed size x2 and fake df fails closed', () => {
@@ -403,7 +401,7 @@ test('W24 disk preflight uses candidate uncompressed size x2 and fake df fails c
 });
 
 test('W24 clone-first fallback preserves real fake bundle contents and measures assembly', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'w24-clone-'));
+  const dir = testScratch('w24-clone-');
   const source = join(dir, 'source.app'); mkdirSync(source);
   writeFileSync(join(source, 'payload'), Buffer.alloc(25 * 1024 * 1024, 7));
   for (const fallback of [false, true]) {
@@ -452,7 +450,7 @@ test('W24 offline transport refuses uncached URLs, never falls through to real c
 });
 
 test('W24 actual offline installer: 134MB gates before ZIP and before rename, old bundle intact; timed successful assembly', () => {
-  const root = mkdtempSync(join(tmpdir(), 'w24-install-e2e-'));
+  const root = testScratch('w24-install-e2e-');
   const assets = join(root, 'assets'), app = join(root, 'candidate/TATWO OS.app');
   mkdirSync(assets); mkdirSync(join(app, 'Contents/MacOS'), {recursive:true});
   copyFileSync('/usr/bin/true', join(app, 'Contents/MacOS/tatwo2'));
@@ -501,15 +499,18 @@ test('W24 actual offline installer: 134MB gates before ZIP and before rename, ol
       console.log(`W24 actual install.sh offline 80MiB signed fixture, mocked identity presentation/open/df: ${seconds}s`);
       assert.ok(existsSync(join(dir,'open.calls')));
       const archives=join(dir,'home/Library/Application Support/TATWO OS/UpdateArchives');
-      const receipt=JSON.parse(readFileSync(join(archives,readdirSync(archives)[0],'result.json'),'utf8'));
+      const saved=readdirSync(archives).find(n=>n.startsWith('.tatwo-update.backup.'));
+      const receipt=JSON.parse(readFileSync(join(archives,saved,'result.json'),'utf8'));
       assert.ok(Number.isInteger(receipt.installSeconds));
     } else {
       assert.match(r.stderr,/空間不足.*清出至少/);
       assert.deepEqual(readFileSync(join(dest,'Contents/Info.plist')),oldInfo);
       assert.ok(!existsSync(dest+'.old')); assert.ok(!existsSync(join(dir,'open.calls')));
       if(mode==='before-download') {
-        const temp=readdirSync(join(dir,'tmp')).find(n=>n.startsWith('tatwo-install.'));
-        assert.ok(!existsSync(join(dir,'tmp',temp,'TATWO-OS.zip')));
+        const archives=join(dir,'home/Library/Application Support/TATWO OS/UpdateArchives');
+        const failed=readdirSync(archives).find(n=>n.startsWith('failed-.tatwo-update.'));
+        assert.ok(failed);
+        assert.ok(!existsSync(join(archives,failed,'download/TATWO-OS.zip')));
       }
     }
   }

@@ -32,22 +32,30 @@ struct BrowserImportFlowView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.laneCardPadding) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.laneRowSpacing) {
             header
             ScrollView {
                 content
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, BrowserSidebarMetrics.childGap)
+                    .frame(maxWidth: .infinity, minHeight: BrowserSidebarMetrics.importPaneMinHeight, alignment: .topLeading)
+                    .padding(BrowserSidebarMetrics.importPanePadding)
+                    .background(LiquidGlassTokens.browserGroundFill,
+                                in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.importPaneRadius))
             }
             .animation(animation, value: coordinator.state)
             Divider()
             footer
         }
-        .font(.system(size: BrowserSidebarMetrics.rowFontSize))
-        .padding(BrowserSidebarMetrics.laneCardOuterInset)
+        .font(.system(size: BrowserSidebarMetrics.importBodyFontSize))
+        .padding(.top, BrowserSidebarMetrics.importTopPadding)
+        .padding(.horizontal, BrowserSidebarMetrics.importHorizontalPadding)
+        .padding(.bottom, BrowserSidebarMetrics.importBottomPadding)
         .frame(width: BrowserSidebarMetrics.importSheetWidth, height: BrowserSidebarMetrics.importSheetHeight)
-        .background(.regularMaterial)
+        .background(LiquidGlassTokens.browserFieldFill,
+                    in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.importSheetCornerRadius))
+        .clipShape(RoundedRectangle(cornerRadius: BrowserSidebarMetrics.importSheetCornerRadius))
+        .foregroundStyle(LiquidGlassTokens.browserInk)
         .tint(LiquidGlassTokens.brandAccent)
+        .environment(\.colorScheme, .light)
         .interactiveDismissDisabled(coordinator.isRunning)
         .task { await coordinator.begin() }
         .onDisappear { coordinator.cancel() }
@@ -67,17 +75,27 @@ struct BrowserImportFlowView: View {
                     .font(.system(size: BrowserSidebarMetrics.importTitleSize, weight: .semibold))
                 Spacer()
                 Text("\(coordinator.state.step) / \(BrowserSidebarMetrics.importStepCount)")
-                    .monospacedDigit().foregroundStyle(.secondary)
+                    .monospacedDigit().foregroundStyle(LiquidGlassTokens.browserMutedInk)
                     .accessibilityLabel("第 \(coordinator.state.step) 幕，共四幕")
             }
-            HStack(spacing: BrowserSidebarMetrics.rowSpacing) {
-                ForEach(1...BrowserSidebarMetrics.importStepCount, id: \.self) { step in
-                    Capsule()
-                        .fill(step <= coordinator.state.step ? LiquidGlassTokens.brandAccent : Color.secondary.opacity(LiquidGlassTokens.tintOpacity))
-                        .frame(height: BrowserSidebarMetrics.spaceDotSize)
+            HStack(spacing: BrowserSidebarMetrics.importStepSpacing) {
+                ForEach(Array(["1 來源", "2 資料", "3 Keychain", "4 進度 → 完成"].enumerated()), id: \.offset) { index, title in
+                    let selected = index + 1 == coordinator.state.step
+                    Text(title)
+                        .font(.system(size: BrowserSidebarMetrics.metaFontSize, weight: .semibold))
+                        .foregroundStyle(selected ? LiquidGlassTokens.browserInk : LiquidGlassTokens.browserMutedInk)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, BrowserSidebarMetrics.importStepPadding)
+                        .background(selected ? LiquidGlassTokens.brandAccent.opacity(BrowserSidebarMetrics.importStepFillOpacity) : LiquidGlassTokens.browserChipFill,
+                                    in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.importStepRadius))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: BrowserSidebarMetrics.importStepRadius)
+                                .strokeBorder(selected ? LiquidGlassTokens.brandAccent.opacity(BrowserSidebarMetrics.importStepBorderOpacity) : .clear,
+                                              lineWidth: BrowserSidebarMetrics.importStepBorderWidth)
+                        }
+                        .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
-            .accessibilityHidden(true)
         }
     }
 
@@ -98,7 +116,7 @@ struct BrowserImportFlowView: View {
         case .failed(let reason):
             Label("未能完成導入", systemImage: "exclamationmark.triangle")
                 .font(.system(size: BrowserSidebarMetrics.importTitleSize, weight: .semibold))
-            Text(reason).foregroundStyle(.secondary)
+            Text(reason).foregroundStyle(LiquidGlassTokens.browserMutedInk)
             if coordinator.source == .safari { safariHelp }
             progressRows(coordinator.progress)
         }
@@ -106,30 +124,37 @@ struct BrowserImportFlowView: View {
 
     private var sourceChoices: some View {
         VStack(alignment: .leading, spacing: BrowserSidebarMetrics.laneRowSpacing) {
-            Text("把熟悉的書籤與分頁帶過來。").foregroundStyle(.secondary)
+            Text("把熟悉的書籤與分頁帶過來。").foregroundStyle(LiquidGlassTokens.browserMutedInk)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: BrowserSidebarMetrics.importSourceColumns),
-                      spacing: BrowserSidebarMetrics.rowSpacing) {
+                      spacing: BrowserSidebarMetrics.importStepSpacing) {
                 ForEach(coordinator.sources) { info in
                     Button { coordinator.selectSource(info.source) } label: {
                         HStack(spacing: BrowserSidebarMetrics.rowSpacing) {
                             Image(systemName: info.source.symbol)
-                                .font(.system(size: BrowserSidebarMetrics.laneCardPadding))
-                                .frame(width: BrowserSidebarMetrics.childLeadingInset)
+                                .font(.system(size: BrowserSidebarMetrics.importSourceIconSize))
+                                .frame(width: BrowserSidebarMetrics.importSourceIconSize)
                             VStack(alignment: .leading, spacing: BrowserSidebarMetrics.childGap) {
-                                Text(info.source.rawValue).fontWeight(.semibold)
+                                Text(info.source.rawValue).font(.system(size: BrowserSidebarMetrics.importSourceFontSize, weight: .semibold))
                                 Text(sourceStatus(info))
                                     .font(.system(size: BrowserSidebarMetrics.metaFontSize))
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(LiquidGlassTokens.browserMutedInk)
                             }
                             Spacer(minLength: BrowserSidebarMetrics.childGap)
                             if coordinator.source == info.source { Image(systemName: "checkmark.circle.fill") }
                         }
-                        .padding(BrowserSidebarMetrics.laneRowSpacing)
+                        .padding(.vertical, BrowserSidebarMetrics.importSourceVerticalPadding)
+                        .padding(.horizontal, BrowserSidebarMetrics.importSourceHorizontalPadding)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(coordinator.source == info.source
-                            ? LiquidGlassTokens.brandAccent.opacity(LiquidGlassTokens.tintOpacity)
-                            : Color.secondary.opacity(LiquidGlassTokens.subtleFillOpacity),
+                            ? LiquidGlassTokens.brandAccent.opacity(BrowserSidebarMetrics.importSourceFillOpacity)
+                            : LiquidGlassTokens.browserChipFill,
                             in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowCornerRadius))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowCornerRadius)
+                                .strokeBorder(coordinator.source == info.source
+                                    ? LiquidGlassTokens.brandAccent.opacity(BrowserSidebarMetrics.importSourceBorderOpacity) : .clear,
+                                              lineWidth: BrowserSidebarMetrics.importSourceBorderWidth)
+                        }
                     }
                     .buttonStyle(.plain).disabled(!info.canSelect)
                     .accessibilityAddTraits(coordinator.source == info.source ? [.isSelected] : [])
@@ -137,7 +162,7 @@ struct BrowserImportFlowView: View {
                 }
             }
             if let source = coordinator.source {
-                Text(source.explanation).foregroundStyle(.secondary)
+                Text(source.explanation).foregroundStyle(LiquidGlassTokens.browserMutedInk)
                 if let info = coordinator.selectedSourceInfo, !info.profiles.isEmpty {
                     Picker("設定檔", selection: Binding(get: { coordinator.profileID }, set: { coordinator.selectProfile($0) })) {
                         ForEach(info.profiles) { profile in
@@ -147,7 +172,7 @@ struct BrowserImportFlowView: View {
                 }
                 if source == .safari { safariHelp }
             }
-            Text("Firefox 不支援。").font(.system(size: BrowserSidebarMetrics.metaFontSize)).foregroundStyle(.secondary)
+            Text("Firefox 不支援。").font(.system(size: BrowserSidebarMetrics.metaFontSize)).foregroundStyle(LiquidGlassTokens.browserMutedInk)
         }
     }
 
@@ -165,31 +190,34 @@ struct BrowserImportFlowView: View {
             Picker("導入至 Browser space", selection: Binding(get: { coordinator.spaceID }, set: { coordinator.selectSpace($0) })) {
                 ForEach(coordinator.destinationSpaces) { space in Text(space.name).tag(Optional(space.id)) }
             }
-            ForEach(ImportData.allCases) { kind in
-                VStack(alignment: .leading, spacing: BrowserSidebarMetrics.childGap) {
-                    Toggle(isOn: Binding(get: { coordinator.selectedData.contains(kind) },
-                                         set: { coordinator.setData(kind, selected: $0) })) {
-                        Label(kind.title, systemImage: kind.symbol)
-                    }
-                    .toggleStyle(.checkbox)
-                    .disabled(!(coordinator.source?.availableData.contains(kind) ?? false))
-                    Text(dataDetail(kind))
-                        .font(.system(size: BrowserSidebarMetrics.metaFontSize))
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, BrowserSidebarMetrics.childLeadingInset)
-                    if kind == .passwords && coordinator.selectedData.contains(.passwords) {
-                        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.childGap) {
-                            Button("或從 CSV 檔匯入…") { pickingPasswordFile = true }
-                                .buttonStyle(.link)
-                            if coordinator.hasPasswordFile {
-                                Label("已選取 CSV 備援檔", systemImage: "checkmark.circle")
-                                Button("改用瀏覽器直接導入") { coordinator.selectPasswordFile(nil) }
-                            }
-                            if let message = coordinator.passwordFileMessage {
-                                Text(message).foregroundStyle(.secondary)
-                            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: BrowserSidebarMetrics.importDataColumnSpacing, alignment: .topLeading), count: BrowserSidebarMetrics.importDataColumns),
+                      alignment: .leading, spacing: BrowserSidebarMetrics.importDataRowSpacing) {
+                ForEach(ImportData.allCases) { kind in
+                    VStack(alignment: .leading, spacing: BrowserSidebarMetrics.childGap) {
+                        Toggle(isOn: Binding(get: { coordinator.selectedData.contains(kind) },
+                                             set: { coordinator.setData(kind, selected: $0) })) {
+                            Label(kind.title, systemImage: kind.symbol)
                         }
-                        .padding(.leading, BrowserSidebarMetrics.childLeadingInset)
+                        .toggleStyle(.checkbox)
+                        .disabled(!(coordinator.source?.availableData.contains(kind) ?? false))
+                        Text(dataDetail(kind))
+                            .font(.system(size: BrowserSidebarMetrics.metaFontSize))
+                            .foregroundStyle(LiquidGlassTokens.browserMutedInk)
+                            .padding(.leading, BrowserSidebarMetrics.childLeadingInset)
+                        if kind == .passwords && coordinator.selectedData.contains(.passwords) {
+                            VStack(alignment: .leading, spacing: BrowserSidebarMetrics.childGap) {
+                                Button("或從 CSV 檔匯入…") { pickingPasswordFile = true }
+                                    .buttonStyle(.link)
+                                if coordinator.hasPasswordFile {
+                                    Label("已選取 CSV 備援檔", systemImage: "checkmark.circle")
+                                    Button("改用瀏覽器直接導入") { coordinator.selectPasswordFile(nil) }
+                                }
+                                if let message = coordinator.passwordFileMessage {
+                                    Text(message).foregroundStyle(LiquidGlassTokens.browserMutedInk)
+                                }
+                            }
+                            .padding(.leading, BrowserSidebarMetrics.childLeadingInset)
+                        }
                     }
                 }
             }
@@ -211,19 +239,26 @@ struct BrowserImportFlowView: View {
 
     private var passwordNotice: some View {
         VStack(alignment: .leading, spacing: BrowserSidebarMetrics.laneCardPadding) {
-            Image(systemName: "key.viewfinder")
-                .font(.system(size: BrowserSidebarMetrics.importHeroSize))
-                .foregroundStyle(LiquidGlassTokens.brandAccent).accessibilityHidden(true)
-            Text(coordinator.hasPasswordFile ? "從 CSV 備援檔導入" : "允許讀取密碼保護金鑰")
-                .font(.system(size: BrowserSidebarMetrics.importTitleSize, weight: .semibold))
-            if coordinator.hasPasswordFile {
-                Text("CSV 含未加密密碼。只在記憶體解析，不建立副本；原始 CSV 不會自動刪除，請妥善保管或自行移除。")
-            } else {
-                Text("macOS 會詢問是否允許 TATWO OS 讀取 \(coordinator.source?.rawValue ?? "來源瀏覽器") 的密碼保護金鑰，請按『永遠允許』")
-                Text("只在你按下「開始導入」後讀取，密碼只在記憶體解密，再寫入 TATWO 保險庫；暫存資料庫讀完即刪。")
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: BrowserSidebarMetrics.laneRowSpacing) {
+                Text("🔑")
+                    .font(.system(size: BrowserSidebarMetrics.importKeyFontSize))
+                    .frame(width: BrowserSidebarMetrics.importKeySize, height: BrowserSidebarMetrics.importKeySize)
+                    .background(LiquidGlassTokens.browserChipFill,
+                                in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.importKeyRadius))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: BrowserSidebarMetrics.rowHorizontalPadding) {
+                    Text(coordinator.hasPasswordFile ? "從 CSV 備援檔導入" : "允許讀取密碼保護金鑰")
+                        .font(.system(size: BrowserSidebarMetrics.importTitleSize, weight: .semibold))
+                    if coordinator.hasPasswordFile {
+                        Text("CSV 含未加密密碼。只在記憶體解析，不建立副本；原始 CSV 不會自動刪除，請妥善保管或自行移除。")
+                    } else {
+                        Text("macOS 會詢問是否允許 TATWO OS 讀取 \(coordinator.source?.rawValue ?? "來源瀏覽器") 的密碼保護金鑰，請按『永遠允許』")
+                        Text("只在你按下「開始導入」後讀取，密碼只在記憶體解密，再寫入 TATWO 保險庫；暫存資料庫讀完即刪。")
+                            .foregroundStyle(LiquidGlassTokens.browserMutedInk)
+                    }
+                }
             }
-            Text("若拒絕授權，會略過密碼，其它資料繼續導入。").foregroundStyle(.secondary)
+            Text("若拒絕授權，會略過密碼，其它資料繼續導入。").foregroundStyle(LiquidGlassTokens.browserMutedInk)
             Button("略過密碼，繼續導入") { coordinator.skipPasswordsAndStart() }
         }
     }
@@ -231,32 +266,31 @@ struct BrowserImportFlowView: View {
     private var safariHelp: some View {
         VStack(alignment: .leading, spacing: BrowserSidebarMetrics.rowSpacing) {
             Text("若讀不到 Safari 書籤：系統設定 › 隱私權與安全性 › 完整磁碟取用權，允許 TATWO OS。必要時重新開啟 App 後再導入。")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(LiquidGlassTokens.browserMutedInk)
             Button("打開系統設定") { NSWorkspace.shared.open(BrowserImportSources.fullDiskAccessURL) }
         }
     }
 
     private func progressContent(_ progress: BrowserImportProgress) -> some View {
         VStack(alignment: .leading, spacing: BrowserSidebarMetrics.laneCardPadding) {
-            HStack(spacing: BrowserSidebarMetrics.laneCardPadding) {
+            HStack(alignment: .top, spacing: BrowserSidebarMetrics.laneRowSpacing) {
+                progressRows(progress).frame(maxWidth: .infinity, alignment: .leading)
                 ZStack {
-                    Circle().stroke(Color.secondary.opacity(LiquidGlassTokens.tintOpacity),
+                    Circle().inset(by: BrowserSidebarMetrics.importProgressInset).stroke(Color.secondary.opacity(LiquidGlassTokens.tintOpacity),
                                     lineWidth: BrowserSidebarMetrics.importProgressStroke)
-                    Circle().trim(from: 0, to: progress.fraction)
+                    Circle().inset(by: BrowserSidebarMetrics.importProgressInset).trim(from: 0, to: progress.fraction)
                         .stroke(LiquidGlassTokens.brandAccent, style: StrokeStyle(lineWidth: BrowserSidebarMetrics.importProgressStroke, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
+                        .rotationEffect(.degrees(BrowserSidebarMetrics.importProgressRotation))
                     Text("\(Int(progress.fraction * 100))%").monospacedDigit()
+                        .font(.system(size: BrowserSidebarMetrics.importProgressFontSize, weight: .bold))
                 }
                 .frame(width: BrowserSidebarMetrics.importProgressSize, height: BrowserSidebarMetrics.importProgressSize)
                 .animation(animation, value: progress.fraction)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("導入進度").accessibilityValue("\(Int(progress.fraction * 100))%")
-                VStack(alignment: .leading, spacing: BrowserSidebarMetrics.rowSpacing) {
-                    Text(coordinator.cancelRequested ? "正在停止…" : "正在帶入你的資料").fontWeight(.semibold)
-                    Text("取消會保留已完成的項目，不影響來源瀏覽器。").foregroundStyle(.secondary)
-                }
             }
-            progressRows(progress)
+            Text(coordinator.cancelRequested ? "正在停止…" : "正在帶入你的資料").fontWeight(.semibold)
+            Text("取消會保留已完成的項目，不影響來源瀏覽器。").foregroundStyle(LiquidGlassTokens.browserMutedInk)
         }
     }
 
@@ -267,12 +301,12 @@ struct BrowserImportFlowView: View {
                 HStack {
                     Label(kind.title, systemImage: kind.symbol)
                     Spacer()
-                    Text(count.label).monospacedDigit()
+                    Text(count.label).monospacedDigit().fontWeight(.bold)
                         .contentTransition(reduceMotion ? .identity : .numericText())
                     if count.finished { Image(systemName: count.reason == nil ? "checkmark.circle" : "info.circle") }
                 }
                 if let reason = count.reason {
-                    Text(reason).font(.system(size: BrowserSidebarMetrics.metaFontSize)).foregroundStyle(.secondary)
+                    Text(reason).font(.system(size: BrowserSidebarMetrics.metaFontSize)).foregroundStyle(LiquidGlassTokens.browserMutedInk)
                 }
             }
         }
@@ -280,23 +314,30 @@ struct BrowserImportFlowView: View {
 
     private func summaryContent(_ summary: BrowserImportSummary) -> some View {
         VStack(alignment: .leading, spacing: BrowserSidebarMetrics.laneCardPadding) {
-            Label(summary.cancelled ? "導入已取消" : (summary.hasIssues ? "導入結束，部分項目未導入" : "準備好了"),
-                  systemImage: summary.cancelled ? "pause.circle" : "checkmark.circle")
-                .font(.system(size: BrowserSidebarMetrics.importTitleSize, weight: .semibold))
+            HStack(spacing: BrowserSidebarMetrics.rowHorizontalPadding) {
+                Image(systemName: summary.cancelled ? "pause" : (summary.hasIssues ? "exclamationmark" : "checkmark"))
+                    .font(.system(size: BrowserSidebarMetrics.importCompletionFontSize, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: BrowserSidebarMetrics.importCompletionSize, height: BrowserSidebarMetrics.importCompletionSize)
+                    .background(summary.cancelled || summary.hasIssues ? Color.secondary : LiquidGlassTokens.browserSuccessFill, in: Circle())
+                    .accessibilityHidden(true)
+                Text(summary.cancelled ? "導入已取消" : (summary.hasIssues ? "導入結束，部分項目未導入" : "準備好了"))
+                    .font(.system(size: BrowserSidebarMetrics.importBodyFontSize, weight: .bold))
+            }
             progressRows(summary.progress)
             if !summary.extensions.isEmpty {
                 Text("找到的擴充功能").fontWeight(.semibold)
-                ForEach(summary.extensions) { item in Text("\(item.name) · \(item.version)").foregroundStyle(.secondary) }
+                ForEach(summary.extensions) { item in Text("\(item.name) · \(item.version)").foregroundStyle(LiquidGlassTokens.browserMutedInk) }
             }
             if coordinator.source == .safari && summary.hasIssues { safariHelp }
-            Text("原瀏覽器的資料未被更動。").foregroundStyle(.secondary)
+            Text("原瀏覽器的資料未被更動。").foregroundStyle(LiquidGlassTokens.browserMutedInk)
         }
     }
 
     private var footer: some View {
         HStack(spacing: BrowserSidebarMetrics.rowSpacing) {
-            if coordinator.canGoBack { Button("上一步") { coordinator.back() } }
             Spacer()
+            if coordinator.canGoBack { Button("上一步") { coordinator.back() } }
             if coordinator.isRunning {
                 Button("取消") { coordinator.cancel() }.disabled(coordinator.cancelRequested).keyboardShortcut(.cancelAction)
             } else if case .done = coordinator.state {

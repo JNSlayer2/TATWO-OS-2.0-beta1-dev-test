@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const read = p => readFileSync(new URL('../' + p, import.meta.url), 'utf8');
 const install = read('install.sh');
+const hygiene = install.split('# UPDATE-ARCHIVE-HYGIENE-BEGIN\n')[1].split('# UPDATE-ARCHIVE-HYGIENE-END')[0];
 const transaction = install.split('# TRANSACTION-BEGIN\n')[1].split('# TRANSACTION-END')[0];
 const root = () => mkdtempSync(join(tmpdir(), 'w29a-'));
 const shell = (code, env = {}) => spawnSync('/bin/bash', ['-c', `set -eu\n${code}`], {encoding:'utf8', env:{...process.env,...env}});
@@ -119,7 +120,7 @@ test('D6 SIGKILL after atomic mkdir and owner write leaves a reclaimable dead lo
 test('D7 failed pre-transaction stage is archived; age sweep excludes transaction stages', () => {
   const dir=root(), stage=join(dir,'.tatwo-update.failure.noindex'); mkdirSync(stage);
   const cleanup=install.slice(install.indexOf('cleanup() {'),install.indexOf('trap cleanup EXIT'));
-  const r=shell(`${cleanup}\nCOMMITTED=0; REPLACED=0; LOCK=""; PREVIOUS=""; cleanup`,{HOME:dir,STAGE:stage,DEST:join(dir,'App.app')});
+  const r=shell(`${transaction}\n${hygiene}\n${cleanup}\nCOMMITTED=0; REPLACED=0; LOCK=""; PREVIOUS=""; cleanup`,{HOME:dir,STAGE:stage,DEST:join(dir,'App.app')});
   assert.equal(r.status,0,r.stderr); assert.ok(!existsSync(stage));
   assert.ok(existsSync(join(dir,'Library/Application Support/TATWO OS/UpdateArchives/failed-.tatwo-update.failure.noindex')));
   for(const [name,tx] of [['orphan',false],['transaction',true]]) {
@@ -128,9 +129,9 @@ test('D7 failed pre-transaction stage is archived; age sweep excludes transactio
     spawnSync('touch',['-t','202001010000',p]);
   }
   const retention=install.split('# TEMP-RETENTION-BEGIN\n')[1].split('# TEMP-RETENTION-END')[0];
-  const sweep=shell(`trash() { mv "$1" "$1.trashed"; }\n${retention}\narchive_old_downloads`,{TMPDIR:dir,DEST:join(dir,'App.app')});
+  const sweep=shell(`trash() { exit 90; }\n${transaction}\n${hygiene}\n${retention}\narchive_old_downloads`,{HOME:dir,TMPDIR:dir,DEST:join(dir,'App.app')});
   assert.equal(sweep.status,0,sweep.stderr);
-  assert.ok(existsSync(join(dir,'.tatwo-update.orphan.noindex.trashed')));
+  assert.ok(existsSync(join(dir,'.tatwo-update.orphan.noindex')));
   assert.ok(existsSync(join(dir,'.tatwo-update.transaction.noindex/transaction.json')));
 });
 test('D12 withdrawal gates reject missing authorization and non-TTY without invoking gh', () => {

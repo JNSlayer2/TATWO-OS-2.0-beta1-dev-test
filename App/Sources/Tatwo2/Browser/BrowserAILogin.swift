@@ -19,6 +19,11 @@ protocol BrowserAILoginTarget: AnyObject {
     func cancelAgentLogin()
     func fillCredentialForAgentUsername(_ username: String, password: String, formID: String,
                                        navigationGeneration: UInt64) -> Bool
+    func fillOneTimeCodeForAgent(_ code: String, navigationGeneration: UInt64) -> Bool
+}
+
+extension BrowserAILoginTarget {
+    func fillOneTimeCodeForAgent(_ code: String, navigationGeneration: UInt64) -> Bool { false }
 }
 
 /// The only agent login coordinator. All dependencies are native-bound, never MCP arguments.
@@ -35,6 +40,7 @@ enum BrowserAILogin {
                       timeout: TimeInterval = 30) async throws -> Result {
         var decision = "denied"
         var accountName = username ?? ""
+        var accountID: UUID?
         let host = URLComponents(string: raw)?.host ?? ""
         do {
             guard target.aiLoginIsAgent else { throw AIVaultLoginError("ai_login_human_tab_denied") }
@@ -50,6 +56,7 @@ enum BrowserAILogin {
             guard !matches.isEmpty else { throw AIVaultLoginError("ai_login_no_account") }
             guard matches.count == 1, let account = matches.first else { throw AIVaultLoginError("ai_login_ambiguous_account") }
             accountName = account.username
+            accountID = account.id
             let generation = target.navigationGeneration
             let revision = vault.revision
             func pageCurrent() -> Bool {
@@ -67,7 +74,7 @@ enum BrowserAILogin {
             }
             let form = target.aiLoginState
             guard form.error.isEmpty else { throw AIVaultLoginError(form.error) }
-            guard pageCurrent(), form.phase == "ready", !form.formID.isEmpty, form.generation == generation else {
+            guard pageCurrent(), ["ready", "two_factor"].contains(form.phase), !form.formID.isEmpty, form.generation == generation else {
                 throw AIVaultLoginError("ai_login_stale_page")
             }
             decision = policy.rawValue
@@ -79,10 +86,26 @@ enum BrowserAILogin {
             guard pageCurrent() else { throw AIVaultLoginError("ai_login_stale_page") }
             // Persist the authorization before a side effect. Failure to audit prevents dispatch.
             try audit(host, accountName, decision)
-            try vault.fillForApprovedLogin(account.id, caller: caller, origin: origin) { user, password in
-                guard pageCurrent() else { return false }
-                return target.fillCredentialForAgentUsername(user, password: password, formID: form.formID,
-                    navigationGeneration: generation)
+            var usedTOTP = false
+            func fillTOTP(_ state: BrowserAILoginState) throws {
+                guard !usedTOTP, state.generation == target.navigationGeneration,
+                      BrowserPasswordOrigin.normalized(target.aiLoginOrigin ?? "") == origin else {
+                    throw AIVaultLoginError("ai_login_two_factor_required")
+                }
+                guard try vault.fillTOTPForApprovedLogin(account.id, caller: caller, origin: origin, fill: { code in
+                    guard current(), !Task.isCancelled, vault.revision == revision else { return false }
+                    return target.fillOneTimeCodeForAgent(code, navigationGeneration: state.generation)
+                }) else { throw AIVaultLoginError("ai_login_two_factor_required") }
+                usedTOTP = true
+            }
+            if form.phase == "two_factor" {
+                try fillTOTP(form)
+            } else {
+                try vault.fillForApprovedLogin(account.id, caller: caller, origin: origin) { user, password in
+                    guard pageCurrent() else { return false }
+                    return target.fillCredentialForAgentUsername(user, password: password, formID: form.formID,
+                        navigationGeneration: generation)
+                }
             }
             decision = "dispatched"
             // The renderer, not a timer or URL change, produces complete after the next load_end scan.
@@ -93,6 +116,7 @@ enum BrowserAILogin {
                 }
                 let state = target.aiLoginState
                 guard state.error.isEmpty else { throw AIVaultLoginError(state.error) }
+                if state.phase == "two_factor" { try fillTOTP(state) }
                 if state.phase == "complete", state.generation > generation {
                     guard BrowserPasswordOrigin.normalized(target.aiLoginOrigin ?? "") == origin,
                           BrowserPasswordOrigin.normalized(state.finalURL) == origin else {
@@ -112,6 +136,9 @@ enum BrowserAILogin {
         } catch {
             // Only allowlisted/native codes reach audit/wire; Keychain/provider errors never do.
             let code = (error as? AIVaultLoginError)?.description ?? "ai_login_storage_or_cancelled"
+            if code == "ai_login_two_factor_required", let accountID {
+                try? vault.recordTwoFactorRequired(accountID)
+            }
             try? audit(host, accountName, "\(decision):\(code)")
             throw AIVaultLoginError(code)
         }

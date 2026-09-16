@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -25,7 +26,7 @@ test('native note store and panel preserve edits, selection and search', {
   const pressure = run('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level']).stdout.trim();
   // Previously measured ~274 MiB for this one serial fixture, not an App build.
   assert.equal(pressure, '1', `defer fixture at pressure=${pressure}`);
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('tatwo2-global-note-regression-');
   mkdirSync(output, { recursive: true });
   const scratch = mkdtempSync(path.join(output, 'note-regression.'));
   const lockScript = path.join(repo, 'scripts/tatwo-build-lock.sh');

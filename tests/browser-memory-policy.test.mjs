@@ -1,3 +1,4 @@
+import { testScratch, stageFixtureFiles } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,13 +11,13 @@ const browser = 'App/Sources/Tatwo2/Browser/';
 const read = name => fs.readFileSync(path.join(root, name), 'utf8');
 const policyFiles = ['BrowserMemoryPolicy', 'BrowserMemorySettings', 'BrowserNativeMemoryBudget']
   .map(name => browser + name + '.swift');
-const run = (cmd, args) => {
-  const result = spawnSync(cmd, args, {cwd: root, encoding: 'utf8', timeout: 90000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''}});
+const run = (cmd, args, options = {}) => {
+  const result = spawnSync(cmd, args, {cwd: root, encoding: 'utf8', timeout: 90000, env: {...process.env, TATWO_BROWSER_SLEEP_SECONDS: ''}, ...options});
   assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stdout}\n${result.stderr}`);
   return result.stdout;
 };
 function fixture(name, source, extra = []) {
-  const dir = path.join(root, '.build/w60b/tests', name);
+  const dir = path.join(testScratch('browser-memory-policy-'), name);
   fs.mkdirSync(dir, {recursive: true});
   const file = path.join(dir, 'Checks.swift'), binary = path.join(dir, 'checks');
   fs.writeFileSync(file, source);
@@ -254,15 +255,20 @@ test('W60b native wiring, secure flags, settings and diagnostics retain honest p
 test('W60b ten-tab sampler executes and reports unavailable helper RSS as null, not zero/PASS', {
   skip: process.platform !== 'darwin',
 }, () => {
-  const dir = path.join(root, '.build/w60b/perf-fixture');
+  const dir = testScratch('browser-memory-policy-');
   fs.mkdirSync(dir, {recursive: true});
   const registry = path.join(dir, 'tabs.json');
   fs.writeFileSync(registry, JSON.stringify({
     tabs: Array.from({length: 10}, (_, i) => ({tab: {isSleeping: i >= 4}})),
   }));
   // Read-only sampling of this test process, not a real browser workload.
+  const sandbox = stageFixtureFiles([
+    'scripts/browser-perf.sh', 'scripts/tatwo-build-lock.sh',
+    'App/Sources/Tatwo2/Browser/Diagnostics/BrowserProcessSampler.swift',
+  ]);
+  // The outer deadline includes the real script's 120s compiler-lock wait.
   const output = run('bash', ['scripts/browser-perf.sh', '--capture-ten',
-    String(process.pid), dir, registry]);
+    String(process.pid), dir, registry], { cwd: sandbox, timeout: 220000 });
   const sample = JSON.parse(output);
   assert.equal(sample.stage, 'after_opening_10_tabs');
   assert.equal(sample.tab_count, 10);

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 // Only unrelated browser-import dependencies are stubbed. The vault, CSV tokenizer,
 // policy, coordinators and settings UI under test are the production sources.
@@ -12,3 +13,6 @@ enum ChromiumImporter {
         raw.flatMap(BrowserPasswordOrigin.normalized).flatMap(URL.init(string:))
     }
 }
+
+// W54 values are provided by the exact production token block in the test runner.
+enum LiquidGlassTokens {}

@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -83,7 +84,7 @@ test('W22 manifests, mode/link/new/deleted files and production offline assembly
 });
 
 test('W30 80 MiB / 2,000 resource files: delta_tree <10s, one hash batch, final seal rejects same-size reuse corruption', t => {
-  const dir = mkdtempSync(join(tmpdir(), "w30-bench-'\\-"));
+  const dir = testScratch("w30-bench-'\\-");
   const old = join(dir, 'old.app'), fresh = join(dir, 'new.app'), payload = join(dir, 'payload');
   mkdirSync(join(old, 'Contents/Resources'), { recursive: true });
   mkdirSync(join(old, 'Contents/MacOS'));

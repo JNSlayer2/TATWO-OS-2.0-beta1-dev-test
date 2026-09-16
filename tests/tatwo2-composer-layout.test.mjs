@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -11,7 +12,7 @@ test('real AppKit composer does not publish stale or unlaid-out heights', { time
   const source = fs.readFileSync(path.join(repo, 'App/Sources/Tatwo2/Chat/ChatPageAppKitBridges.swift'), 'utf8');
   const start = source.indexOf('enum ChatComposerSuggestionKey');
   assert.ok(start > 0);
-  const scratch = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/composer-layout.'));
+  const scratch = testScratch('composer-layout.');
   const program = path.join(scratch, 'checks.swift');
   fs.writeFileSync(program, `
 import AppKit

@@ -453,7 +453,13 @@ extension SelfTest {
                   && fm.contentsOfDirectory(atPath: runtime.deletingLastPathComponent().path).sorted() == before)
             try edited.write(to: runtime)
             check("user edited kept", try apply() == .keptUserEdited && Data(contentsOf: runtime) == edited
-                  && Data(contentsOf: marker) == newMarker && !fm.fileExists(atPath: notice.path))
+                  && Data(contentsOf: marker) == newMarker && fm.fileExists(atPath: notice.path))
+            if let pending = try OSUpstreamRefresh.pendingUpdate(runtimePath: runtime.path, bundled: bundled) {
+                try OSUpstreamRefresh.keepCustomVersion(pending, runtimePath: runtime.path, bundled: bundled)
+                check("kept choice suppresses same contents", try apply() == .keptUserEdited
+                      && OSUpstreamRefresh.pendingUpdate(runtimePath: runtime.path, bundled: bundled) == nil
+                      && !fm.fileExists(atPath: notice.path))
+            } else { check("custom difference available", false) }
             try old.write(to: bundled)
             check("changed bundle notice", try apply() == .keptUserEdited && Data(contentsOf: runtime) == edited)
             let text = try String(contentsOf: notice, encoding: .utf8)

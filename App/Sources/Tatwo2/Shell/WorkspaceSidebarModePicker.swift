@@ -63,6 +63,7 @@ struct WorkspaceSidebarModePicker: View {
         }
         .buttonStyle(.plain)
         .help(mode.subtitle)
-        .accessibilityIdentifier("chat-workspace-mode-\(mode.rawValue.lowercased())")
+        .accessibilityLabel(mode.displayName)
+        .accessibilityIdentifier("workspace.mode.\(mode.rawValue)")
     }
 }

@@ -286,6 +286,7 @@ final class TatwoIslandShellPanel: NSPanel {
 @MainActor
 struct TatwoIslandShellView: View {
     @ObservedObject var state: TatwoIslandShellState
+    @ObservedObject private var notice = IslandNotice.shared
 
     var body: some View {
         GeometryReader { proxy in
@@ -297,6 +298,7 @@ struct TatwoIslandShellView: View {
                         glassIsInteractive: state.isExpanded,
                         onHover: state.setPointerInside
                     )
+                    .opacity(state.isExpanded && notice.current != nil ? 0 : 1)
                     .overlay(alignment: .top) {
                         // W43: ask / confirm / info share the same FIFO surface.
                         IslandNoticeContent(isExpanded: state.isExpanded)

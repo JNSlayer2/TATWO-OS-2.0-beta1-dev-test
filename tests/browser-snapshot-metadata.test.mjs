@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ const source = fs.readFileSync(path.join(repo, 'Apps/TatwoUltraworkMac/Sources/T
 const safeURL = source.slice(source.indexOf('NSURLComponents *SafeURLComponents('), source.indexOf('NSString *CanonicalHost('));
 const snapshotCode = source.slice(source.indexOf('NSString *SnapshotOrigin('), source.indexOf('\nstruct BrowserState;', source.indexOf('NSString *SnapshotOrigin(')));
 assert.ok(safeURL.includes('@catch') && snapshotCode.includes('BuildVisibleSnapshotJSON'));
-const root = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/snapshot-metadata.'));
+const root = testScratch('snapshot-metadata.');
 const program = path.join(root, 'snapshot');
 fs.writeFileSync(path.join(root, 'snapshot.mm'), `
 #import <AppKit/AppKit.h>

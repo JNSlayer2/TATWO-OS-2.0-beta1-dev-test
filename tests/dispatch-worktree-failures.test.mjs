@@ -211,7 +211,11 @@ test('linked-worktree exclusion stays idempotent under inherited git overrides',
 });
 
 test('fixture refuses a scratch root inside the production checkout before creating anything', () => {
-  const unsafeScratch = path.join(repo, 'output/lightweight-repair');
+  // Represent the enclosing production checkout with an owned repository.
+  // No other test can add entries while this guard compares before/after.
+  const unsafeCheckout = repository('unsafe-checkout');
+  const unsafeScratch = path.join(unsafeCheckout, 'scratch');
+  fs.mkdirSync(unsafeScratch);
   const before = fs.readdirSync(unsafeScratch).sort();
   const result = spawnSync(process.execPath, ['--test', path.join(repo, 'tests/dispatch-worktree-failures.test.mjs')], {
     cwd: repo, encoding: 'utf8', timeout: 10000,

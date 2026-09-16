@@ -1,3 +1,5 @@
+import { writeBrowserVisualTokens } from './helpers/browser-visual-fixture.mjs';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -6,8 +8,8 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const read = p => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
-const noticePath = new URL('../App/Sources/Tatwo2/New/IslandNotice.swift', import.meta.url).pathname;
-const compatPath = new URL('../App/Sources/Tatwo2/New/ComputerUseConsentPrompt.swift', import.meta.url).pathname;
+const noticePath = fileURLToPath(new URL('../App/Sources/Tatwo2/New/IslandNotice.swift', import.meta.url));
+const compatPath = fileURLToPath(new URL('../App/Sources/Tatwo2/New/ComputerUseConsentPrompt.swift', import.meta.url));
 const facade = read('App/Sources/Tatwo2/Facade/OS1Stubs.swift');
 const interrupt = facade.slice(facade.indexOf('enum TatwoInterruptKind'), facade.indexOf('// MARK: - CLI 假水電'));
 const run = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', timeout: 120_000 });
@@ -196,10 +198,34 @@ struct ComputerUseArrowGlyph: View {
         pump { cancelled != nil }
         precondition(cancelled == .cancel && shared.current == nil)
         print("compatibility cancellation ownership / Task cancellation passed")
+        if let destination = ProcessInfo.processInfo.environment["W54_ISLAND_UI_EVIDENCE_DIR"] {
+            let root = URL(fileURLWithPath: destination)
+            try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            NSApplication.shared.setActivationPolicy(.accessory)
+            for (name, kind, title, detail) in [("ask", IslandNotice.Kind.ask, "example.com 想用麥克風", "允許這個網站使用麥克風？"),
+                ("confirm", .confirm, "網頁想執行工具", "example.com・set_note・可能修改或送出資料，只允許這一次？"),
+                ("info", .info, "已下載 fixture-report.pdf", "在下載項目裡；6 秒後自動收起")] {
+                let request = IslandNotice.Request(id: UUID(), kind: kind, title: title, detail: detail,
+                    allowLabel: "允許", cancelLabel: "取消", deadline: Date().addingTimeInterval(20))
+                let host = NSHostingView(rootView: ComputerUseConsentCard(request: request))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 346, height: 130),
+                    styleMask: [.borderless], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = host
+                window.orderBack(nil)
+                host.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                host.layoutSubtreeIfNeeded()
+                let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try! bitmap.representation(using: .png, properties: [:])!.write(to: root.appendingPathComponent(name + ".png"))
+                window.close()
+            }
+        }
     }
 }
 `);
-  run('swiftc', ['-swift-version', '6', '-parse-as-library', '-num-threads', '2', noticePath, compatPath, fixture, '-o', binary]);
+  run('swiftc', ['-swift-version', '6', '-parse-as-library', '-num-threads', '2', noticePath, compatPath, fixture, writeBrowserVisualTokens(dir), '-o', binary]);
   const output = run(binary, []);
   for (const expected of ['FIFO / stale click', 'async / queued / blocking', 'injected fallback', 'all presenter overloads', 'compatibility cancellation']) {
     assert.ok(output.includes(expected), output);
@@ -214,7 +240,7 @@ test('shell renders shared content and every interrupt caller preserves the Bool
   const compat = read('App/Sources/Tatwo2/New/ComputerUseConsentPrompt.swift');
   assert.match(compat, /@ObservedObject private var prompt = IslandNotice.shared/);
   assert.match(compat, /request.kind != .info/);
-  assert.match(compat, /frame\(width: 596, height: 124\)/);
+  assert.match(compat, /frame\(width: LiquidGlassTokens.islandBlankWidth, height: LiquidGlassTokens.islandBlankHeight\)/);
   assert.match(compat, /IslandNotice.shared.info\(title:/);
   const app = read('App/Sources/Tatwo2/Shell/AppShell.swift');
   assert.match(app, /NSApp.reply\(toApplicationShouldTerminate: confirmed\)/);

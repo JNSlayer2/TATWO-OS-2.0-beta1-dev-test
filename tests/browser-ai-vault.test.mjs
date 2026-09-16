@@ -1,3 +1,5 @@
+import { testScratch } from './helpers/test-scratch.mjs';
+import { writeBrowserVisualTokens } from './helpers/browser-visual-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, writeFileSync, mkdirSync} from 'node:fs';
@@ -17,15 +19,15 @@ test('W58 isolated services, native actor/form gates, UI labels and no secret to
   const vault = read(app+'Browser/BrowserAIVault.swift');
   assert.match(vault,/KeychainSecretStore\(service: "TATWO OS AI Vault"\)/);
   assert.match(vault,/Browser\/ai-passwords.json/);
-  assert.doesNotMatch(vault.slice(0,vault.indexOf('enum CallerScope')),/var password|let password/);
+  assert.doesNotMatch(vault.slice(0,vault.indexOf('enum CallerScope')),/(?:var|let) password\s*:/);
   assert.doesNotMatch(vault,/BrowserPasswordVault.shared/);
   const native = bridge.match(/- \(BOOL\)fillCredentialForAgentUsername:[\s\S]*?#pragma mark - W58 End/)[0];
   for (const value of ['TatwoCEFBrowserActorAgent','state->ai_login_form.length','state->navigation_generation != g','state->navigation_in_flight','PID_RENDERER']) assert.ok(native.includes(value),value);
   const sections = [...bridge.matchAll(/#pragma mark - W58[^\n]*\n([\s\S]*?)#pragma mark - W58 End/g)].map(m=>m[1]).join('\n');
   assert.doesNotMatch(sections,/ExecuteJavaScript|CefWriteJSON|\b(?:NSLog|printf|LogBrowser\w*|Append\w*Telemetry\w*)\s*\(/);
   assert.match(sections,/W58LoadEnd\(owner, frame, http_status_code\)/);
-  const settings = read(app+'Browser/BrowserPasswordsSettingsView.swift')+read(app+'Browser/BrowserAIVaultSettingsView.swift');
-  for (const label of ['AI 帳號','填入密碼前要 Touch ID','兩步驟驗證下一輪','不會填進你的分頁']) assert.ok(settings.includes(label));
+  const settings = read(app+'Browser/BrowserPasswordsSettingsView.swift')+read(app+'Browser/BrowserAIVaultSettingsView.swift')+read(app+'Browser/BrowserAIVault.swift');
+  for (const label of ['AI 帳號','填入密碼前要 Touch ID','OS 代管']) assert.ok(settings.includes(label));
   const agent = read(app+'Facade/BrowserAgentBridge.swift');
   assert.match(agent,/case "browser_login":/);
   assert.match(agent,/guard view.browserActor == .agent else/);
@@ -99,18 +101,19 @@ test('W58 actual renderer single-use fill, post/same-origin/form/2FA gates and n
 });
 
 test('W58 production Swift vault, coordinator, CSV, Touch ID ordering/cache and UI compile', {skip:process.platform!=='darwin',timeout:180000},()=>{
-  const dir=join(root,'.build/w58/fixture');mkdirSync(dir,{recursive:true});
+  const dir=testScratch('browser-ai-vault-');mkdirSync(dir,{recursive:true});
   const profile=read(app+'Browser/EmbeddedBrowserProfile.swift');
   const metadata=profile.slice(profile.indexOf('struct EmbeddedBrowserPasswordFormMetadata:'),profile.indexOf('struct EmbeddedBrowserNavigationJournal:'));
   writeFileSync(join(dir,'metadata.swift'),'import Foundation\nimport WebKit\n'+metadata);
   const files=['Browser/BrowserPasswordVault.swift','Browser/BrowserPasswordAssist.swift','Browser/BrowserGeneralSettings.swift','Browser/BrowserShortcuts.swift',
+    'Custody/TOTP.swift','Custody/AIICloudImport.swift','Custody/AIAccountEditView.swift',
     'Browser/BrowserAIVault.swift','Browser/BrowserAILogin.swift','Browser/BrowserPasswordsSettingsView.swift','Browser/BrowserAIVaultSettingsView.swift',
     'Browser/Import/BrowserPasswordCSVImport.swift','Browser/Diagnostics/BrowserDiagnosticsAudit.swift','Browser/Diagnostics/BrowserDiagnosticsPrivacy.swift',
     'Chat/TatwoPermissionPreset.swift','Chat/TatwoCodexSandboxMode.swift',
     'Browser/TatwoBrowserLaneCore.swift','Browser/BrowserTabRegistry.swift'].map(f=>app+f);
   const binary=join(dir,'fixture');
   const compile=spawnSync('swiftc',['-parse-as-library','-swift-version','6','-num-threads','2',...files,join(dir,'metadata.swift'),
-    'tests/fixtures/browser-ai-vault-dependencies.swift','tests/fixtures/browser-ai-vault-checks.swift','-o',binary],{cwd:root,encoding:'utf8',timeout:150000});
+    'App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift', 'App/Sources/Tatwo2/Browser/BrowserSettingsComponents.swift', writeBrowserVisualTokens(dir), 'tests/fixtures/browser-ai-vault-dependencies.swift','tests/fixtures/browser-ai-vault-checks.swift','-o',binary],{cwd:root,encoding:'utf8',timeout:150000});
   assert.equal(compile.status,0,compile.stdout+compile.stderr);
   const run=spawnSync(binary,[dir],{encoding:'utf8',timeout:20000});
   assert.equal(run.status,0,run.stdout+run.stderr);
@@ -123,7 +126,7 @@ test('W58 production Swift vault, coordinator, CSV, Touch ID ordering/cache and 
 });
 
 test('W58 real MCP schema binds native caller, rejects overrides and strips extra reply fields',async()=>{
-  const socketPath=join(root,'.build/w58/s-'+process.pid+'.sock');mkdirSync(join(root,'.build/w58'),{recursive:true});
+  const socketPath=join(testScratch('vault-socket-'), 's.sock');
   const requests=[];const server=net.createServer(socket=>{let data='';socket.on('data',b=>data+=b);socket.on('end',()=>{
     const r=JSON.parse(data);requests.push(r);socket.end(JSON.stringify({id:r.id,ok:true,result:{ok:true,finalURL:'https://example.com/home',title:'Home',password:'fixture-secret-wire',extra:'ignored'}})+'\n');
   });});

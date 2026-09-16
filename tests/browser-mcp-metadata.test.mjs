@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 test('real MCP stdio forwards read selectors and explicit submit without leaking extra snapshot fields', async t => {
-  const root = fs.mkdtempSync(path.join(repo, 'output/lightweight-repair/mcpmeta.'));
+  const root = testScratch('mcpmeta.');
   const socketPath = path.join(root, 'b.sock');
   const requests = [];
   const callerThreadID = '00000000-0000-4000-8000-000000000053';

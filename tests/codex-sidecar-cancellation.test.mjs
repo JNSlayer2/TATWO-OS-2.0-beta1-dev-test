@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -22,7 +23,7 @@ const goalEvents = f => f.events.filter(e => e.msg?.subtype === 'goal').map(e =>
 const goalRequests = f => f.requests.filter(r => r.method === 'thread/goal/set');
 
 async function fixture(t) {
-  const output = path.join(root, 'output/lightweight-repair');
+  const output = testScratch('codex-sidecar-cancellation-');
   await fs.mkdir(output, { recursive: true });
   const dir = await fs.mkdtemp(path.join(output, 'cancel-'));
   // UNIX paths have a short platform limit. All artifacts are retained.

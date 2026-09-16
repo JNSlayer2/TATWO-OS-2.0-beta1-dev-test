@@ -1,3 +1,4 @@
+import { writeBrowserVisualTokens } from './helpers/browser-visual-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
@@ -65,7 +66,7 @@ test('W49: real Swift importers, coordinator, stores and view; synthetic profile
     const binary = join(dir, 'fixture');
     const compile = spawnSync('swiftc', [
       '-parse-as-library', '-swift-version', '6', '-num-threads', '2',
-      ...files, 'App/Sources/Tatwo2/Browser/BrowserPasswordVault.swift',
+      ...files, writeBrowserVisualTokens(dir), 'App/Sources/Tatwo2/Browser/BrowserPasswordVault.swift',
       'App/Sources/Tatwo2/Browser/BrowserTabRegistry.swift',
       'App/Sources/Tatwo2/Browser/TatwoBrowserLaneCore.swift',
       'App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift',

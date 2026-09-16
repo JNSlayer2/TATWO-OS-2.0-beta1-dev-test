@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -21,7 +22,7 @@ const writableMCP = {
 // any vendor code can load; no real model, settings, credentials or MCP is used.
 async function runFixture(t, { mode = 'readOnly', resume, mcpConfig = writableMCP,
   tools = [...readTools, ...deniedTools], allow = true } = {}) {
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('claude-sidecar-readonly-');
   await fs.mkdir(output, { recursive: true });
   const root = await fs.mkdtemp(path.join(output, 'claude-readonly.'));
   const sdkFile = path.join(root, 'fake-sdk.mjs');

@@ -1,3 +1,4 @@
+import { writeBrowserVisualTokens } from './helpers/browser-visual-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
@@ -67,10 +68,11 @@ test('W50: real Swift vault/planners and settings compile; behavioral/security f
     const compile = spawnSync('swiftc', [
       '-parse-as-library', '-swift-version', '6', '-num-threads', '2',
       vaultPath, viewPath, 'App/Sources/Tatwo2/Browser/BrowserGeneralSettings.swift', 'App/Sources/Tatwo2/Browser/BrowserShortcuts.swift', metadata,
+      'App/Sources/Tatwo2/Custody/TOTP.swift','App/Sources/Tatwo2/Custody/AIICloudImport.swift','App/Sources/Tatwo2/Custody/AIAccountEditView.swift',
       'App/Sources/Tatwo2/Browser/BrowserAIVault.swift', 'App/Sources/Tatwo2/Browser/BrowserAIVaultSettingsView.swift',
       'App/Sources/Tatwo2/Browser/Import/BrowserPasswordCSVImport.swift',
       'App/Sources/Tatwo2/Chat/TatwoPermissionPreset.swift', 'App/Sources/Tatwo2/Chat/TatwoCodexSandboxMode.swift',
-      'tests/fixtures/browser-ai-vault-dependencies.swift',
+      'App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift', 'App/Sources/Tatwo2/Browser/BrowserSettingsComponents.swift', writeBrowserVisualTokens(dir), 'tests/fixtures/browser-ai-vault-dependencies.swift',
       'tests/fixtures/browser-password-vault-checks.swift', '-o', binary,
     ], { cwd: root, encoding: 'utf8', timeout: 120000 });
     assert.equal(compile.status, 0, `${compile.error ?? ''}\n${compile.stdout}\n${compile.stderr}`);

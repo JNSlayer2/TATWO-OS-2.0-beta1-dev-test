@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -23,7 +24,7 @@ test('feedback is presentation only and preserves caller-owned text', () => {
 test('native feedback states and compact Chat/note presentation', {
   skip: process.platform !== 'darwin' ? 'Requires native macOS SwiftUI rendering' : false,
 }, () => {
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('tatwo2-feedback-presentation-');
   mkdirSync(output, { recursive: true });
   const root = mkdtempSync(path.join(output, 'feedback-presentation.'));
   const run = (command, args, options = {}) => spawnSync(command, args, {

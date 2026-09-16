@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -48,7 +49,7 @@ test('native sidebar projection preserves hierarchy and routes local actions loc
   // App builds are not admitted here. Unknown/critical pressure still refuses.
   assert.ok(pressure === '1' || pressure === '2',
     `defer small fixture: pressure=${pressure}, freeMiB=${freeMiB.toFixed(0)}`);
-  const output = path.join(repo, 'output/lightweight-repair');
+  const output = testScratch('tatwo2-sidebar-regression-');
   mkdirSync(output, { recursive: true });
   const scratch = mkdtempSync(path.join(output, 'sidebar-regression.'));
   // Use the existing token-owned lock, not a bare directory that another

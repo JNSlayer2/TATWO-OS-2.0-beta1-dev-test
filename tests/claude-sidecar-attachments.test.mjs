@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -8,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 test('Claude attachment-only request contains an image, not an empty text block', { timeout: 10_000 }, async () => {
-  const root = await fs.mkdtemp(path.join(repo, 'output/lightweight-repair/claude-attachments.'));
+  const root = testScratch('claude-attachments.');
   const sdk = path.join(root, 'node_modules/@anthropic-ai/claude-agent-sdk');
   await fs.mkdir(sdk, { recursive: true });
   await fs.writeFile(path.join(sdk, 'package.json'), JSON.stringify({ type: 'module', exports: './index.mjs' }));

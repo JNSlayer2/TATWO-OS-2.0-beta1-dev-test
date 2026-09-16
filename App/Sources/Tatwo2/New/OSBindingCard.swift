@@ -17,6 +17,8 @@ struct OSBindingCard: View {
                     .foregroundStyle(.secondary)
             }
 
+            OSUpstreamUpdateView(update: .shared)
+
             HStack(spacing: 10) {
                 Image(systemName: "externaldrive")
                     .foregroundStyle(.secondary)
@@ -29,7 +31,10 @@ struct OSBindingCard: View {
                     .disabled(binding.busy)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                Button("重新檢查") { model.refreshUpstreamBindings() }
+                Button("重新檢查") {
+                    model.refreshUpstreamBindings()
+                    OSUpstreamUpdateModel.shared.reload(notify: true)
+                }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             }

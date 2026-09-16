@@ -12,6 +12,139 @@ PREVIOUS=""
 LOCK=""
 REPLACED=0
 COMMITTED=0
+# UPDATE-ARCHIVE-HYGIENE-BEGIN
+# 待接 todo #25 治理器的磁碟保留額。Counts are per completed run, not age guesses.
+readonly UPDATE_FAILED_RETENTION=1
+readonly UPDATE_BACKUP_RETENTION=2
+update_archives_root() {
+  local root component
+  root="$(cd "$HOME" && pwd -P)" || return 1
+  for component in Library 'Application Support' 'TATWO OS' UpdateArchives; do
+    root="$root/$component"
+    [[ ! -L "$root" ]] || return 1
+    mkdir -p "$root" || return 1
+    [[ -d "$root" && -O "$root" ]] || return 1
+  done
+  printf '%s\n' "$root"
+}
+archive_child_safe() {
+  local root="$1" item="$2" name="${2##*/}"
+  [[ "$root" == "$(cd "$HOME" && pwd -P)/Library/Application Support/TATWO OS/UpdateArchives" ]] || return 1
+  [[ -d "$root" && ! -L "$root" && -O "$root" && -d "$item" && ! -L "$item" && -O "$item" ]] || return 1
+  [[ "$(dirname "$item")" == "$root" && "$(cd "$(dirname "$item")" && pwd -P)" == "$root" ]] || return 1
+  # Only updater-owned direct children; never accept traversal, lock dirs or arbitrary names.
+  [[ "$name" =~ ^(failed-)?\.tatwo-update\.[A-Za-z0-9][A-Za-z0-9.-]*$ &&
+     "$name" != .tatwo-update.lock && "$name" != .tatwo-update.admission ]]
+}
+archive_backup_valid() {
+  local app="$1"
+  [[ -d "$app" && ! -L "$app" && ! -L "$app/Contents" && ! -L "$app/Contents/Info.plist" ]] &&
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null)" == ai.tatwo.tatwo2 ]]
+}
+trash_update_archive() {
+  local root="$1" item="$2" reason="$3" manifest="$1/cleanup-manifest.md"
+  archive_child_safe "$root" "$item" || return 1
+  [[ ! -L "$manifest" && ( ! -e "$manifest" || -f "$manifest" ) ]] || return 1
+  command -v trash >/dev/null || return 1
+  printf '\n- Source: `%s`\n  Reason: %s\n  Restore: macOS Trash > Put Back to the original path. Permanent removal requires a different human/AI review.\n' "$item" "$reason" >> "$manifest" || return 1
+  # Recheck at the destructive boundary. Moving to Trash does not follow nested symlinks.
+  archive_child_safe "$root" "$item" || return 1
+  trash "$item"
+}
+retain_update_archives() (
+  local root dir name backup target owner started modified backup_rank priority failures=0 backups=0 current="${1:-}"
+  root="$(update_archives_root)" || return 1
+  [[ ! -L "$root/.retention.lock" ]] || return 1
+  exec 8>>"$root/.retention.lock"
+  /usr/bin/lockf -s -t 0 8 || return 1
+  # Extract rollback bundles out of old mixed stages BEFORE pruning their chunks.
+  for dir in "$root"/.tatwo-update.* "$root"/failed-.tatwo-update.*; do
+    archive_child_safe "$root" "$dir" || continue
+    name="${dir##*/}"
+    if [[ "$dir" != "$current" ]]; then
+      if [[ -L "$dir/transaction.json" || -L "$dir/owner" ]]; then continue; fi
+      if [[ -f "$dir/transaction.json" ]]; then
+        owner="$(plutil -extract owner raw -o - "$dir/transaction.json" 2>/dev/null || true)"
+        started="$(plutil -extract ownerStart raw -o - "$dir/transaction.json" 2>/dev/null || true)"
+        owner_active "$owner" "$started" && continue
+        case "$(plutil -extract phase raw -o - "$dir/transaction.json" 2>/dev/null)" in
+          committed|recovered|rolled_back|prepared) ;; *) continue;;
+        esac
+      fi
+      owner_file_active "$dir" && continue
+    fi
+    # A backup directory is recognized by BOTH its reserved name and actual app identity.
+    if [[ "$name" == .tatwo-update.backup.* ]]; then continue; fi
+    modified="$(LC_ALL=C stat -f %Fm "$dir")" || continue
+    for backup in previous.app.disabled previous-retained.app.disabled; do
+      [[ -e "$dir/$backup" || -L "$dir/$backup" ]] || continue
+      # Unknown/corrupt/symlink rollback material is not eligible for automatic deletion.
+      archive_backup_valid "$dir/$backup" || continue 2
+      backup_rank=1; [[ "$backup" != previous-retained.app.disabled ]] || backup_rank=0
+      # Preserve subsecond ordering in the name as well as the original stage age.
+      target="$root/.tatwo-update.backup.$modified.$backup_rank.$(uuidgen).noindex"
+      mkdir -m 700 "$target" || return 1
+      archive_child_safe "$root" "$dir" && archive_child_safe "$root" "$target" || return 1
+      mv "$dir/$backup" "$target/previous.app.disabled" || return 1
+      for name in result.json source-sha256.txt; do
+        [[ ! -f "$dir/$name" || -L "$dir/$name" ]] || cp -p "$dir/$name" "$target/$name" || return 1
+      done
+      touch -t "$(date -r "${modified%%.*}" +%Y%m%d%H%M.%S)" "$target" || return 1
+    done
+    if [[ "${dir##*/}" != failed-* ]]; then
+      trash_update_archive "$root" "$dir" 'Completed update scratch; rollback bundles separated.' || return 1
+    fi
+  done
+  # Names are validated before sorting, so whitespace/newlines cannot create extra paths.
+  while read -r priority modified name; do
+    dir="$root/$name"
+    archive_child_safe "$root" "$dir" || continue
+    if [[ "$name" == .tatwo-update.backup.* ]]; then
+      archive_backup_valid "$dir/previous.app.disabled" || continue
+      backups=$((backups + 1))
+      [[ "$backups" -le "$UPDATE_BACKUP_RETENTION" ]] || trash_update_archive "$root" "$dir" 'Older rollback backup; latest two retained.' || return 1
+    elif [[ "$name" == failed-* ]]; then
+      # Never count or delete protected rollback/transaction material or another live run.
+      [[ ! -e "$dir/previous.app.disabled" && ! -L "$dir/previous.app.disabled" && ! -e "$dir/previous-retained.app.disabled" && ! -L "$dir/previous-retained.app.disabled" ]] || continue
+      if [[ "$dir" != "$current" ]]; then
+        [[ ! -L "$dir/transaction.json" && ! -L "$dir/owner" ]] || continue
+        owner_file_active "$dir" && continue
+        if [[ -f "$dir/transaction.json" ]]; then
+          owner="$(plutil -extract owner raw -o - "$dir/transaction.json" 2>/dev/null || true)"
+          started="$(plutil -extract ownerStart raw -o - "$dir/transaction.json" 2>/dev/null || true)"
+          owner_active "$owner" "$started" && continue
+          case "$(plutil -extract phase raw -o - "$dir/transaction.json" 2>/dev/null)" in
+            committed|recovered|rolled_back|prepared) ;; *) continue;;
+          esac
+        fi
+      fi
+      failures=$((failures + 1))
+      [[ "$failures" -le "$UPDATE_FAILED_RETENTION" ]] || trash_update_archive "$root" "$dir" 'Older failed update; most recent failure retained for diagnosis.' || return 1
+    fi
+  done < <(for dir in "$root"/.tatwo-update.* "$root"/failed-.tatwo-update.*; do
+    archive_child_safe "$root" "$dir" || continue
+    priority=0; [[ "$dir" != "$current" ]] || priority=1
+    printf '%s %s %s\n' "$priority" "$(stat -f %Fm "$dir")" "${dir##*/}"
+  done | LC_ALL=C sort -k1,1nr -k2,2nr -k3,3r)
+)
+finish_update_stage() {
+  local root target name
+  [[ -n "${STAGE:-}" && -d "$STAGE" && ! -L "$STAGE" ]] || return 0
+  # STAGE must still be THIS run's direct child of the install destination's parent.
+  [[ "$(dirname "$STAGE")" == "$(dirname "$DEST")" ]] || return 1
+  name="${STAGE##*/}"
+  [[ "$name" =~ ^\.tatwo-update\.[A-Za-z0-9][A-Za-z0-9.-]*$ &&
+     "$name" != .tatwo-update.lock && "$name" != .tatwo-update.admission ]] || return 1
+  root="$(update_archives_root)" || return 1
+  [[ "${COMMITTED:-0}" == 1 ]] || name="failed-$name"
+  target="$root/$name"
+  [[ ! -e "$target" && ! -L "$target" ]] || return 1
+  mv "$STAGE" "$target" || return 1
+  STAGE="" # A trap retry cannot touch a different run or a path that was already moved.
+  touch "$target" || return 1
+  retain_update_archives "$target"
+}
+# UPDATE-ARCHIVE-HYGIENE-END
 cleanup() {
   local status=$?
   trap - EXIT
@@ -37,18 +170,14 @@ cleanup() {
     fi
   fi
   if [[ -n "$LOCK" && -n "$STAGE" ]]; then mv "$LOCK" "$STAGE/lock.finished" || true; fi
-  if [[ "$REPLACED" == 0 && -n "$STAGE" && -d "$STAGE" ]] &&
-     { [[ ! -f "$STAGE/transaction.json" ]] || [[ "$(plutil -extract phase raw -o - "$STAGE/transaction.json" 2>/dev/null)" == prepared ]]; }; then
-    local archives="$HOME/Library/Application Support/TATWO OS/UpdateArchives"
-    mkdir -p "$archives" && mv "$STAGE" "$archives/failed-$(basename "$STAGE")" || true
-  fi
+  finish_update_stage || printf '更新暫存清理未完成；保留原位置供檢查。\n' >&2
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 fail() { printf '安裝失敗：%s\n重試：%s\n' "$1" "$RETRY" >&2; exit 1; }
-trap 'fail "指令失敗（第 $LINENO 行）；暫存與備份保留，不會刪除原有資料。"' ERR
+trap 'fail "指令失敗（第 $LINENO 行）；保留最近失敗診斷與兩份備份，不會刪除原有資料。"' ERR
 # TRANSACTION-BEGIN
 write_transaction() {
   local phase="$1" file="$STAGE/transaction.json"
@@ -164,38 +293,37 @@ acquire_update_lock() {
 # TRANSACTION-END
 # TEMP-RETENTION-BEGIN
 archive_old_downloads() {
-  local dir manifest="${TMPDIR:-/tmp}/tatwo-install-trash-$(uuidgen).md"
-  local archives="$HOME/Library/Application Support/TATWO OS/UpdateArchives" phase owner started
+  local dir archives phase owner started target
+  archives="$(update_archives_root)" || { printf '封存暫存失敗，保留原位置。\n' >&2; return 0; }
+  # Preserve the existing non-destructive recovery of stale locks and interrupted
+  # transactions. Nothing outside UpdateArchives is ever sent to Trash.
   while IFS= read -r -d '' dir; do
-    [[ ! -L "$dir" && -O "$dir" ]] || continue
+    [[ ! -L "$dir" && -O "$dir" && ! -L "$dir/owner" ]] || continue
     owner_file_active "$dir" && continue
-    if ! { mkdir -p "$archives/retained-locks" && mv "$dir" "$archives/retained-locks/$(basename "$dir")-$(uuidgen)"; }; then
+    if [[ -L "$archives/retained-locks" ]]; then
+      printf '封存更新鎖失敗，保留原位置：%s\n' "$dir" >&2
+      continue
+    fi
+    target="$archives/retained-locks/$(basename "$dir")-$(uuidgen)"
+    if ! { mkdir -p "$archives/retained-locks" && [[ ! -e "$target" && ! -L "$target" ]] && mv "$dir" "$target"; }; then
       printf '封存更新鎖失敗，保留原位置：%s\n' "$dir" >&2
     fi
   done < <(find "$(dirname "$DEST")" -depth -maxdepth 3 -type d \( -name '.tatwo-lock-retained.*' -o -name 'reconcile-orphan.*' \) -mmin +1440 -print0)
   while IFS= read -r -d '' dir; do
-    [[ ! -L "$dir" && -O "$dir" ]] || continue
+    [[ ! -L "$dir" && -O "$dir" && ! -L "$dir/transaction.json" ]] || continue
     phase="$(plutil -extract phase raw -o - "$dir/transaction.json" 2>/dev/null)" || continue
     case "$phase" in prepared|recovered|rolled_back) ;; *) continue;; esac
     owner="$(plutil -extract owner raw -o - "$dir/transaction.json" 2>/dev/null)" || continue
     [[ "$owner" =~ ^[0-9]+$ && "$owner" -gt 0 ]] || continue
     started="$(plutil -extract ownerStart raw -o - "$dir/transaction.json" 2>/dev/null || true)"
     owner_active "$owner" "$started" && continue
-    if ! { mkdir -p "$archives" && mv "$dir" "$archives/prepared-$(basename "$dir")-$(uuidgen)"; }; then
+    # Use the bounded failure namespace, not the old unbounded prepared-* bucket.
+    target="$archives/failed-$(basename "$dir")"
+    if ! { [[ ! -e "$target" && ! -L "$target" ]] && mv "$dir" "$target"; }; then
       printf '封存暫存失敗，保留原位置：%s\n' "$dir" >&2
     fi
   done < <(find "$(dirname "$DEST")" -maxdepth 1 -type d -name '.tatwo-update.*.noindex' -print0)
-  while IFS= read -r -d '' dir; do
-    [[ ! -L "$dir" && -O "$dir" && ! -f "$dir/transaction.json" ]] || continue
-    if [[ -f "$dir/owner" ]]; then
-      local owner; owner="$(cat "$dir/owner")"
-      [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null && continue
-    fi
-    command -v trash >/dev/null || { printf '缺少 trash，保留舊暫存：%s\n' "$dir" >&2; continue; }
-    printf -- '- Source: `%s`; older than 24h, no live recorded owner. Restore from macOS Trash to original path. No permanent deletion authorized.\n' "$dir" >> "$manifest"
-    trash "$dir" || printf '- Trash failed; source retained: `%s`.\n' "$dir" >> "$manifest"
-  done < <(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'tatwo-install.*' -mmin +1440 -print0
-    if [[ -n "${DEST:-}" ]]; then find "$(dirname "$DEST")" -maxdepth 1 -type d -name '.tatwo-update.*.noindex' -mmin +1440 -print0; fi)
+  retain_update_archives || printf '舊更新暫存清理未完成；保留原位置，未擴大清理範圍。\n' >&2
 }
 # TEMP-RETENTION-END
 # INVISIBLE-PRIMITIVES-BEGIN
@@ -204,7 +332,10 @@ check_space() {
   local path="$1" bytes="$2" available required
   available="$(df -Pk "$path" | awk 'END {print $4}')"
   [[ "$available" =~ ^[0-9]+$ && "$bytes" =~ ^[0-9]+$ ]] || fail "無法確認可用空間"
-  required=$(((bytes * 2 + 1023) / 1024))
+  # 待接 todo #25 治理器的磁碟保留額。
+  local -r safety_multiplier=2
+  [[ "$bytes" -gt 0 && "${#bytes}" -le 13 && "$bytes" -le 1000000000000 ]] || fail "候選大小無效"
+  required=$(((bytes * safety_multiplier + 1023) / 1024))
   [[ "$available" -ge "$required" ]] || fail "空間不足，請清出至少 $(((required - available + 1023) / 1024)) MB（候選 App 大小 ×2）"
 }
 manifest_size() {
@@ -262,7 +393,8 @@ if [[ -n "${TATWO_OS_VERSION:-}" ]]; then
   RETRY="curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | TATWO_OS_VERSION='$TATWO_OS_VERSION' bash"
 fi
 printf '正在查詢可用版本…\n'
-TEMP="$(mktemp -d "${TMPDIR:-/tmp}/tatwo-install.XXXXXX")"
+TEMP="$STAGE/download"
+mkdir -m 700 "$TEMP"
 printf '%s\n' "$$" > "$TEMP/owner"
 STATUS="$(curl --proto '=https' --tlsv1.2 -sSL --connect-timeout 15 --max-time 60 \
   -H 'Accept: application/vnd.github+json' -o "$TEMP/release.json" -w '%{http_code}' "$ENDPOINT")"
@@ -741,13 +873,6 @@ INSTALL_SECONDS=$(($(date +%s) - INSTALL_STARTED_AT))
 printf '{"ok":true,"message":"%s","installSeconds":%s}\n' "$LAUNCH_MESSAGE" "$INSTALL_SECONDS" > "$STAGE/result.json"
 [[ -z "${TATWO_OS_TIMING_FILE:-}" ]] || printf '%s' "$INSTALL_SECONDS" > "$TATWO_OS_TIMING_FILE"
 [[ ! -e "$DEST.old" ]] || mv "$DEST.old" "$STAGE/previous.app.disabled"
-mv "$LOCK" "$STAGE/lock.finished"; LOCK=""
-# Keep rollback material outside Applications and outside normal app discovery.
-# If archival fails, the unique .noindex staging directory still preserves it.
-ARCHIVES="$HOME/Library/Application Support/TATWO OS/UpdateArchives"
-ARCHIVE="$ARCHIVES/$(basename "$STAGE")"
-if ! mkdir -p "$ARCHIVES" || ! mv "$STAGE" "$ARCHIVE"; then
-  ARCHIVE="$STAGE"
-  printf '新版已啟動，備份仍保留在暫存位置。\n' >&2
-fi
-printf '更新完成。備份保留於：%s\n下載暫存保留於：%s\n' "$ARCHIVE" "$TEMP"
+# EXIT archives and prunes this stage on both success and failure. The backup
+# bundles are separated from delta chunks; the download directory is inside STAGE.
+printf '更新完成。保留最近兩份備份與最近一次失敗診斷。\n'

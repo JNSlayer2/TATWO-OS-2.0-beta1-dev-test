@@ -219,10 +219,11 @@ struct ChatPage: View {
                     sidebarVisible: showSidebar)
                 let leadingReserve: CGFloat = (isPanel || workspaceOwnsSidebar) ? 0 : layoutPolicy.leadingReserve
                 let trailingReserve: CGFloat = (isPanel || workspaceOwnsSidebar) ? 0 : layoutPolicy.trailingReserve
+                let sidebarContentGap = model.mode == .browser ? WorkspaceSidebarMetrics.browserContentGap : WorkspaceSidebarMetrics.contentGap
                 let mainAvailableWidth = max(
                     320,
                     chatCanvasWidth
-                    - (showSidebar ? sidebarWidth + 12 : 0)
+                    - (showSidebar ? sidebarWidth + sidebarContentGap : 0)
                     - leadingReserve
                     - trailingReserve
                 )
@@ -232,7 +233,7 @@ struct ChatPage: View {
                 HStack(alignment: .top, spacing: rightPanelLayout.spacing) {
                     if rightPanelLayout.showsMainContent {
                         ZStack(alignment: .topLeading) {
-                            HStack(alignment: .top, spacing: showSidebar ? 12 : 0) {
+                            HStack(alignment: .top, spacing: showSidebar ? sidebarContentGap : 0) {
                                 if showSidebar {
                                     // 2026-08-21 使用者：「左列分頁請加長跟整個
                                     // app 天地齊平」——側欄玻璃填滿視窗高度。
@@ -423,6 +424,11 @@ struct ChatPage: View {
                     guard requested else { return }
                     guard model.consumeBrowserAgentPanelRequest() else { return }
                     // 跟工具箱「瀏覽器」同一條路：原生 inspector（會推開 chat、可拖拉調比例），不是舊的右側 overlay
+                    browserInspectorPresented = true
+                }
+                .onChange(of: model.requestOpenAccountBrowser) { _, requested in
+                    guard requested else { return }
+                    model.requestOpenAccountBrowser = false
                     browserInspectorPresented = true
                 }
                 .onChange(

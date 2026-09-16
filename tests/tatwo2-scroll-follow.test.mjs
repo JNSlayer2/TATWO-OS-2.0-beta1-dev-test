@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -8,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 test('production scroll-follow state preserves reading intent through lazy layout', { timeout: 90_000 }, t => {
   if (process.platform !== 'darwin') return t.skip('macOS Swift fixture required');
-  const output = path.join(root, 'output/lightweight-repair');
+  const output = testScratch('tatwo2-scroll-follow-');
   fs.mkdirSync(output, { recursive: true });
   const scratch = fs.mkdtempSync(path.join(output, 'scroll-follow-'));
   const binary = path.join(scratch, 'checks');

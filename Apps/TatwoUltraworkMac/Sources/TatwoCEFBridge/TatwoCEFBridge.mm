@@ -3330,14 +3330,15 @@ bool W58BrowserMessage(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, Cef
 constexpr const char *kW58AgentLoginScript = R"W58(
 (function(expectedOrigin) {
   'use strict';
-  let bound = null;
+  let bound = null, change = null;
   const originOK = () => location.protocol === 'https:' && location.origin === expectedOrigin;
   const visible = e => e instanceof HTMLInputElement && e.isConnected && !e.disabled && !e.readOnly &&
     !e.hidden && e.type !== 'hidden' && e.getClientRects().length > 0 &&
     getComputedStyle(e).visibility === 'visible' && getComputedStyle(e).display !== 'none';
   const tokens = e => String(e.autocomplete || '').toLowerCase().split(/\s+/);
-  const otp = () => Array.from(document.querySelectorAll('input')).some(e => visible(e) &&
-    (tokens(e).includes('one-time-code') || /(?:^|[-_])(otp|totp|2fa|verification[-_]?code)(?:$|[-_])/i.test(e.name || e.id || '')));
+  const otpFields = () => Array.from(document.querySelectorAll('input')).filter(e => visible(e) &&
+    (tokens(e).includes('one-time-code') || /otp|code/i.test(String(e.name || '') + ' ' + String(e.id || ''))));
+  const otp = () => otpFields().length > 0;
   const actionOK = form => {
     try {
       const a = new URL(form.action || location.href, document.baseURI);
@@ -3355,11 +3356,44 @@ constexpr const char *kW58AgentLoginScript = R"W58(
     const user = users.find(e => tokens(e).includes('username')) || users.find(e => e.type === 'email') || users[0];
     return pw.length === 1 && user && user.form === form && pw[0].form === form ? {user, password: pw[0]} : null;
   };
+  const changeFields = form => {
+    if (!form || !form.isConnected || !actionOK(form)) return null;
+    const pw = Array.from(form.elements).filter(e => visible(e) && e.type === 'password');
+    if (pw.length !== 3 || pw.some(e => e.form !== form)) return null;
+    const hint = e => String(e.name || '') + ' ' + String(e.id || '') + ' ' + String(e.placeholder || '');
+    const current = pw.filter(e => tokens(e).includes('current-password') || /current|old|目前|當前|舊密碼/i.test(hint(e)));
+    const confirm = pw.filter(e => /confirm|repeat|確認|再輸入/i.test(hint(e)));
+    const fresh = pw.filter(e => tokens(e).includes('new-password') || /new|新密碼/i.test(hint(e)));
+    if (current.length !== 1) return null;
+    const next = fresh.filter(e => e !== current[0]);
+    const confirmation = confirm.length === 1 ? confirm[0] : next.length === 2 ? next[1] : null;
+    const password = next.find(e => e !== confirmation);
+    return password && confirmation && confirmation !== current[0] ? {current:current[0], password, confirmation} : null;
+  };
+  const clearChange = () => {
+    if (!change) return;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    for (const e of [change.current,change.password,change.confirmation]) setter.call(e, '');
+    change = null;
+  };
+  const changeCurrent = () => {
+    if (!change || !originOK()) return false;
+    const fields = changeFields(change.form);
+    return fields && fields.current === change.current && fields.password === change.password &&
+      fields.confirmation === change.confirmation;
+  };
   return {
     scan(completed) {
       bound = null;
       if (!originOK()) return {error:'ai_login_stale_page'};
-      if (otp() || /(?:^|\/)(?:2fa|totp|mfa|two-factor|challenge)(?:\/|$)/i.test(location.pathname))
+      if (otp()) {
+        const codes = otpFields();
+        if (codes.length !== 1 || !codes[0].form || !actionOK(codes[0].form) || codes[0].value)
+          return {error:'ai_login_two_factor_required'};
+        bound = {form:codes[0].form, code:codes[0]};
+        return {formID:'w59-otp'};
+      }
+      if (/(?:^|\/)(?:2fa|totp|mfa|two-factor|challenge)(?:\/|$)/i.test(location.pathname))
         return {error:'ai_login_two_factor_required'};
       const forms = Array.from(document.forms);
       if (completed) {
@@ -3377,6 +3411,22 @@ constexpr const char *kW58AgentLoginScript = R"W58(
     fill(id, username, password) {
       const item = bound;
       bound = null; // Single use, including rejected and throwing attempts.
+      if (id === 'w59-otp') {
+        if (!originOK() || !item || !item.code || !visible(item.code) || item.code.value ||
+            otpFields().length !== 1 || otpFields()[0] !== item.code || item.code.form !== item.form ||
+            !actionOK(item.form) || !/^\d{6}$/.test(password)) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        try {
+          setter.call(item.code, password);
+          item.code.dispatchEvent(new Event('input',{bubbles:true}));
+          item.code.dispatchEvent(new Event('change',{bubbles:true}));
+          if (!originOK() || !visible(item.code) || item.code.form !== item.form || !actionOK(item.form) ||
+              otpFields().length !== 1 || otpFields()[0] !== item.code || !item.form.checkValidity()) return false;
+          HTMLFormElement.prototype.requestSubmit.call(item.form);
+          return true;
+        } catch (_) { return false; }
+        finally { setter.call(item.code, ''); }
+      }
       if (!originOK() || otp() || id !== 'w58-login' || !item) return false;
       const pair = fields(item.form);
       if (!pair || pair.user !== item.user || pair.password !== item.password || pair.password.value ||
@@ -3403,7 +3453,56 @@ constexpr const char *kW58AgentLoginScript = R"W58(
         setter.call(pair.password, '');
         return true;
       } catch (_) { setter.call(pair.password, ''); return false; }
-    }
+    },
+    scanChange(completed) {
+      clearChange();
+      if (!originOK()) return {error:'ai_login_stale_page'};
+      const forms = Array.from(document.forms);
+      if (completed) {
+        // HTTP 2xx / navigation alone is NOT proof of a password change.
+        const text = String(document.body && document.body.innerText || '');
+        const success = /password (?:has been |was )?(?:successfully )?(?:changed|updated)|密碼(?:已)?(?:成功)?(?:變更|更新|修改)成功|密碼已(?:變更|更新|修改)/i.test(text);
+        const rejected = /(?:could not|unable to|failed to|not) (?:change|update)|(?:incorrect|invalid|wrong) password|密碼.*(?:失敗|錯誤)/i.test(text);
+        if (!success || rejected || forms.some(f => Array.from(f.elements).some(e => visible(e) && e.type === 'password')))
+          return {error:'ai_change_unconfirmed'};
+        return {formID:'',title:''};
+      }
+      const candidates = forms.map(form => ({form, fields:changeFields(form)})).filter(e => e.fields);
+      if (candidates.length !== 1) return {error:'ai_change_no_form'};
+      const {form,fields} = candidates[0];
+      if ([fields.current,fields.password,fields.confirmation].some(e => e.value)) return {error:'ai_login_nonempty_form'};
+      change = {form,...fields,filled:false};
+      return {formID:'w59-change'};
+    },
+    fillChange(currentPassword, newPassword) {
+      if (!changeCurrent() || change.filled || !newPassword ||
+          [change.current,change.password,change.confirmation].some(e => e.value)) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      try {
+        setter.call(change.current,currentPassword);
+        setter.call(change.password,newPassword);
+        setter.call(change.confirmation,newPassword);
+        for (const e of [change.current,change.password,change.confirmation]) {
+          e.dispatchEvent(new Event('input',{bubbles:true}));
+          e.dispatchEvent(new Event('change',{bubbles:true}));
+        }
+        if (!changeCurrent()) { clearChange(); return false; }
+        change.filled = true; change.expectedCurrent = currentPassword; change.expectedNew = newPassword;
+        return true; // No submit. Native Island confirm + authentication must follow.
+      } catch (_) { clearChange(); return false; }
+    },
+    submitChange() {
+      try {
+        if (!changeCurrent() || !change.filled || !change.current.value || !change.password.value ||
+            change.current.value !== change.expectedCurrent || change.password.value !== change.expectedNew ||
+            change.password.value !== change.confirmation.value || !change.form.checkValidity()) return false;
+        HTMLFormElement.prototype.requestSubmit.call(change.form);
+        return true;
+      } catch (_) { return false; }
+      finally { clearChange(); }
+    },
+    cancel() { clearChange(); bound = null; }
+
   };
 })
 )W58";
@@ -3419,7 +3518,15 @@ class W58AgentLoginRenderer {
   void Release(CefRefPtr<CefBrowser> browser, CefRefPtr<CefV8Context> context = nullptr) {
     if (!browser) return;
     auto it = pages_.find(browser->GetIdentifier());
-    if (it != pages_.end() && (!context || it->second.context->IsSame(context))) pages_.erase(it);
+    if (it != pages_.end() && (!context || it->second.context->IsSame(context))) {
+      auto page = it->second;
+      pages_.erase(it);
+      if (page.context && page.context->IsValid() && page.context->Enter()) {
+        auto cancel = page.controller->GetValue("cancel");
+        if (cancel && cancel->IsFunction()) cancel->ExecuteFunctionWithContext(page.context, page.controller, {});
+        page.context->Exit();
+      }
+    }
   }
   bool Receive(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                CefProcessId source, CefRefPtr<CefProcessMessage> message) {
@@ -3441,13 +3548,15 @@ class W58AgentLoginRenderer {
         {CefV8Value::CreateString(args->GetString(2))});
       if (!controller || !controller->IsObject()) { context->Exit(); return true; }
       pages_[browser->GetIdentifier()] = {context, controller, generation, token, frame->GetURL()};
-      auto scan = controller->GetValue("scan");
+      const bool change = args->GetInt(4) == 3 || args->GetInt(4) == 4;
+      const bool completed = args->GetInt(4) == 1 || args->GetInt(4) == 4;
+      auto scan = controller->GetValue(change ? "scanChange" : "scan");
       auto result = scan && scan->IsFunction() ? scan->ExecuteFunctionWithContext(context, controller,
-        {CefV8Value::CreateBool(args->GetInt(4) == 1)}) : nullptr;
+        {CefV8Value::CreateBool(completed)}) : nullptr;
       auto reply = CefProcessMessage::Create(kAILoginEvent);
       auto out = reply->GetArgumentList();
       out->SetString(0, generation); out->SetString(1, token);
-      out->SetString(2, args->GetInt(4) == 1 ? "complete" : "ready");
+      out->SetString(2, completed ? "complete" : "ready");
       for (int i = 0; i < 3; ++i) {
         auto value = result && result->IsObject() ? result->GetValue(i == 0 ? "formID" : i == 1 ? "error" : "title") : nullptr;
         out->SetString(3+i, value && value->IsString() ? value->GetStringValue() : "");
@@ -3460,20 +3569,26 @@ class W58AgentLoginRenderer {
     auto it = pages_.find(browser->GetIdentifier());
     if (args->GetSize() != 7 || it == pages_.end()) return true;
     auto page = it->second;
-    pages_.erase(it);
+    const bool changeFill = args->GetString(4) == "w59-change";
+    const bool changeSubmit = args->GetString(4) == "w59-submit";
+    if (!changeFill) pages_.erase(it);
     if (page.generation != generation || page.token != token || page.url != frame->GetURL() ||
         !context || !page.context->IsSame(context) || !context->IsValid() || !context->Enter()) return true;
-    auto fill = page.controller->GetValue("fill");
-    auto result = fill && fill->IsFunction() ? fill->ExecuteFunctionWithContext(context, page.controller,
-      {CefV8Value::CreateString(args->GetString(4)), CefV8Value::CreateString(args->GetString(5)),
-       CefV8Value::CreateString(args->GetString(6))}) : nullptr;
+    auto fill = page.controller->GetValue(changeFill ? "fillChange" : changeSubmit ? "submitChange" : "fill");
+    CefV8ValueList values;
+    if (!changeFill && !changeSubmit) values.push_back(CefV8Value::CreateString(args->GetString(4)));
+    if (!changeSubmit) {
+      values.push_back(CefV8Value::CreateString(args->GetString(5)));
+      values.push_back(CefV8Value::CreateString(args->GetString(6)));
+    }
+    auto result = fill && fill->IsFunction() ? fill->ExecuteFunctionWithContext(context, page.controller, values) : nullptr;
     const bool success = result && result->IsBool() && result->GetBoolValue();
     context->Exit();
-    if (!success) {
+    if (!success || changeFill) {
       auto reply = CefProcessMessage::Create(kAILoginEvent);
       auto out = reply->GetArgumentList();
-      out->SetString(0, generation); out->SetString(1, token); out->SetString(2, "failed");
-      out->SetString(3, ""); out->SetString(4, "ai_login_form_changed"); out->SetString(5, "");
+      out->SetString(0, generation); out->SetString(1, token); out->SetString(2, success ? "change_filled" : "failed");
+      out->SetString(3, ""); out->SetString(4, success ? "" : "ai_login_form_changed"); out->SetString(5, "");
       frame->SendProcessMessage(PID_BROWSER, reply);
     }
     return true;
@@ -5109,6 +5224,7 @@ struct BrowserState {
   NSString *ai_login_token, *ai_login_form, *ai_login_error, *ai_login_title, *ai_login_origin;
   NSString *ai_login_phase = @"idle";
   bool ai_login_awaiting_load = false;
+  bool ai_password_change = false;
 #pragma mark - W58 End
   NSMutableDictionary<NSString *, NSDictionary *> *webmcp_tools;
   NSMutableDictionary<NSString *, NSDictionary *> *pending_webmcp_tools;
@@ -5231,6 +5347,7 @@ void W58Invalidate(TatwoCEFBrowserView *view, bool preserve_result) {
   state->ai_login_token = nil; state->ai_login_form = nil;
   if (!preserve_result || !state->ai_login_awaiting_load) {
     state->ai_login_awaiting_load = false;
+    state->ai_password_change = false;
     state->ai_login_phase = @"idle"; state->ai_login_error = nil; state->ai_login_title = nil;
     state->ai_login_origin = nil;
   }
@@ -5242,7 +5359,7 @@ void W58Invalidate(TatwoCEFBrowserView *view, bool preserve_result) {
     state->browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
   }
 }
-bool W58Scan(TatwoCEFBrowserView *view, bool completed) {
+bool W58Scan(TatwoCEFBrowserView *view, bool completed, bool change = false) {
   auto state = State(view);
   if (!W58AgentPage(view, state) || state->navigation_in_flight || state->navigation_generation == 0) return false;
   auto frame = state->browser->GetMainFrame();
@@ -5250,7 +5367,7 @@ bool W58Scan(TatwoCEFBrowserView *view, bool completed) {
   if (!frame || !frame->IsValid() || ![origin hasPrefix:@"https://"] ||
       ![origin isEqualToString:OriginForURLString(FromCefString(frame->GetURL()))]) return false;
   if (completed && ![origin isEqualToString:state->ai_login_origin]) return false;
-  if (!completed) state->ai_login_origin = origin;
+  if (!completed) { state->ai_login_origin = origin; state->ai_password_change = change; }
   state->ai_login_token = NSUUID.UUID.UUIDString;
   state->ai_login_form = nil;
   state->ai_login_phase = completed ? @"checking" : @"preparing";
@@ -5259,7 +5376,7 @@ bool W58Scan(TatwoCEFBrowserView *view, bool completed) {
   args->SetString(0, std::to_string(state->navigation_generation));
   args->SetString(1, ToCefString(state->ai_login_token));
   args->SetString(2, ToCefString(origin)); args->SetString(3, frame->GetURL());
-  args->SetInt(4, completed ? 1 : 0);
+  args->SetInt(4, state->ai_password_change ? (completed ? 4 : 3) : (completed ? 1 : 0));
   frame->SendProcessMessage(PID_RENDERER, message);
   return true;
 }
@@ -5272,7 +5389,7 @@ void W58LoadEnd(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, int status
     state->ai_login_awaiting_load = false;
     return;
   }
-  if (status < 200 || status >= 300 || !W58Scan(view, true)) {
+  if (status < 200 || status >= 300 || !W58Scan(view, true, state->ai_password_change)) {
     state->ai_login_error = @"ai_login_load_failed"; state->ai_login_phase = @"failed";
     state->ai_login_awaiting_load = false;
   }
@@ -5292,10 +5409,17 @@ bool W58BrowserMessage(TatwoCEFBrowserView *view, CefRefPtr<CefFrame> frame, Cef
       ([phase isEqualToString:@"complete"] && ![state->ai_login_phase isEqualToString:@"checking"])) return true;
   NSString *error = FromCefString(args->GetString(4));
   NSSet *errors = [NSSet setWithArray:@[@"ai_login_stale_page", @"ai_login_two_factor_required",
-    @"ai_login_rejected", @"ai_login_ambiguous_form", @"ai_login_no_form", @"ai_login_nonempty_form", @"ai_login_form_changed"]];
+    @"ai_change_unconfirmed", @"ai_change_no_form", @"ai_login_rejected", @"ai_login_ambiguous_form", @"ai_login_no_form", @"ai_login_nonempty_form", @"ai_login_form_changed"]];
   if (error.length) {
     state->ai_login_error = [errors containsObject:error] ? error : @"ai_login_failed";
     state->ai_login_phase = @"failed"; state->ai_login_awaiting_load = false;
+  } else if (([phase isEqualToString:@"ready"] || [phase isEqualToString:@"complete"]) &&
+             args->GetString(3) == "w59-otp" && !state->ai_password_change) {
+    state->ai_login_form = @"w59-otp"; state->ai_login_phase = @"two_factor"; state->ai_login_awaiting_load = false;
+  } else if ([phase isEqualToString:@"ready"] && args->GetString(3) == "w59-change" && state->ai_password_change) {
+    state->ai_login_form = @"w59-change"; state->ai_login_phase = @"change_ready";
+  } else if ([phase isEqualToString:@"change_filled"] && [state->ai_login_phase isEqualToString:@"change_filling"]) {
+    state->ai_login_phase = @"change_filled";
   } else if ([phase isEqualToString:@"ready"] && args->GetString(3) == "w58-login") {
     state->ai_login_form = @"w58-login"; state->ai_login_phase = @"ready";
   } else if ([phase isEqualToString:@"complete"]) {
@@ -8332,6 +8456,51 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   return YES;
 }
 #pragma mark - W58 End
+#pragma mark - W59 Native-only TOTP and assisted password change
+- (BOOL)fillOneTimeCodeForAgent:(NSString *)code navigationGeneration:(uint64_t)g {
+  auto state = State(self);
+  if (!W58AgentPage(self, state) || ![state->ai_login_phase isEqualToString:@"two_factor"] ||
+      ![state->ai_login_form isEqualToString:@"w59-otp"] || code.length != 6 ||
+      [code rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location != NSNotFound) return NO;
+  state->ai_login_phase = @"ready";
+  return [self fillCredentialForAgentUsername:@"" password:code formID:@"w59-otp" navigationGeneration:g];
+}
+- (BOOL)prepareAgentPasswordChange {
+  W58Invalidate(self, false);
+  return W58Scan(self, false, true);
+}
+- (BOOL)passwordChangeAction:(NSString *)action current:(NSString *)old next:(NSString *)next generation:(uint64_t)g {
+  auto state = State(self);
+  const bool submit = [action isEqualToString:@"w59-submit"];
+  if (!W58AgentPage(self, state) || !state->ai_password_change || state->navigation_in_flight ||
+      !g || state->navigation_generation != g || !state->ai_login_token.length ||
+      ![state->ai_login_form isEqualToString:@"w59-change"] ||
+      ![state->ai_login_phase isEqualToString:submit ? @"change_filled" : @"change_ready"] ||
+      (!submit && (!old.length || !next.length || [old lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 16384 ||
+       [next lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 16384))) return NO;
+  auto frame = state->browser->GetMainFrame();
+  NSString *origin = OriginForURLString(state->committed_url);
+  if (!frame || !frame->IsValid() || ![origin hasPrefix:@"https://"] ||
+      ![origin isEqualToString:state->ai_login_origin] ||
+      ![origin isEqualToString:OriginForURLString(FromCefString(frame->GetURL()))]) return NO;
+  auto message = CefProcessMessage::Create(kAILoginFill);
+  auto args = message->GetArgumentList();
+  args->SetString(0, std::to_string(g)); args->SetString(1, ToCefString(state->ai_login_token));
+  args->SetString(2, ToCefString(origin)); args->SetString(3, frame->GetURL());
+  args->SetString(4, ToCefString(action)); args->SetString(5, ToCefString(old)); args->SetString(6, ToCefString(next));
+  state->ai_login_phase = submit ? @"submitted" : @"change_filling";
+  state->ai_login_awaiting_load = submit;
+  frame->SendProcessMessage(PID_RENDERER, message);
+  ScheduleImmediateCEFMessagePumpWork(@"ai_password_change");
+  return YES;
+}
+- (BOOL)fillAgentPasswordChangeCurrent:(NSString *)old newPassword:(NSString *)next navigationGeneration:(uint64_t)g {
+  return [self passwordChangeAction:@"w59-change" current:old next:next generation:g];
+}
+- (BOOL)submitAgentPasswordChange:(uint64_t)g {
+  return [self passwordChangeAction:@"w59-submit" current:@"" next:@"" generation:g];
+}
+#pragma mark - W59 End
 - (void)beginAgentInteraction {
   if (!NSThread.isMainThread || self.agentControlled) return;
   self.agentControlled = YES;

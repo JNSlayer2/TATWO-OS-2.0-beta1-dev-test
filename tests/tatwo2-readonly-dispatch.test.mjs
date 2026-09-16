@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -282,7 +283,7 @@ print("PASS production readonly dispatch/configure/Codable/reopen/clone/reclaim;
 test('native production readonly room decisions fail closed without construction or remote I/O', {
   skip: process.platform !== 'darwin', timeout: 180_000,
 }, () => {
-  const artifacts = path.join(root, 'output/lightweight-repair');
+  const artifacts = testScratch('tatwo2-readonly-dispatch-');
   fs.mkdirSync(artifacts, { recursive: true });
   const dir = fs.mkdtempSync(path.join(artifacts, 'readonly-dispatch-'));
   const source = path.join(dir, 'main.swift');

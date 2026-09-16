@@ -150,7 +150,7 @@ final class TatwoWebMCPRuntime {
     ) -> Void
     typealias Confirm = @MainActor (_ title: String, _ detail: String) async -> Bool
     static let shared = TatwoWebMCPRuntime()
-    static let auditURL = FileManager.default.homeDirectoryForCurrentUser
+    nonisolated static let auditURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/TATWO OS/Browser/webmcp-audit.log")
 
     private(set) var activeTabID: String?
@@ -183,6 +183,9 @@ final class TatwoWebMCPRuntime {
     }
 
     func pageTools(tabID: String) -> WebMCPPageTools? { pages[tabID] }
+    var registeredToolCount: Int {
+        pages.reduce(0) { $0 + (invokers[$1.key] == nil ? 0 : $1.value.tools.count) }
+    }
     func isAttached(tabID: String) -> Bool { invokers[tabID] != nil }
     func activate(tabID: String) { activeTabID = tabID }
     func attach(tabID: String, invoker: @escaping MainActorInvoker) {

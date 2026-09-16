@@ -14,6 +14,7 @@ struct BrowserCredential: Codable, Identifiable, Equatable, Sendable {
     var createdAt: Date
     var updatedAt: Date
     var lastUsedAt: Date?
+    var breachedAt: Date?
 
     enum Source: Codable, Equatable, Sendable {
         case manual, saved, imported(browser: String)
@@ -28,7 +29,11 @@ protocol BrowserSecretStore {
 
 struct KeychainSecretStore: BrowserSecretStore {
     let service: String
-    init(service: String = "TATWO OS Browser") { self.service = service }
+    let accountSuffix: String
+    init(service: String = "TATWO OS Browser", accountSuffix: String = "") {
+        self.service = service
+        self.accountSuffix = accountSuffix
+    }
     /// Preferred: the data-protection keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`).
     /// It needs a keychain-access-groups entitlement; ad-hoc previews and CLI fixtures get
     /// `errSecMissingEntitlement` (-34018). Then we fall back to the login keychain, which is
@@ -43,7 +48,7 @@ struct KeychainSecretStore: BrowserSecretStore {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: id.uuidString,
+            kSecAttrAccount as String: id.uuidString + accountSuffix,
             kSecAttrSynchronizable as String: false
         ]
         if variant == .dataProtection { query[kSecUseDataProtectionKeychain as String] = true }
@@ -201,6 +206,7 @@ final class BrowserPasswordVault: ObservableObject {
 
     @Published private(set) var credentials: [BrowserCredential] = []
     @Published private(set) var storageError: String?
+    let passwordChanges = PassthroughSubject<UUID, Never>()
     private let indexURL: URL?
     private let secrets: BrowserSecretStore
     private let authenticator: BrowserVaultAuthenticator
@@ -267,6 +273,7 @@ final class BrowserPasswordVault: ObservableObject {
             try rollback { try secrets.remove(credential.id) }
             throw error
         }
+        passwordChanges.send(credential.id)
         return credential
     }
 
@@ -277,6 +284,7 @@ final class BrowserPasswordVault: ObservableObject {
         }
         if let password, password.isEmpty { throw BrowserPasswordVaultError.emptyPassword }
         var next = credentials
+        if password != nil { next[position].breachedAt = nil }
         if let username { next[position].username = username }
         if let title { next[position].title = title }
         guard !next.contains(where: {
@@ -295,6 +303,7 @@ final class BrowserPasswordVault: ObservableObject {
             }
             throw error
         }
+        if password != nil { passwordChanges.send(id) }
     }
 
     /// The settings UI must obtain IslandNotice confirmation before calling this mutation.
@@ -392,6 +401,21 @@ final class BrowserPasswordVault: ObservableObject {
         }
         // Per-item commits: a storage error throws immediately, with earlier items retained.
         return result
+    }
+
+    /// Native security service only. Caller returns a digest, not a secret, to its network client.
+    func withPasswordForSecurityCheck<T>(_ id: UUID, _ body: (String) throws -> T) throws -> T {
+        try requireWritable()
+        return try body(secret(for: id))
+    }
+
+    func setBreached(_ id: UUID, breached: Bool) throws {
+        try requireWritable()
+        guard let i = credentials.firstIndex(where: { $0.id == id }) else { throw BrowserPasswordVaultError.notFound }
+        var next = credentials
+        next[i].breachedAt = breached ? (next[i].breachedAt ?? Date()) : nil
+        guard next != credentials else { return }
+        try persist(next)
     }
 
     private func authenticate(_ reason: String) async throws {

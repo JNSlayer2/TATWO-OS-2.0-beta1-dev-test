@@ -31,8 +31,8 @@ test('W40 session surface has folders, read-only lanes, hollow page dot and no c
   assert.match(content, /縮圖佔位/);
   assert.match(design, /if store.selectedSpace.isSessionSpace \{ sessionContent \}\s*else \{ browserContent \}/);
   assert.match(design, /if store.selectedSpace.isSessionSpace \{\s*sessionSidebar\s*\} else \{/);
-  assert.match(design, /if space.isSessionSpace \{\s*Circle\(\).strokeBorder\(folderFill, lineWidth: BrowserSidebarMetrics.spaceDotStroke\)/);
-  assert.match(design, /Circle\(\).fill\(store.selectedSpaceID == space.id \? folderFill : .clear\)/);
+  assert.match(design, /if space.isSessionSpace \{\s*Circle\(\).strokeBorder\(store.selectedSpaceID == space.id \? folderFill : palette.surfaceBorder, lineWidth: WorkspaceSpaceControlMetrics.ringStroke\)/);
+  assert.doesNotMatch(design, /Circle\(\).fill\(store.selectedSpaceID == space.id \? folderFill : .clear\)/);
   const shell = readFileSync(join(root, 'App/Sources/Tatwo2/Chat/ChatPage.swift'), 'utf8');
   assert.match(shell, /onDrop\(of: model.mode == .browser && browserWorkSpaceStore.selectedSpace.isSessionSpace\s*\? \[\] :/);
   assert.match(shell, /guard model.mode != .browser \|\| !browserWorkSpaceStore.selectedSpace.isSessionSpace else \{ return false \}/);
@@ -164,7 +164,7 @@ test('W40-fix: session space rows, dots and lane card use BrowserSidebarMetrics 
   assert.match(sessionSidebar, /BrowserSidebarMetrics\.rowFontSize/);
   assert.match(view, /BrowserSidebarMetrics\.childLeadingInset/);
   assert.match(view, /BrowserSidebarMetrics\.laneCardWidth/);
-  assert.match(view, /BrowserSidebarMetrics\.spaceDotStroke/);
+  assert.match(view, /WorkspaceSpaceControlMetrics\.ringStroke/);
   const metrics = readFileSync(new URL('../App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift', import.meta.url), 'utf8');
   assert.match(metrics, /laneCardWidth: CGFloat = 520/);
   assert.match(metrics, /childLeadingInset: CGFloat = 30/);

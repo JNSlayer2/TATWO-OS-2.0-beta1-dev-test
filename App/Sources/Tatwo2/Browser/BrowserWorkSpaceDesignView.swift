@@ -19,7 +19,9 @@ final class BrowserWorkSpaceStore: ObservableObject {
     }
     @Published private(set) var spaces: [Space] = []
     @Published private(set) var selectedSpaceID = 0
-    @Published var focusMode = false
+    @Published var focusMode = false { didSet { if sidebarPinned && focusMode { focusMode = false } } }
+    /// 側欄被釘住時，收合鈕停用：使用者明確表示要它一直開著。
+    @Published var sidebarPinned = false { didSet { if sidebarPinned { focusMode = false } } }
     @Published var searchFocusRequest = 0
     @Published private(set) var downloads = [
         Download(id: 0, name: "工作筆記.pdf", size: "2.4 MB", time: "今天 10:30"),
@@ -73,12 +75,19 @@ final class BrowserWorkSpaceStore: ObservableObject {
         lastRemovedBookmark = nil
     }
     func openBookmark(_ bookmark: Bookmark, folderID: UUID) {
-        guard let spaceID = currentSpaceUUID, let url = URL(string: bookmark.url) else { return }
+        guard let spaceID = currentSpaceUUID,
+              let tab = registry.openBookmark(bookmark.id, folderID: folderID, owner: .workSpace(spaceID: spaceID)) else { return }
         currentFolderID = folderID
-        let tab = registry.openTab(owner: .workSpace(spaceID: spaceID), url: url, title: bookmark.title, folderID: folderID)
         select(tabKey(tab.id))
     }
-
+    func tab(forBookmark id: UUID) -> Tab? { tabs.first { $0.bookmarkID == id } }
+    func closeBookmark(_ id: UUID) {
+        if let tab = tab(forBookmark: id) { close(tab.id) }
+    }
+    func folderHasOpenTabs(_ id: UUID) -> Bool { tabs.contains { $0.folderID == id } }
+    func closeFolderTabs(_ id: UUID) {
+        for tab in tabs.filter({ $0.folderID == id }) { close(tab.id) }
+    }
     func toggleFolder(_ id: UUID) {
         guard let index = folders.firstIndex(where: { $0.id == id }) else { return }
         currentFolderID = id
@@ -120,6 +129,10 @@ final class BrowserWorkSpaceStore: ObservableObject {
         var url = "about:blank"
         var sleeping = false
         var faviconPNG: Data?
+        var registryID: UUID?
+        var bookmarkID: UUID?
+        var folderID: UUID?
+        var loading = false
     }
     struct Suggestion: Identifiable {
         let id: String
@@ -185,9 +198,10 @@ final class BrowserWorkSpaceStore: ObservableObject {
         let owned = space.isSessionSpace ? registry.tabs.filter {
             if case .chatSession = $0.owner { return true }; return false
         } : registry.tabs(ownedBy: .workSpace(spaceID: space.id))
-        tabs = owned.map { Tab(id: tabKey($0.id), title: $0.title, pinned: $0.isPinned, url: $0.url?.absoluteString ?? "about:blank", sleeping: $0.isSleeping, faviconPNG: $0.faviconPNG) }
+        let bookmarkIDs = Set(folders.flatMap(\.bookmarks).map(\.id))
+        tabs = owned.map { Tab(id: tabKey($0.id), title: $0.title, pinned: $0.isPinned, url: $0.url?.absoluteString ?? "about:blank", sleeping: $0.isSleeping, faviconPNG: $0.faviconPNG, registryID: $0.id, bookmarkID: $0.bookmarkID.flatMap { bookmarkIDs.contains($0) ? $0 : nil }, folderID: $0.folderID, loading: registry.loadingTabIDs.contains($0.id)) }
         if !tabs.contains(where: { $0.id == selectedID }) { selectedID = tabs.first?.id ?? -1 }
-        if tabs.isEmpty { focusMode = false }
+        if tabs.isEmpty && !sidebarPinned { focusMode = false }
     }
     struct SessionFolder: Identifiable {
         // nil is the general folder, distinct from a project actually named 一般.
@@ -268,12 +282,16 @@ final class BrowserWorkSpaceStore: ObservableObject {
     }
     var canAddTab: Bool { !selectedSpace.isSessionSpace }
     var selectedTab: Tab { tabs.first { $0.id == selectedID } ?? Tab(id: -1, title: "新分頁") }
-    var activeTabs: [Tab] { tabs.filter { !$0.pinned } }
-    var pinnedTabs: [Tab] { tabs.filter(\.pinned) }
+    var activeTabs: [Tab] { tabs.filter { !$0.pinned && $0.bookmarkID == nil } }
+    var pinnedTabs: [Tab] { tabs.filter { $0.pinned && $0.bookmarkID == nil } }
 
     func select(_ id: Int) {
         guard tabs.contains(where: { $0.id == id }), let uuid = tabIDs[id] else { return }
         selectedID = id
+        if let folderID = tabs.first(where: { $0.id == id && $0.bookmarkID != nil })?.folderID,
+           let index = folders.firstIndex(where: { $0.id == folderID }), !folders[index].expanded {
+            folders[index].toggle()
+        }
         registry.touch(uuid)
     }
     var selectedRegistryID: UUID? { canAddTab ? tabIDs[selectedID] : nil }
@@ -351,6 +369,7 @@ struct BrowserWorkSpaceDesignView: View {
     @ObservedObject var store: BrowserWorkSpaceStore
     @ObservedObject private var runtime = BrowserWorkSpaceRuntime.shared
     @FocusState private var addressFocused: Bool
+    @State private var addressExpansionRequested = false
     @State private var diagnosticsPresented = false
     @State private var browserFocused = false
     @State private var findPresented = false
@@ -367,9 +386,9 @@ struct BrowserWorkSpaceDesignView: View {
     private enum Field: Hashable { case search, tabSearch }
     private var palette: TatwoThemePalette { TatwoActivePalette.current }
     private var searchResults: [BrowserWorkSpaceStore.Tab] { store.searchTabs(tabSearch) }
-    private var fieldFill: Color { Color(red: 246 / 255, green: 242 / 255, blue: 234 / 255) }
-    private var folderFill: Color { Color(red: 154 / 255, green: 163 / 255, blue: 173 / 255) }
-    private var shadowColor: Color { Color(red: 120 / 255, green: 90 / 255, blue: 70 / 255) }
+    private var fieldFill: Color { LiquidGlassTokens.browserFieldFill }
+    private var folderFill: Color { LiquidGlassTokens.browserFolderFill }
+    private var shadowColor: Color { LiquidGlassTokens.browserShadowColor }
 
     var body: some View {
         Group {
@@ -385,7 +404,7 @@ struct BrowserWorkSpaceDesignView: View {
                         .disabled(store.lastRemovedBookmark == nil || focusedField != nil || store.bookmarkEditorActive
                             || store.annotationTab != nil || store.importPresented)
                         .keyboardShortcut(combo.equivalent, modifiers: combo.eventModifiers)
-                        .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+                        .frame(width: BrowserSidebarMetrics.zero, height: BrowserSidebarMetrics.zero).opacity(BrowserSidebarMetrics.hiddenOpacity).accessibilityHidden(true)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: BrowserShortcutMap.changed)) { _ in
@@ -414,7 +433,7 @@ struct BrowserWorkSpaceDesignView: View {
                         HStack(spacing: BrowserSidebarMetrics.laneRowSpacing) {
                             Image(systemName: "photo").foregroundStyle(.tertiary)
                                 .frame(width: BrowserSidebarMetrics.laneThumbSize.width, height: BrowserSidebarMetrics.laneThumbSize.height)
-                                .background(palette.surfaceBorder.opacity(0.3), in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.laneThumbCornerRadius))
+                                .background(palette.surfaceBorder.opacity(BrowserSidebarMetrics.thumbnailFillOpacity), in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.laneThumbCornerRadius))
                                 .accessibilityLabel("縮圖佔位")
                             VStack(alignment: .leading, spacing: BrowserSidebarMetrics.childGap) {
                                 Text(lane.title).font(.system(size: BrowserSidebarMetrics.rowFontSize)).lineLimit(1)
@@ -438,27 +457,27 @@ struct BrowserWorkSpaceDesignView: View {
                 Image(nsImage: image).resizable().scaledToFit()
             } else { Image(systemName: "globe").foregroundStyle(.secondary) }
         }
-            .font(.system(size: 10, weight: .bold)).foregroundStyle(fieldFill)
-            .frame(width: 16, height: 16)
+            .font(.system(size: BrowserSidebarMetrics.faviconFontSize, weight: .bold)).foregroundStyle(fieldFill)
+            .frame(width: BrowserSidebarMetrics.workspaceFaviconSize, height: BrowserSidebarMetrics.workspaceFaviconSize)
             .background(tab.id.isMultiple(of: 2) ? palette.brandAccent : folderFill,
-                        in: RoundedRectangle(cornerRadius: 4))
+                        in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.controlGap))
     }
 
     // MARK: - Centered Search and extensions
     private var page: some View {
         ZStack {
-            RadialGradient(colors: [palette.brandAccent.opacity(0.16), .clear],
-                           center: .center, startRadius: 0, endRadius: 230)
-                .frame(maxWidth: 780, maxHeight: 460).allowsHitTesting(false)
+            RadialGradient(colors: [palette.brandAccent.opacity(BrowserSidebarMetrics.searchGlowOpacity), .clear],
+                           center: .center, startRadius: BrowserSidebarMetrics.zero, endRadius: BrowserSidebarMetrics.searchGlowRadius)
+                .frame(maxWidth: BrowserSidebarMetrics.searchGlowWidth, maxHeight: BrowserSidebarMetrics.searchGlowHeight).allowsHitTesting(false)
             searchBox
-                .frame(maxWidth: 560)
-                .padding(.horizontal, 24)
+                .frame(maxWidth: BrowserSidebarMetrics.searchMaxWidth)
+                .padding(.horizontal, BrowserSidebarMetrics.laneCardOuterInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
-        .overlay(alignment: .topTrailing) { extensionStrip.padding(.top, 14).padding(.trailing, 16) }
+        .overlay(alignment: .topTrailing) { extensionStrip.padding(.top, BrowserSidebarMetrics.settingsCardHorizontalPadding).padding(.trailing, BrowserSidebarMetrics.workspaceFaviconSize) }
         .overlay(alignment: .bottom) {
-            if !store.notice.isEmpty { Text(store.notice).font(.caption).foregroundStyle(.secondary).padding(12) }
+            if !store.notice.isEmpty { Text(store.notice).font(.caption).foregroundStyle(.secondary).padding(BrowserSidebarMetrics.laneRowSpacing) }
         }
 
     }
@@ -488,46 +507,56 @@ struct BrowserWorkSpaceDesignView: View {
     }
 
     private var browserContent: some View {
-        VStack(spacing: 0) {
+        Group {
             if let tabID = store.selectedRegistryID, let spaceID = store.currentSpaceUUID {
-                HStack(alignment: .top, spacing: 0) {
-                    EmbeddedBrowserToolbar(addressText: $query, addressFieldFocused: $addressFocused,
-                        state: runtime.navigationTabID == tabID ? runtime.navigationState : .blank,
-                        enabled: true, onSubmit: submitSearch, onCommand: send,
-                        openTabs: store.tabs.map { BrowserAddressSuggestion(id: String($0.id), title: $0.title, url: $0.url) },
-                        onSelectTab: { if let id = Int($0) { store.select(id) } })
-                    Menu {
-                        Button("搜尋分頁…", action: openTabSearch)
-                        Button(store.focusMode ? "離開專注模式" : "專注模式") { store.focusMode.toggle() }
-                        Divider()
-                        Button("重新開啟關閉的分頁", action: store.reopenClosedTab)
-                        Button("復原刪除的書籤", action: store.undoBookmarkDeletion).disabled(store.lastRemovedBookmark == nil)
-                        Button("診斷…") { diagnosticsPresented = true }
-                        Button("新增 space", action: store.addSpace)
-                        Button("從其他瀏覽器導入…", action: store.requestImport)
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .frame(minWidth: BrowserSidebarMetrics.controlHitSize, minHeight: BrowserSidebarMetrics.controlHitSize)
-                    }
-                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("瀏覽器功能")
-                    Button("註解") { store.showAnnotations(store.selectedID) }
-                        .buttonStyle(.plain)
-                        .frame(minWidth: BrowserSidebarMetrics.controlHitSize, minHeight: BrowserSidebarMetrics.controlHitSize)
-                        .padding(.trailing, BrowserSidebarMetrics.rowHorizontalPadding)
-                }
-                BrowserNavigationProgress(tabID: tabID,
-                    state: runtime.navigationTabID == tabID ? runtime.navigationState : .blank)
-                if findPresented {
-                    BrowserFindBar(presented: $findPresented, count: runtime.findCount, activeIndex: runtime.findIndex, onCommand: send)
-                        .id(tabID)
-                }
-                // This surface mounts TatwoCEFBrowserView through the shared native tab host (actor: .human).
+                // Keep the page full-height: chrome floats at its top edge.
                 BrowserWorkSpaceCEFSurface(tabID: tabID, spaceID: spaceID, command: commandTabID == tabID ? command : nil,
                     onPopup: { store.openPopup(spaceID: $0, url: $1) })
+                .overlay(alignment: .top) {
+                    VStack(spacing: BrowserOmniboxMetrics.zero) {
+                        HStack(alignment: .top, spacing: BrowserOmniboxMetrics.controlGap) {
+                            EmbeddedBrowserToolbar(addressText: $query, addressFieldFocused: $addressFocused,
+                                state: runtime.navigationTabID == tabID ? runtime.navigationState : .blank,
+                                enabled: true, onSubmit: submitSearch, onCommand: send,
+                                openTabs: store.tabs.map { BrowserAddressSuggestion(id: String($0.id), title: $0.title, url: $0.url) },
+                                onSelectTab: { if let id = Int($0) { store.select(id) } }, expansionRequest: $addressExpansionRequested)
+                            Menu {
+                                Button("搜尋分頁…", action: openTabSearch)
+                                Button(store.focusMode ? "離開專注模式" : "專注模式") { store.focusMode.toggle() }
+                                    .disabled(store.sidebarPinned)
+                                Divider()
+                                Button("重新開啟關閉的分頁", action: store.reopenClosedTab)
+                                Button("復原刪除的書籤", action: store.undoBookmarkDeletion).disabled(store.lastRemovedBookmark == nil)
+                                Button("診斷…") { diagnosticsPresented = true }
+                                Button("新增 space", action: store.addSpace)
+                                Button("從其他瀏覽器導入…", action: store.requestImport)
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .frame(minWidth: BrowserOmniboxMetrics.collapsedHeight, minHeight: BrowserOmniboxMetrics.collapsedHeight)
+                            }
+                            .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("瀏覽器功能")
+                            .modifier(BrowserOmniboxGlass(cornerRadius: BrowserOmniboxMetrics.collapsedRadius))
+                            Button("註解") { store.showAnnotations(store.selectedID) }
+                                .buttonStyle(.plain)
+                                .frame(minWidth: BrowserOmniboxMetrics.collapsedHeight, minHeight: BrowserOmniboxMetrics.collapsedHeight)
+                                .padding(.horizontal, BrowserOmniboxMetrics.horizontalInset)
+                                .fixedSize()
+                                .modifier(BrowserOmniboxGlass(cornerRadius: BrowserOmniboxMetrics.collapsedRadius))
+                        }
+                        .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
+                        .zIndex(BrowserOmniboxMetrics.chromeZIndex)
+                        BrowserNavigationProgress(tabID: tabID,
+                            state: runtime.navigationTabID == tabID ? runtime.navigationState : .blank)
+                        if findPresented {
+                            BrowserFindBar(presented: $findPresented, count: runtime.findCount, activeIndex: runtime.findIndex, onCommand: send)
+                                .id(tabID)
+                        }
+                    }
+                }
             } else { page }
         }
         .overlay(alignment: .bottom) {
-            if let settingsError { Text(settingsError).font(.caption).padding(8).background(.regularMaterial) }
+            if let settingsError { Text(settingsError).font(.caption).padding(BrowserSidebarMetrics.rowHorizontalPadding).background(.regularMaterial) }
         }
         .background {
             BrowserDailyNavigationControls(focused: browserFocused && !store.bookmarkEditorActive && store.annotationTab == nil && !store.importPresented && !tabSearchPresented && !diagnosticsPresented,
@@ -538,7 +567,7 @@ struct BrowserWorkSpaceDesignView: View {
                 onAction: performBrowserAction)
         }
         .background(BrowserDailyFocusScope(focused: $browserFocused))
-        .onChange(of: focusedField) { _, value in if value == .search { addressFocused = true } }
+        .onChange(of: focusedField) { _, value in if value == .search && !addressFocused { addressExpansionRequested = true } }
         .onChange(of: addressFocused) { _, value in focusedField = value ? .search : nil }
         .onChange(of: store.selectedID) { _, _ in findPresented = false }
     }
@@ -547,7 +576,7 @@ struct BrowserWorkSpaceDesignView: View {
         switch action {
         case .newTab: if store.canAddTab { store.addTab(); focusedField = .search }
         case .closeTab: store.close(store.selectedID)
-        case .focusAddressBar: addressFocused = true; focusedField = .search
+        case .focusAddressBar: addressExpansionRequested = true
         case .nextTab, .previousTab:
             let tabs = store.tabs
             guard !tabs.isEmpty, let index = tabs.firstIndex(where: { $0.id == store.selectedID }) else { return }
@@ -563,29 +592,29 @@ struct BrowserWorkSpaceDesignView: View {
     }
 
     private var extensionStrip: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: BrowserSidebarMetrics.controlGap) {
             ForEach(["文A", "S"], id: \.self) { name in
                 Button(action: store.showDesignNotice) {
-                    Text(name).font(.system(size: 8.5, weight: .bold)).foregroundStyle(fieldFill)
-                        .frame(width: 18, height: 18)
+                    Text(name).font(.system(size: BrowserSidebarMetrics.extensionFontSize, weight: .bold)).foregroundStyle(fieldFill)
+                        .frame(width: BrowserSidebarMetrics.rowIconWidth, height: BrowserSidebarMetrics.rowIconWidth)
                         .background(name == "S" ? folderFill : palette.brandAccent,
-                                    in: RoundedRectangle(cornerRadius: 5))
+                                    in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.spaceDotSize))
                 }.accessibilityLabel("擴充插件 \(name)")
             }
             Button(action: store.showDesignNotice) {
-                Image(systemName: "puzzlepiece.extension").frame(width: 18, height: 18)
+                Image(systemName: "puzzlepiece.extension").frame(width: BrowserSidebarMetrics.rowIconWidth, height: BrowserSidebarMetrics.rowIconWidth)
             }.accessibilityLabel("管理擴充插件")
         }.buttonStyle(.plain).foregroundStyle(.secondary)
     }
 
     private var searchBox: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass").font(.system(size: 16)).foregroundStyle(.secondary)
-                TextField("Search", text: $query).font(.system(size: 14.5))
+        VStack(spacing: BrowserSidebarMetrics.zero) {
+            HStack(spacing: BrowserSidebarMetrics.downloadsPadding) {
+                Image(systemName: "magnifyingglass").font(.system(size: BrowserSidebarMetrics.searchIconSize)).foregroundStyle(.secondary)
+                TextField("Search", text: $query).font(.system(size: BrowserSidebarMetrics.searchFontSize))
                     .textFieldStyle(.plain).focused($focusedField, equals: .search)
                     .onSubmit(submitSearch).contextMenu { searchEngineMenu }
-            }.padding(.horizontal, 2).padding(.top, 2).padding(.bottom, 12)
+            }.padding(.horizontal, BrowserSidebarMetrics.childGap).padding(.top, BrowserSidebarMetrics.childGap).padding(.bottom, BrowserSidebarMetrics.laneRowSpacing)
             HStack {
                 roundButton("加入分頁", "plus") { store.addTab(); focusedField = .search }.disabled(!store.canAddTab)
                 Spacer()
@@ -593,26 +622,26 @@ struct BrowserWorkSpaceDesignView: View {
                     .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(.top, 13).padding(.horizontal, 14).padding(.bottom, 11)
-        .background(fieldFill, in: RoundedRectangle(cornerRadius: 15))
-        .shadow(color: shadowColor.opacity(0.18), radius: 17, x: 0, y: 10)
+        .padding(.top, BrowserSidebarMetrics.searchTopInset).padding(.horizontal, BrowserSidebarMetrics.settingsCardHorizontalPadding).padding(.bottom, BrowserSidebarMetrics.searchBottomInset)
+        .background(fieldFill, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.laneCardCornerRadius))
+        .shadow(color: shadowColor.opacity(BrowserSidebarMetrics.searchShadowOpacity), radius: BrowserSidebarMetrics.searchShadowRadius, x: BrowserSidebarMetrics.zero, y: BrowserSidebarMetrics.downloadsPadding)
         .overlay(alignment: .top) {
             // An overlay does not move the centered box when suggestions appear.
             if !store.suggestions(for: query).isEmpty {
-                suggestionList.offset(y: 104)
+                suggestionList.offset(y: BrowserSidebarMetrics.searchSuggestionsOffset)
             }
         }
     }
 
     private func roundButton(_ label: String, _ symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 16))
-                .frame(width: 30, height: 30).background(palette.surfaceBorder.opacity(0.45), in: Circle())
+            Image(systemName: symbol).font(.system(size: BrowserSidebarMetrics.searchIconSize))
+                .frame(width: BrowserSidebarMetrics.searchButtonSize, height: BrowserSidebarMetrics.searchButtonSize).background(palette.surfaceBorder.opacity(BrowserSidebarMetrics.searchButtonOpacity), in: Circle())
         }.buttonStyle(.plain).accessibilityLabel(label)
     }
 
     private var suggestionList: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: BrowserSidebarMetrics.zero) {
             ForEach(store.suggestions(for: query)) { suggestion in
                 Button {
                     if let id = suggestion.tabID { store.select(id) }
@@ -621,12 +650,12 @@ struct BrowserWorkSpaceDesignView: View {
                 } label: {
                     HStack {
                         Text(suggestion.section).font(.caption).foregroundStyle(.secondary)
-                        Text(suggestion.title).font(.system(size: 13)).lineLimit(1)
+                        Text(suggestion.title).font(.system(size: BrowserSidebarMetrics.rowFontSize)).lineLimit(1)
                         Spacer(minLength: 0)
-                    }.padding(10).contentShape(Rectangle())
+                    }.padding(BrowserSidebarMetrics.downloadsPadding).contentShape(Rectangle())
                 }.buttonStyle(.plain)
             }
-        }.background(fieldFill, in: RoundedRectangle(cornerRadius: 9))
+        }.background(fieldFill, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing))
     }
 
     private func submitSearch() {
@@ -645,8 +674,8 @@ struct BrowserWorkSpaceDesignView: View {
     }
     private var tabSearchOverlay: some View {
         ZStack {
-            palette.canvasBase.opacity(0.85).onTapGesture { tabSearchPresented = false }
-            VStack(spacing: 10) {
+            palette.canvasBase.opacity(BrowserSidebarMetrics.tabSearchScrimOpacity).onTapGesture { tabSearchPresented = false }
+            VStack(spacing: BrowserSidebarMetrics.downloadsPadding) {
                 HStack {
                     TextField("搜尋分頁", text: $tabSearch).textFieldStyle(.plain)
                         .focused($focusedField, equals: .tabSearch)
@@ -657,25 +686,25 @@ struct BrowserWorkSpaceDesignView: View {
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(spacing: 4) {
+                        VStack(spacing: BrowserSidebarMetrics.controlGap) {
                             ForEach(Array(searchResults.enumerated()), id: \.element.id) { index, tab in
                                 Button { store.select(tab.id); tabSearchPresented = false } label: {
-                                    HStack { favicon(tab); Text(tab.title); Spacer() }.padding(8)
+                                    HStack { favicon(tab); Text(tab.title); Spacer() }.padding(BrowserSidebarMetrics.rowHorizontalPadding)
                                         .background(index == searchIndex ? palette.surfaceBorder : .clear,
-                                                    in: RoundedRectangle(cornerRadius: 9))
+                                                    in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing))
                                 }.buttonStyle(.plain).id(tab.id)
                             }
                         }
-                    }.frame(maxHeight: 320)
+                    }.frame(maxHeight: BrowserSidebarMetrics.tabSearchMaxHeight)
                     .onChange(of: searchIndex) { _, index in
                         if searchResults.indices.contains(index) { proxy.scrollTo(searchResults[index].id) }
                     }
                 }
                 if searchResults.isEmpty { Text("沒有符合的分頁").foregroundStyle(.secondary) }
             }
-            .padding(18).frame(maxWidth: 480)
+            .padding(BrowserSidebarMetrics.rowIconWidth).frame(maxWidth: BrowserSidebarMetrics.tabSearchWidth)
             .background(fieldFill, in: RoundedRectangle(cornerRadius: LiquidGlassTokens.radiusCard))
-            .padding(24)
+            .padding(BrowserSidebarMetrics.laneCardOuterInset)
             .onMoveCommand { direction in
                 if direction == .down { searchIndex = min(searchIndex + 1, max(0, searchResults.count - 1)) }
                 if direction == .up { searchIndex = max(0, searchIndex - 1) }
@@ -688,55 +717,56 @@ struct BrowserWorkSpaceDesignView: View {
     }
 
     // MARK: - Import sheet (local choices only)
+    @available(*, deprecated, message: "Legacy design-only sheet; live import uses BrowserImportFlowView")
     private var importSheet: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("從其他瀏覽器導入").font(.system(size: 16, weight: .bold))
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsCardHorizontalPadding) {
+            Text("從其他瀏覽器導入").font(.system(size: BrowserSidebarMetrics.searchIconSize, weight: .bold))
             Text("Dia 的入口：首次啟動精靈，或 Dia 選單 › Import from Another Browser。TATWO 放在 Browser work space 的空間選單。")
-                .font(.system(size: 12.5)).foregroundStyle(.secondary)
+                .font(.system(size: BrowserSidebarMetrics.omniboxFontSize)).foregroundStyle(.secondary)
             Text("來源").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 8) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: BrowserSidebarMetrics.rowHorizontalPadding) {
                 ForEach(BrowserWorkSpaceStore.ImportSource.allCases) { source in
                     Button { store.selectSource(source) } label: {
-                        HStack(spacing: 8) {
+                        HStack(spacing: BrowserSidebarMetrics.rowHorizontalPadding) {
                             Text(String(source.rawValue.prefix(1)))
-                                .font(.system(size: 11, weight: .bold)).foregroundStyle(fieldFill)
-                                .frame(width: 18, height: 18)
-                                .background(palette.brandAccent, in: RoundedRectangle(cornerRadius: 5))
+                                .font(.system(size: BrowserSidebarMetrics.selectedHostFontSize, weight: .bold)).foregroundStyle(fieldFill)
+                                .frame(width: BrowserSidebarMetrics.rowIconWidth, height: BrowserSidebarMetrics.rowIconWidth)
+                                .background(palette.brandAccent, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.spaceDotSize))
                             Text(source == .safari ? "Safari・即將支援" : source.rawValue)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.system(size: BrowserSidebarMetrics.rowFontSize, weight: .semibold))
                             Spacer(minLength: 0)
-                        }.padding(9).frame(maxWidth: .infinity)
+                        }.padding(BrowserSidebarMetrics.rowSpacing).frame(maxWidth: .infinity)
                             .background(palette.brandAccent.opacity(store.importSource == source ? 0.10 : 0.04),
-                                        in: RoundedRectangle(cornerRadius: 9))
-                            .overlay(RoundedRectangle(cornerRadius: 9)
+                                        in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing))
+                            .overlay(RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing)
                                 .strokeBorder(palette.brandAccent.opacity(store.importSource == source ? 0.7 : 0), lineWidth: 1.5))
                     }.buttonStyle(.plain).disabled(source == .safari).opacity(source == .safari ? 0.5 : 1)
                 }
             }
             Text("要導入的資料").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2),
-                      alignment: .leading, spacing: 6) {
+                      alignment: .leading, spacing: BrowserSidebarMetrics.dividerHorizontalInset) {
                 ForEach(BrowserWorkSpaceStore.ImportData.allCases) { data in
                     Toggle(data.rawValue + (store.supports(data) ? "" : "（Arc 不提供）"), isOn: Binding(
                         get: { store.importData.contains(data) },
                         set: { store.setImportData(data, selected: $0) }
-                    )).toggleStyle(.checkbox).disabled(!store.supports(data)).font(.system(size: 13))
+                    )).toggleStyle(.checkbox).disabled(!store.supports(data)).font(.system(size: BrowserSidebarMetrics.rowFontSize))
                 }
             }
-            Text(BrowserWorkSpaceStore.importExplanation).font(.system(size: 12))
-                .fixedSize(horizontal: false, vertical: true).padding(10)
-                .background(palette.surfaceBorder.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+            Text(BrowserWorkSpaceStore.importExplanation).font(.system(size: BrowserSidebarMetrics.stateTitleFontSize))
+                .fixedSize(horizontal: false, vertical: true).padding(BrowserSidebarMetrics.downloadsPadding)
+                .background(palette.surfaceBorder.opacity(BrowserSidebarMetrics.legacyImportNoteOpacity), in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowHorizontalPadding))
             HStack {
                 Picker("設定檔", selection: $store.profile) {
                     Text("Default").tag("Default")
                     Text("工作（示意）").tag("工作")
-                }.frame(maxWidth: 220)
+                }.frame(maxWidth: BrowserSidebarMetrics.legacyProfileWidth)
                 Spacer()
                 Button("取消", action: store.cancelImport).keyboardShortcut(.cancelAction)
                 Button("導入", action: store.finishImport).keyboardShortcut(.defaultAction)
             }
         }
-        .padding(22).frame(width: 520).background(fieldFill)
+        .padding(BrowserSidebarMetrics.settingsPagePadding).frame(width: BrowserSidebarMetrics.laneCardWidth).background(fieldFill)
     }
 }
 
@@ -753,13 +783,14 @@ struct BrowserWorkSpaceSidebarList: View {
     @State private var selectedDownloadID: String?
     @State private var hoveredDownloadID: String?
     @State private var downloadsPresented = false
+    @State private var downloadsContentHeight = BrowserSidebarMetrics.zero
     @State private var diagnosticsPresented = false
     @FocusState private var focusedField: Field?
     private enum Field: Hashable { case close(Int), folderName }
     private var palette: TatwoThemePalette { TatwoActivePalette.current }
-    private var fieldFill: Color { Color(red: 246 / 255, green: 242 / 255, blue: 234 / 255) }
-    private var folderFill: Color { Color(red: 154 / 255, green: 163 / 255, blue: 173 / 255) }
-    private var shadowColor: Color { Color(red: 120 / 255, green: 90 / 255, blue: 70 / 255) }
+    private var fieldFill: Color { LiquidGlassTokens.browserFieldFill }
+    private var folderFill: Color { LiquidGlassTokens.browserFolderFill }
+    private var shadowColor: Color { LiquidGlassTokens.browserShadowColor }
 
     var body: some View {
         VStack(spacing: WorkspaceSidebarMetrics.sectionSpacing) {
@@ -767,10 +798,10 @@ struct BrowserWorkSpaceSidebarList: View {
                 sessionSidebar
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: BrowserSidebarMetrics.hairline) {
                         pinnedSection
                         folderSection
-                        Divider().padding(.horizontal, 6).padding(.vertical, 8)
+                        Divider().padding(.horizontal, BrowserSidebarMetrics.dividerHorizontalInset).padding(.vertical, BrowserSidebarMetrics.rowHorizontalPadding)
                         newTabButton
                         ForEach(store.activeTabs) { tab in tabRow(tab) }
                     }
@@ -799,9 +830,9 @@ struct BrowserWorkSpaceSidebarList: View {
     // MARK: - Session space (registry-only, no creation or drop targets)
     private var sessionSidebar: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: BrowserSidebarMetrics.hairline) {
                 ForEach(store.sessionFolders) { folder in
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: BrowserSidebarMetrics.hairline) {
                         Button { store.toggleSessionFolder(folder.id) } label: {
                             HStack(spacing: BrowserSidebarMetrics.rowSpacing) {
                                 Image(systemName: "folder.fill").foregroundStyle(folderFill).frame(width: BrowserSidebarMetrics.rowIconWidth)
@@ -814,7 +845,7 @@ struct BrowserWorkSpaceSidebarList: View {
                                 .padding(.vertical, BrowserSidebarMetrics.rowVerticalPadding)
                                 .padding(.horizontal, BrowserSidebarMetrics.rowHorizontalPadding)
                                 .contentShape(Rectangle())
-                        }.buttonStyle(.plain).contextMenu {
+                        }.buttonStyle(.plain).accessibilityLabel(folder.name).accessibilityIdentifier("browser.folder.\(folder.id)").contextMenu {
                             Button("全部關閉並移除") { store.closeSessionFolder(folder.id) }
                                 .disabled(folder.tabs.isEmpty)
                         }
@@ -837,8 +868,8 @@ struct BrowserWorkSpaceSidebarList: View {
     }
 
     private func sessionTabRow(_ tab: BrowserTab) -> some View {
-        BrowserTabRow(title: tab.title, host: tab.url?.host ?? "about:blank", favicon: tab.faviconPNG,
-            selected: store.selectedSessionTabID == tab.id,
+        BrowserTabRow(title: tab.title, tabID: tab.id.uuidString, host: tab.url?.host ?? "about:blank", favicon: tab.faviconPNG,
+            selected: store.selectedSessionTabID == tab.id, sleeping: tab.isSleeping,
             leadingInset: BrowserSidebarMetrics.childLeadingInset,
             onSelect: { store.selectSessionTab(tab.id) }).help(tab.url?.absoluteString ?? tab.title)
             .accessibilityAddTraits(store.selectedSessionTabID == tab.id ? .isSelected : [])
@@ -858,103 +889,133 @@ struct BrowserWorkSpaceSidebarList: View {
     }
 
     private var spaceControls: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: BrowserSidebarMetrics.rowHorizontalPadding) {
             Button { downloadsPresented.toggle() } label: {
-                Image(systemName: "arrow.down.circle").frame(width: 28, height: 28)
+                Image(systemName: "arrow.down.circle")
+                    .overlay(alignment: .topTrailing) {
+                        if !downloadStore.downloads.isEmpty {
+                            Circle().fill(LiquidGlassTokens.browserDownloadBadge)
+                                .frame(width: BrowserSidebarMetrics.downloadBadgeSize, height: BrowserSidebarMetrics.downloadBadgeSize)
+                                .offset(x: BrowserSidebarMetrics.downloadBadgeOffsetX, y: BrowserSidebarMetrics.downloadBadgeOffsetY)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    .frame(width: BrowserSidebarMetrics.footerControlSize, height: BrowserSidebarMetrics.footerControlSize)
             }
             .accessibilityLabel("瀏覽器下載")
             .popover(isPresented: $downloadsPresented, arrowEdge: .bottom) { downloadsPopover }
-            Spacer(minLength: 0)
-            ScrollView(.horizontal) {
-                HStack(spacing: 0) {
+            WorkspaceSpaceControls {
                     ForEach(store.spaces) { space in
                         Button { store.selectSpace(space.id) } label: {
                             ZStack {
                                 if space.isSessionSpace {
-                                    Circle().strokeBorder(folderFill, lineWidth: BrowserSidebarMetrics.spaceDotStroke)
-                                    Circle().fill(store.selectedSpaceID == space.id ? folderFill : .clear)
+                                    Circle().strokeBorder(store.selectedSpaceID == space.id ? folderFill : palette.surfaceBorder, lineWidth: WorkspaceSpaceControlMetrics.ringStroke)
                                 } else {
                                     Circle().fill(store.selectedSpaceID == space.id ? folderFill : palette.surfaceBorder)
                                 }
-                            }.frame(width: BrowserSidebarMetrics.spaceDotSize, height: BrowserSidebarMetrics.spaceDotSize)
-                                .frame(width: BrowserSidebarMetrics.spaceDotHitWidth, height: BrowserSidebarMetrics.spaceDotHitHeight)
+                            }.frame(width: WorkspaceSpaceControlMetrics.dotSize, height: WorkspaceSpaceControlMetrics.dotSize)
+                                .frame(width: WorkspaceSpaceControlMetrics.cellWidth, height: WorkspaceSpaceControlMetrics.cellHeight)
                                 .contentShape(Rectangle())
                         }
                         .accessibilityLabel(space.name)
+                        .accessibilityIdentifier("browser.space.\(space.id)")
                         .accessibilityAddTraits(store.selectedSpaceID == space.id ? .isSelected : [])
                     }
-                }
-            }.scrollIndicators(.hidden).fixedSize(horizontal: false, vertical: true)
-            Button(action: store.addSpace) {
-                Image(systemName: "plus").font(.system(size: 12)).foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28).contentShape(Rectangle())
-            }.accessibilityLabel("新增空間")
-            Spacer(minLength: 0)
+                Button(action: store.addSpace) {
+                    Image(systemName: "plus").font(.system(size: WorkspaceSpaceControlMetrics.plusFontSize, weight: .bold)).foregroundStyle(.secondary)
+                        .frame(width: WorkspaceSpaceControlMetrics.cellWidth, height: WorkspaceSpaceControlMetrics.cellHeight).contentShape(Rectangle())
+                }.accessibilityLabel("新增空間").accessibilityIdentifier("browser.space.add")
+            }
+            Color.clear.frame(width: BrowserSidebarMetrics.footerControlSize).accessibilityHidden(true)
         }
-        .buttonStyle(.plain).foregroundStyle(.secondary).padding(.horizontal, 6)
+        .buttonStyle(.plain).foregroundStyle(.secondary).padding(.horizontal, BrowserSidebarMetrics.dividerHorizontalInset)
     }
 
     private var downloadsPopover: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search", text: $downloadQuery).textFieldStyle(.plain)
-                    Button(action: store.showDesignNotice) {
-                        Image(systemName: "line.3.horizontal.decrease").frame(width: 28, height: 28)
-                    }.accessibilityLabel("篩選下載")
-                }
-                HStack {
-                    Text("下載").font(.headline)
-                    Spacer()
-                    Button("清除", action: downloadStore.clearDownloads).disabled(downloadStore.downloads.isEmpty)
-                }
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if downloadStore.downloads.isEmpty { Text("尚無下載").foregroundStyle(.secondary) }
-                        ForEach(["今天", "昨天", "Earlier"], id: \.self) { section in
-                            let files = downloadStore.downloads.filter {
-                                $0.section == section && (downloadQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(downloadQuery))
-                            }
-                            if !files.isEmpty {
-                                Text(section).font(.caption).foregroundStyle(.secondary).padding(.top, 8)
-                                ForEach(files) { download in downloadRow(download) }
-                            }
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.downloadsSpacing) {
+            HStack {
+                Image(systemName: "magnifyingglass").foregroundStyle(LiquidGlassTokens.browserMutedInk)
+                TextField("Search", text: $downloadQuery).textFieldStyle(.plain)
+                Button(action: store.showDesignNotice) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .frame(width: BrowserSidebarMetrics.footerControlSize, height: BrowserSidebarMetrics.footerControlSize)
+                }.accessibilityLabel("篩選下載")
+            }
+            HStack {
+                Text("下載").font(.system(size: BrowserSidebarMetrics.downloadTitleFontSize, weight: .semibold))
+                Spacer()
+                Button("清除", action: downloadStore.clearDownloads).disabled(downloadStore.downloads.isEmpty)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: BrowserSidebarMetrics.downloadsSpacing) {
+                    if downloadStore.downloads.isEmpty { Text("尚無下載").foregroundStyle(LiquidGlassTokens.browserMutedInk) }
+                    ForEach(["今天", "昨天", "Earlier"], id: \.self) { section in
+                        let files = downloadStore.downloads.filter {
+                            $0.section == section && (downloadQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(downloadQuery))
                         }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }.padding(16).frame(width: 330)
-            Divider()
-            downloadPreview.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        if !files.isEmpty {
+                            Text(section).font(.system(size: BrowserSidebarMetrics.downloadMetaFontSize)).foregroundStyle(LiquidGlassTokens.browserMutedInk)
+                            ForEach(files) { download in downloadRow(download) }
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { downloadsContentHeight = $0 }
+            }
+            .frame(height: min(max(downloadsContentHeight, BrowserSidebarMetrics.downloadsMinimumListHeight), BrowserSidebarMetrics.downloadsMaxListHeight))
         }
+        .font(.system(size: BrowserSidebarMetrics.downloadActionFontSize))
         .buttonStyle(.plain)
-        .frame(width: 660, height: 520)
-        .background { LiquidGlassPanelCard(cornerRadius: LiquidGlassTokens.radiusCard) { Color.clear } }
+        .foregroundStyle(LiquidGlassTokens.browserInk)
+        .padding(BrowserSidebarMetrics.downloadsPadding)
+        .frame(width: BrowserSidebarMetrics.downloadsWidth)
+        .background(LiquidGlassTokens.browserFieldFill,
+                    in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.downloadsCornerRadius))
+        .clipShape(RoundedRectangle(cornerRadius: BrowserSidebarMetrics.downloadsCornerRadius))
+        .environment(\.colorScheme, .light)
     }
 
     private func downloadRow(_ download: BrowserDownloadStore.Item) -> some View {
         let selected = selectedDownloadID == download.id
         let trashVisible = selected || hoveredDownloadID == download.id
-        return HStack(spacing: 8) {
-            Button { selectedDownloadID = download.id } label: {
-                HStack(spacing: 10) {
-                    downloadArtwork(download, large: false)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(download.name).font(.system(size: 13, weight: .bold)).lineLimit(1)
-                        Text(download.time).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
-                }.contentShape(Rectangle())
-            }.accessibilityAddTraits(selected ? .isSelected : [])
-            Button { downloadStore.hide(download) } label: {
-                Image(systemName: "trash").frame(width: 28, height: 32)
+        return VStack(alignment: .leading, spacing: BrowserSidebarMetrics.downloadRowSpacing) {
+            HStack(spacing: BrowserSidebarMetrics.downloadsSpacing) {
+                Button { selectedDownloadID = download.id } label: {
+                    VStack(alignment: .leading, spacing: BrowserSidebarMetrics.downloadRowSpacing) {
+                        Text(download.name).font(.system(size: BrowserSidebarMetrics.downloadTitleFontSize, weight: .semibold)).lineLimit(1)
+                        Text(download.time).font(.system(size: BrowserSidebarMetrics.downloadMetaFontSize)).foregroundStyle(LiquidGlassTokens.browserMutedInk)
+                    }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                }.accessibilityAddTraits(selected ? .isSelected : [])
+                Button { downloadStore.hide(download) } label: {
+                    Image(systemName: "trash")
+                        .frame(width: BrowserSidebarMetrics.footerControlSize, height: BrowserSidebarMetrics.footerControlSize)
+                }
+                .accessibilityLabel("隱藏下載紀錄 \(download.name)")
+                .disabled(!download.done)
+                .opacity(trashVisible ? BrowserSidebarMetrics.visibleOpacity : BrowserSidebarMetrics.hiddenOpacity)
+                .allowsHitTesting(trashVisible)
             }
-            .accessibilityLabel("隱藏下載紀錄 \(download.name)")
-            .disabled(!download.done)
-            .opacity(trashVisible ? 1 : 0).allowsHitTesting(trashVisible)
+            if !download.done {
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: BrowserSidebarMetrics.downloadProgressRadius).fill(LiquidGlassTokens.browserChipFill)
+                        if download.total > 0 {
+                            RoundedRectangle(cornerRadius: BrowserSidebarMetrics.downloadProgressRadius).fill(palette.brandAccent.opacity(BrowserSidebarMetrics.downloadProgressOpacity))
+                                .frame(width: geometry.size.width * min(1, Double(download.received) / Double(max(download.total, download.received))))
+                        }
+                    }
+                }
+                .frame(height: BrowserSidebarMetrics.downloadProgressHeight)
+                .accessibilityLabel("下載進度")
+                .accessibilityValue(download.time)
+            } else {
+                HStack(spacing: BrowserSidebarMetrics.downloadActionSpacing) {
+                    Button("快速預覽") { downloadStore.preview(download) }
+                    Button("在 Finder 顯示") { downloadStore.reveal(download) }
+                }.font(.system(size: BrowserSidebarMetrics.downloadActionFontSize))
+            }
         }
-        .padding(8)
-        .background(selected ? palette.surfaceBorder : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .padding(BrowserSidebarMetrics.downloadRowPadding)
+        .background(selected ? palette.surfaceBorder : .clear, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.downloadRowCornerRadius))
         .onHover { hoveredDownloadID = $0 ? download.id : nil }
         .contextMenu {
             Button("在 Finder 顯示") { downloadStore.reveal(download) }.disabled(!download.done)
@@ -962,57 +1023,21 @@ struct BrowserWorkSpaceSidebarList: View {
         }
     }
 
-    private var downloadPreview: some View {
-        VStack(spacing: 16) {
-            if let download = downloadStore.downloads.first(where: { $0.id == selectedDownloadID }) {
-                downloadArtwork(download, large: true)
-                Text(download.name).font(.headline).lineLimit(2)
-                Text(download.time).font(.caption).foregroundStyle(.secondary)
-                if !download.done && download.total > 0 {
-                    ProgressView(value: Double(download.received), total: Double(max(download.total, download.received)))
-                }
-                Button("快速預覽") { downloadStore.preview(download) }.disabled(!download.done)
-                Button("在 Finder 顯示") { downloadStore.reveal(download) }.disabled(!download.done)
-            } else {
-                Text("選一個檔案預覽").font(.callout).foregroundStyle(.tertiary)
-            }
-        }.padding(20).accessibilityElement(children: .contain).accessibilityLabel("下載預覽")
-    }
-
-    private func downloadArtwork(_ download: BrowserDownloadStore.Item, large: Bool) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 5).fill(download.isImage ? folderFill : .white)
-            if download.isImage {
-                Image(systemName: "photo").font(.system(size: large ? 64 : 20)).foregroundStyle(palette.brandAccent)
-            } else {
-                VStack(alignment: .leading, spacing: large ? 12 : 4) {
-                    ForEach(0..<5) { line in
-                        RoundedRectangle(cornerRadius: 1).fill(folderFill)
-                            .frame(width: large ? (line == 4 ? 90 : 150) : (line == 4 ? 14 : 24), height: large ? 4 : 2)
-                    }
-                    Spacer(minLength: 0)
-                }.padding(large ? 24 : 6)
-            }
-        }
-        .frame(width: large ? 230 : 38, height: large ? 300 : 48)
-        .accessibilityHidden(true)
-    }
-
     // MARK: - Sidebar sections: pinned / folders / divider / new tab / tabs
     private var pinnedSection: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.hairline) {
             Button { pinsExpanded.toggle() } label: {
-                HStack(spacing: 9) {
-                    Text("📌").frame(width: 18)
+                HStack(spacing: BrowserSidebarMetrics.rowSpacing) {
+                    Text("📌").frame(width: BrowserSidebarMetrics.rowIconWidth)
                     Text("釘選分頁").fontWeight(.bold)
                     chevron(expanded: pinsExpanded)
                     Spacer(minLength: 0)
-                }.padding(8)
+                }.padding(BrowserSidebarMetrics.rowHorizontalPadding)
             }.buttonStyle(.plain)
             if pinsExpanded {
-                ForEach(store.pinnedTabs) { tab in tabRow(tab).padding(.leading, 16) }
+                ForEach(store.pinnedTabs) { tab in tabRow(tab).padding(.leading, BrowserSidebarMetrics.workspaceFaviconSize) }
             }
-        }.font(.system(size: 13.5))
+        }.font(.system(size: BrowserSidebarMetrics.workspaceRowFontSize))
     }
 
     private func beginFolderNaming() {
@@ -1031,11 +1056,11 @@ struct BrowserWorkSpaceSidebarList: View {
 
     private var folderSection: some View {
         ForEach(store.folders) { folder in
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: BrowserSidebarMetrics.hairline) {
                 Group {
                     if editingFolderID == folder.id {
-                        HStack(spacing: 9) {
-                            Image(systemName: "folder.fill").foregroundStyle(folderFill).frame(width: 18)
+                        HStack(spacing: BrowserSidebarMetrics.rowSpacing) {
+                            Image(systemName: "folder.fill").foregroundStyle(folderFill).frame(width: BrowserSidebarMetrics.rowIconWidth)
                             TextField("資料夾名稱", text: $folderName)
                                 .textFieldStyle(.plain).focused($focusedField, equals: .folderName)
                                 .onSubmit { finishFolderNaming() }
@@ -1044,22 +1069,13 @@ struct BrowserWorkSpaceSidebarList: View {
                                 .onChange(of: focusedField) { _, value in
                                     if value != .folderName { finishFolderNaming() }
                                 }
-                        }.padding(8)
+                        }.padding(BrowserSidebarMetrics.rowHorizontalPadding)
                     } else {
-                        Button { store.toggleFolder(folder.id) } label: {
-                            HStack(spacing: 9) {
-                                Image(systemName: "folder.fill").foregroundStyle(folderFill).frame(width: 18)
-                                HStack(spacing: 2) {
-                                    Text(folder.name).fontWeight(.bold)
-                                    chevron(expanded: folder.chevronExpanded)
-                                }
-                                Spacer(minLength: 0)
-                            }.padding(8).contentShape(Rectangle())
-                        }.buttonStyle(.plain)
+                        BrowserBookmarkFolderRow(store: store, folder: folder)
                     }
-                }.font(.system(size: 13.5))
+                }.font(.system(size: BrowserSidebarMetrics.workspaceRowFontSize))
                     .background(targetedFolderID == folder.id ? palette.surfaceBorder : .clear,
-                                in: RoundedRectangle(cornerRadius: 9))
+                                in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing))
                     .contextMenu {
                         Button("新增書籤（目前分頁）") { store.saveBookmark(tabID: store.selectedID, into: folder.id) }
                             .disabled(store.selectedRegistryID == nil)
@@ -1072,14 +1088,7 @@ struct BrowserWorkSpaceSidebarList: View {
                     }
                 if folder.expanded {
                     ForEach(folder.bookmarks) { bookmark in
-                        Button { store.openBookmark(bookmark, folderID: folder.id) } label: {
-                            HStack(spacing: 9) {
-                                favicon(.init(id: 0, title: bookmark.title, url: bookmark.url))
-                                Text(bookmark.title).lineLimit(1)
-                                Spacer(minLength: 0)
-                            }.font(.system(size: 13.5)).padding(8).padding(.leading, 16)
-                                .contentShape(Rectangle())
-                        }.buttonStyle(.plain).help(bookmark.url)
+                        BrowserBookmarkRow(store: store, bookmark: bookmark, folderID: folder.id)
                             .contextMenu {
                                 Button("新增書籤（目前分頁）") { store.saveBookmark(tabID: store.selectedID, into: folder.id) }
                                 Button("刪除書籤") {
@@ -1096,29 +1105,31 @@ struct BrowserWorkSpaceSidebarList: View {
     private var newTabButton: some View {
         Button { store.addTab(); store.searchFocusRequest += 1 } label: {
             Label("新分頁", systemImage: "plus")
-                .font(.system(size: 13.5)).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                .font(.system(size: BrowserSidebarMetrics.workspaceRowFontSize)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(BrowserSidebarMetrics.rowHorizontalPadding)
         }.buttonStyle(.plain).disabled(!store.canAddTab)
+            .accessibilityLabel("新分頁")
+            .accessibilityIdentifier("browser.newTab")
     }
 
     private func tabRow(_ tab: BrowserWorkSpaceStore.Tab) -> some View {
         let selected = store.selectedID == tab.id
         let closeVisible = hoveredTab == tab.id || focusedField == .close(tab.id)
-        return HStack(spacing: 2) {
-            BrowserTabRow(variant: .workspace, title: tab.title, favicon: tab.faviconPNG, selected: selected,
-                sleeping: tab.sleeping, workspaceIconFill: tab.id.isMultiple(of: 2) ? palette.brandAccent : folderFill,
+        return HStack(spacing: BrowserSidebarMetrics.childGap) {
+            BrowserTabRow(variant: .workspace, title: tab.title, tabID: tab.registryID?.uuidString ?? String(tab.id), host: URL(string: tab.url)?.host, favicon: tab.faviconPNG, selected: selected,
+                sleeping: tab.sleeping, loading: tab.loading, workspaceIconFill: tab.id.isMultiple(of: 2) ? palette.brandAccent : folderFill,
                 workspaceIconForeground: fieldFill, onSelect: { store.select(tab.id) })
             Button { store.close(tab.id) } label: {
-                Image(systemName: "xmark").font(.system(size: 10)).frame(width: 24, height: 30)
+                Image(systemName: "xmark").font(.system(size: BrowserSidebarMetrics.faviconFontSize)).frame(width: BrowserSidebarMetrics.laneCardOuterInset, height: BrowserSidebarMetrics.searchButtonSize)
             }
             .accessibilityLabel("關閉 \(tab.title)")
             .focused($focusedField, equals: .close(tab.id))
-            .opacity(closeVisible ? 1 : 0).allowsHitTesting(closeVisible)
+            .opacity(closeVisible ? BrowserSidebarMetrics.visibleOpacity : BrowserSidebarMetrics.hiddenOpacity).allowsHitTesting(closeVisible)
         }
         .buttonStyle(.plain)
         .foregroundStyle(tab.sleeping ? .tertiary : .primary)
-        .background(selected ? fieldFill : .clear, in: RoundedRectangle(cornerRadius: 9))
-        .shadow(color: shadowColor.opacity(selected ? 0.14 : 0), radius: 4, x: 0, y: 2)
+        .background(selected ? fieldFill : .clear, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing))
+        .shadow(color: shadowColor.opacity(selected ? BrowserSidebarMetrics.selectedRowShadowOpacity : BrowserSidebarMetrics.hiddenOpacity), radius: BrowserSidebarMetrics.controlGap, x: BrowserSidebarMetrics.zero, y: BrowserSidebarMetrics.childGap)
         .contextMenu { Button("註解…") { store.showAnnotations(tab.id) } }
         .onHover { hoveredTab = $0 ? tab.id : nil }
         .onDrag { NSItemProvider(object: "tatwo-browser-tab:\(tab.id)" as NSString) }
@@ -1130,17 +1141,17 @@ struct BrowserWorkSpaceSidebarList: View {
                 Image(nsImage: image).resizable().scaledToFit()
             } else { Image(systemName: "globe").foregroundStyle(.secondary) }
         }
-            .font(.system(size: 10, weight: .bold)).foregroundStyle(fieldFill)
-            .frame(width: 16, height: 16)
+            .font(.system(size: BrowserSidebarMetrics.faviconFontSize, weight: .bold)).foregroundStyle(fieldFill)
+            .frame(width: BrowserSidebarMetrics.workspaceFaviconSize, height: BrowserSidebarMetrics.workspaceFaviconSize)
             .background(tab.id.isMultiple(of: 2) ? palette.brandAccent : folderFill,
-                        in: RoundedRectangle(cornerRadius: 4))
+                        in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.controlGap))
     }
 
     private func chevron(expanded: Bool) -> some View {
         Image(systemName: "chevron.right")
-            .rotationEffect(.degrees(expanded ? 90 : 0))
-            .animation(.easeInOut(duration: 0.18), value: expanded)
-            .font(.system(size: 10)).foregroundStyle(.secondary)
+            .rotationEffect(.degrees(expanded ? BrowserSidebarMetrics.chevronExpandedAngle : BrowserSidebarMetrics.chevronCollapsedAngle))
+            .animation(.easeInOut(duration: BrowserSidebarMetrics.chevronAnimationDuration), value: expanded)
+            .font(.system(size: BrowserSidebarMetrics.faviconFontSize)).foregroundStyle(.secondary)
     }
 
 }

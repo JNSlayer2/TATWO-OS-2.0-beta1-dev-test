@@ -5,6 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { existsSync } from 'node:fs';
 
 const socketPath = process.env.TATWO2_OS_SOCKET
   || path.join(os.homedir(), 'Library', 'Application Support', 'tatwo2', 'live', 'os.sock');
@@ -16,6 +17,11 @@ const computerDenied = new Set(['com.apple.keychainaccess', 'com.apple.passwords
 const pixel = { type: 'number', minimum: 0, exclusiveMaximum: 2048 };
 const elementIndex = { type: 'integer', minimum: 0, maximum: 2147483647 };
 const tools = [
+  ['code_impact', '在 MCP 目前工作目錄現場掃描符號衝擊面：定義處、依檔分組的引用行、tests/*.test.mjs。純文字 word-boundary 比對，不解析語法、不追繼承與 protocol 一致性；定義只是單行啟發式，註解與字串也會命中。無索引、無常駐；20 秒掃描預算，未掃完會回報 coverage 與 complete:false。limit 限制顯示的符號命中行（定義優先），測試檔清單另受同一上限限制；total 是已觀察的命中行數，只有 totalExact:true 才是完整總數。', {
+    symbol: { type: 'string', minLength: 1, maxLength: 120, pattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+    lang: { type: 'string', enum: ['swift', 'objc', 'js', 'auto'], default: 'auto' },
+    limit: { type: 'integer', minimum: 1, maximum: 200, default: 80 },
+  }, ['symbol']],
   ['computer_list_apps', 'List running regular Apps: name, bundleIdentifier, pid, isFrontmost. No consent needed. ' + computerRules, {}, []],
   ['computer_start', 'Request consent for any installed App by bundleIdentifier, except TATWO, password managers and security/settings Apps. 授權層級跟隨這條對話的權限設定：全權／代我核准不再詢問；要求核准則每個 session 問一次。 switches the single current target and returns sessionID. Stop clears all approvals; human input revokes unless full access is selected. ' + computerRules, {
     bundleIdentifier: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[A-Za-z0-9][A-Za-z0-9.-]*$' },
@@ -142,6 +148,20 @@ function textResult(value) {
 
 async function callTool(name, args) {
   const params = { ...(args ?? {}) };
+  if (name === 'code_impact') {
+    if (!args || typeof args !== 'object' || Array.isArray(args)
+      || Object.keys(params).some(key => !['symbol', 'lang', 'limit'].includes(key))) {
+      throw new Error('impact_invalid_arguments');
+    }
+    // Source checkout vs packaged App; neither path comes from tool arguments.
+    // Lazy import keeps unrelated OS tools usable even if packaging is incomplete.
+    const bundled = new URL('./impact.mjs', import.meta.url);
+    const { codeImpact } = await import(existsSync(bundled) ? bundled : new URL('../../scripts/impact.mjs', import.meta.url));
+    const result = await codeImpact(params.symbol, {
+      lang: params.lang, limit: params.limit === undefined ? 80 : params.limit,
+    });
+    return { ...textResult(result), structuredContent: result, isError: !result.complete };
+  }
   if (name.startsWith('computer_')) {
     // No UI-selected-thread fallback and no model-supplied identity. Validate
     // here as well as in the App; not all MCP clients enforce inputSchema.

@@ -150,6 +150,14 @@ typedef void (^TatwoCEFFileDialogHandler)(NSInteger mode, NSString *title, NSStr
 - (BOOL)fillCredentialForAgentUsername:(NSString *)u password:(NSString *)p formID:(NSString *)f navigationGeneration:(uint64_t)g
     NS_SWIFT_NAME(fillCredentialForAgentUsername(_:password:formID:navigationGeneration:));
 #pragma mark - W58 End
+#pragma mark - W59 Native custody only; never exposed as socket tools
+- (BOOL)fillOneTimeCodeForAgent:(NSString *)code navigationGeneration:(uint64_t)g
+    NS_SWIFT_NAME(fillOneTimeCodeForAgent(_:navigationGeneration:));
+- (BOOL)prepareAgentPasswordChange;
+- (BOOL)fillAgentPasswordChangeCurrent:(NSString *)old newPassword:(NSString *)next navigationGeneration:(uint64_t)g
+    NS_SWIFT_NAME(fillAgentPasswordChange(current:newPassword:navigationGeneration:));
+- (BOOL)submitAgentPasswordChange:(uint64_t)g;
+#pragma mark - W59 End
 /// Sticky downgrade: async effects may outlive the command. Only native human input restores it.
 - (void)beginAgentInteraction;
 - (BOOL)restoreHumanInteraction;

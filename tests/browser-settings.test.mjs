@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -36,7 +37,7 @@ test('W51 honest extension copy, immutable AI column and W55 diagnostics', () =>
   assert.doesNotMatch(extensions, /Toggle|Picker|Button|TextField/);
   const ai = section('private var browserAISecurityColumn:', 'private var browserDiagnosticsSettings:');
   assert.doesNotMatch(ai, /Toggle|Picker|Button|TextField|Binding|Slider|Stepper/);
-  assert.match(ai, /foregroundStyle\(\.secondary\)/);
+  assert.match(ai, /foregroundStyle\(LiquidGlassTokens.browserMutedInk\)/);
   assert.match(ai, /唯讀（跟隨共用設定）/);
   const human = section('private var browserHumanSecurityColumn:', 'private var browserAISecurityColumn:');
   assert.equal((human.match(/Toggle\(/g) ?? []).length, 2);
@@ -48,7 +49,7 @@ test('W51 honest extension copy, immutable AI column and W55 diagnostics', () =>
 test('swiftc: settings round-trip, engine URLs, policy reload, metadata and Netscape export', {
   skip: process.platform !== 'darwin', timeout: 90000,
 }, () => {
-  const dir = path.join(root, '.build/w52/settings-fixture');
+  const dir = testScratch('browser-settings-');
   fs.mkdirSync(dir, {recursive:true});
   const registryTypes = read('Browser/BrowserTabRegistry.swift').split('struct BrowserLaneSnapshot:')[0];
   const fixture = `import Foundation

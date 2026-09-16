@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -16,7 +17,7 @@ const required = [
   'TatwoIPadDevice.xcodeproj/project.xcworkspace/contents.xcworkspacedata',
   'TatwoIPadDevice.xcodeproj/xcshareddata/xcschemes/TatwoIPadDevice.xcscheme',
 ];
-const output = path.join(root, 'output/lightweight-repair');
+const output = testScratch('ipad-use-packaging-');
 mkdirSync(output, { recursive: true });
 // Retain these small, source-only fixtures; no user artifacts are deleted.
 const run = mkdtempSync(path.join(output, 'ipad-packaging-'));

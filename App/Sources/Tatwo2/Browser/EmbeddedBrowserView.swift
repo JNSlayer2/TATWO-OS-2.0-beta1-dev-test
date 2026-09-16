@@ -45,6 +45,7 @@ private struct ChatBrowserPanel: View {
     @State private var commandTabID: UUID?
     @State private var validationMessage: String?
     @FocusState private var addressFieldFocused: Bool
+    @State private var addressExpansionRequested = false
 
     init(sessionID: String, model: ChatPageModel, agentControllable: Bool, isPanelResizing: Bool) {
         self.sessionID = sessionID
@@ -66,7 +67,7 @@ private struct ChatBrowserPanel: View {
                     HStack(spacing: BrowserSidebarMetrics.childGap) {
                         ForEach(tabs) { tab in
                             BrowserTabRow(title: tab.usesAgentContext ? "AI · \(tab.title)" : tab.title,
-                                host: tab.url?.host ?? "about:blank",
+                                tabID: tab.id.uuidString, host: tab.url?.host ?? "about:blank",
                                 favicon: tab.faviconPNG, selected: selected?.id == tab.id,
                                 sleeping: tab.isSleeping, onSelect: { select(tab.id) })
                                 .frame(width: BrowserSidebarMetrics.chatTabWidth)
@@ -86,6 +87,7 @@ private struct ChatBrowserPanel: View {
                 Button(action: openNewTab) { Image(systemName: "plus")
                     .frame(width: BrowserSidebarMetrics.controlHitSize, height: BrowserSidebarMetrics.controlHitSize) }
                     .buttonStyle(.plain).accessibilityLabel("新分頁")
+                    .accessibilityIdentifier("browser.newTab")
                     .contextMenu {
                         Button("新增 AI 分頁") { select(registry.openTab(owner: owner, title: "AI 分頁", isAgentTab: true).id) }
                     }
@@ -96,12 +98,13 @@ private struct ChatBrowserPanel: View {
                     enabled: selected != nil,
                     onSubmit: loadAddress, onCommand: { issue($0) },
                     openTabs: tabs.map { BrowserAddressSuggestion(id: $0.id.uuidString, title: $0.title, url: $0.url?.absoluteString ?? "") },
-                    onSelectTab: { if let id = UUID(uuidString: $0) { select(id) } })
+                    onSelectTab: { if let id = UUID(uuidString: $0) { select(id) } }, expansionRequest: $addressExpansionRequested)
                 Button("註解") { annotationsPresented = true }
                     .buttonStyle(.plain).disabled(selected == nil)
                     .frame(minWidth: BrowserSidebarMetrics.controlHitSize, minHeight: BrowserSidebarMetrics.controlHitSize)
                     .padding(.trailing, BrowserSidebarMetrics.rowHorizontalPadding)
             }
+            .zIndex(BrowserOmniboxMetrics.chromeZIndex)
             BrowserNavigationProgress(tabID: selected?.id,
                 state: runtime.navigationTabID == selected?.id ? runtime.navigationState : .blank)
             if findPresented {
@@ -166,7 +169,7 @@ private struct ChatBrowserPanel: View {
         switch action {
         case .newTab: openNewTab()
         case .closeTab: if let selected { registry.close(selected.id) }
-        case .focusAddressBar: addressFieldFocused = true
+        case .focusAddressBar: addressExpansionRequested = true
         case .toggleAnnotations: annotationsPresented = true
         case .nextTab, .previousTab:
             guard !tabs.isEmpty, let index = tabs.firstIndex(where: { $0.id == selected?.id }) else { return }

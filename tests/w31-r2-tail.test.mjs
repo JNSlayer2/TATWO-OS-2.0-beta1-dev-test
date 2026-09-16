@@ -41,7 +41,7 @@ test('NEW-6 dead prepared stages archive immediately; live prepared stays; NEW-8
  const dir=root(),home=join(dir,'home');mkdirSync(home);
  for(const [name,owner] of [['dead','99999999'],['live',String(process.pid)]]) {const stage=join(dir,`.tatwo-update.${name}.noindex`);mkdirSync(stage);writeFileSync(join(stage,'transaction.json'),JSON.stringify({phase:'prepared',owner}));}
  for(const name of ['.tatwo-lock-retained.old','.tatwo-lock-retained.fresh','reconcile-orphan.old']) {mkdirSync(join(dir,name));if(name.endsWith('old'))spawnSync('touch',['-t','202001010000',join(dir,name)]);}
- const r=sh(`${block('TRANSACTION')}\n${block('TEMP-RETENTION')}\narchive_old_downloads`,{DEST:join(dir,'App.app'),HOME:home,TMPDIR:dir});assert.equal(r.status,0,r.stderr);
+ const r=sh(`${block('TRANSACTION')}\n${block('UPDATE-ARCHIVE-HYGIENE')}\n${block('TEMP-RETENTION')}\narchive_old_downloads`,{DEST:join(dir,'App.app'),HOME:home,TMPDIR:dir});assert.equal(r.status,0,r.stderr);
  assert.ok(!existsSync(join(dir,'.tatwo-update.dead.noindex')));assert.ok(existsSync(join(dir,'.tatwo-update.live.noindex')));
  assert.ok(!existsSync(join(dir,'.tatwo-lock-retained.old')));assert.ok(!existsSync(join(dir,'reconcile-orphan.old')));assert.ok(existsSync(join(dir,'.tatwo-lock-retained.fresh')));
  const archives=join(home,'Library/Application Support/TATWO OS/UpdateArchives');assert.ok(readdirSync(archives).some(n=>n.includes('dead')));assert.equal(readdirSync(join(archives,'retained-locks')).length,2);
@@ -73,10 +73,10 @@ test('NEW-6 cleanup archives its own prepared stage and startup sweep archives r
  const dir=root(),stage=join(dir,'.tatwo-update.prepared.noindex'),dest=join(dir,'App.app');mkdirSync(stage);mkdirSync(dest);
  writeFileSync(join(stage,'transaction.json'),JSON.stringify({phase:'prepared',owner:'99999999',backup:dest+'.old'}));
  const orphan=join(stage,'lock.finished/reconcile-orphan.old');mkdirSync(orphan,{recursive:true});spawnSync('touch',['-t','202001010000',orphan]);
- const r=sh(`${block('TRANSACTION')}\n${block('TEMP-RETENTION')}\nreconcile_transactions\narchive_old_downloads`,{DEST:dest,HOME:dir,TMPDIR:dir});assert.equal(r.status,0,r.stderr);assert.ok(!existsSync(stage));assert.ok(readdirSync(join(dir,'Library/Application Support/TATWO OS/UpdateArchives/retained-locks')).some(n=>n.startsWith('reconcile-orphan.old')));
+ const r=sh(`${block('TRANSACTION')}\n${block('UPDATE-ARCHIVE-HYGIENE')}\n${block('TEMP-RETENTION')}\nreconcile_transactions\narchive_old_downloads`,{DEST:dest,HOME:dir,TMPDIR:dir});assert.equal(r.status,0,r.stderr);assert.ok(!existsSync(stage));assert.ok(readdirSync(join(dir,'Library/Application Support/TATWO OS/UpdateArchives/retained-locks')).some(n=>n.startsWith('reconcile-orphan.old')));
  const own=join(dir,'.tatwo-update.own.noindex');mkdirSync(own);writeFileSync(join(own,'transaction.json'),JSON.stringify({phase:'prepared',owner:String(process.pid)}));
  const cleanup=installer.slice(installer.indexOf('cleanup()'),installer.indexOf('trap cleanup EXIT'));
- const c=sh(`${cleanup}\nCOMMITTED=0; REPLACED=0; LOCK=''; PREVIOUS=''; cleanup`,{STAGE:own,DEST:dest,HOME:dir});assert.equal(c.status,0,c.stderr);assert.ok(!existsSync(own));
+ const c=sh(`${block('TRANSACTION')}\n${block('UPDATE-ARCHIVE-HYGIENE')}\n${cleanup}\nCOMMITTED=0; REPLACED=0; LOCK=''; PREVIOUS=''; cleanup`,{STAGE:own,DEST:dest,HOME:dir});assert.equal(c.status,0,c.stderr);assert.ok(!existsSync(own));
 });
 test('NEW-3 compiled production reconcile verifies seals outside admission and restores under lock',()=>{
  const dir=root(),dest=join(dir,'App.app'),old=dest+'.old',stage=join(dir,'.tatwo-update.fixture.noindex');mkdirSync(stage);
@@ -97,7 +97,7 @@ test('NEW-6/8 archive destination failure is best-effort and preserves the origi
  const dir=root(),stage=join(dir,'.tatwo-update.dead.noindex'),retained=join(dir,'.tatwo-lock-retained.old');mkdirSync(stage);mkdirSync(retained);
  writeFileSync(join(stage,'transaction.json'),JSON.stringify({phase:'prepared',owner:'99999999'}));spawnSync('touch',['-t','202001010000',retained]);
  writeFileSync(join(dir,'not-directory'),'fixture');
- const r=sh(`${block('TRANSACTION')}\n${block('TEMP-RETENTION')}\narchive_old_downloads\necho continued`,{DEST:join(dir,'App.app'),HOME:join(dir,'not-directory'),TMPDIR:dir});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/continued/);assert.ok(existsSync(stage));assert.ok(existsSync(retained));assert.match(r.stderr,/保留原位置/);
+ const r=sh(`${block('TRANSACTION')}\n${block('UPDATE-ARCHIVE-HYGIENE')}\n${block('TEMP-RETENTION')}\narchive_old_downloads\necho continued`,{DEST:join(dir,'App.app'),HOME:join(dir,'not-directory'),TMPDIR:dir});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/continued/);assert.ok(existsSync(stage));assert.ok(existsSync(retained));assert.match(r.stderr,/保留原位置/);
 });
 test('W31 native installer economy keeps online runtime reuse layered, but accepts offline delta-only',()=>{
  const dir=root(),dest=join(dir,'App.app'),contents=join(dest,'Contents'),sha='a'.repeat(64);

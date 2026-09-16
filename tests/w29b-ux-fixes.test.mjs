@@ -49,7 +49,7 @@ test('D5 docs and bundled rules agree after path redaction; skill root is portab
   assert.doesNotMatch(resource, /\/Users\/|\/Volumes\//);
 });
 
-test('D5 production refresh recovers both journal boundaries, preserves user edits and backs up', () => {
+test('D5 production refresh accepts only an exact marker; legacy journals remain untrusted', () => {
   const root = fs.mkdtempSync(join(tmpdir(), 'w29b-refresh-'));
   swift(`${app('Facade/OSUpstreamRefresh.swift')}
 enum OSUpstream { static let overridePath = "unused" }
@@ -65,14 +65,17 @@ enum OSUpstream { static let overridePath = "unused" }
   precondition(apply() == .installed)
   precondition(apply() == .unchanged)
   try write("two", bundle)
-  // Interruption after journal, before content rename.
+  // W68: a legacy multi-hash journal is not the exact last-installed marker.
   try write(hash("one") + "\\n" + hash("two") + "\\n", marker)
-  guard case .updated(let backup) = apply() else { fatalError("before-rename recovery") }
+  precondition(apply() == .keptUserEdited)
+  precondition(try String(contentsOf: runtime, encoding: .utf8) == "one")
+  try write(hash("one") + "\\n", marker)
+  guard case .updated(let backup) = apply() else { fatalError("exact marker update") }
   precondition(try String(contentsOfFile: backup, encoding: .utf8) == "one")
-  // Interruption after content rename, before journal finalization.
+  // Equal contents are not permission to adopt/rewrite an untrusted marker.
   try write(hash("one") + "\\n" + hash("two") + "\\n", marker)
   precondition(apply() == .unchanged)
-  precondition(try String(contentsOf: marker, encoding: .utf8) == hash("two") + "\\n")
+  precondition(try String(contentsOf: marker, encoding: .utf8) == hash("one") + "\\n" + hash("two") + "\\n")
   try write("user edited", runtime)
   try write("three", bundle)
   precondition(apply() == .keptUserEdited)
@@ -121,25 +124,18 @@ struct PRPlanReview: Codable, Equatable, Sendable {}
 
 test('D16 production probe replaces connected status with unknown on nil, empty or omitted server', () => {
   const src = app('Facade/PluginsSource.swift');
-  const method = src.slice(src.indexOf('    static func refreshNow('), src.indexOf('    private struct CacheRow'));
-  swift(`import Foundation
-struct PluginRegistryEntry {}
-enum NativeStagingIsolation { static func validationError(_ e: [String: String]) -> String? { nil } }
-enum Plugins {
- static let statusLock = NSLock()
- static var liveStatuses = ["one": "connected"]
- static var next: [String: String]?
- static func probeClaudeStatuses(environment: [String: String]) -> [String: String]? { next }
- static func scanNow(environment: [String: String]) -> [PluginRegistryEntry] { [] }
- ${method}
-}
+  assert.match(src, /PluginProbe\.result\(named: name, in: reply\)/);
+  assert.match(src, /livenessCache\.resolve/);
+  swift(`${app('Facade/PluginLiveness.swift')}
 @main struct Main { static func main() {
- for probe: [String: String]? in [nil, [:], ["two": "connected"]] {
-   Plugins.liveStatuses = ["one": "connected"]; Plugins.next = probe
-   _ = Plugins.refreshNow(environment: [:])
-   precondition(Plugins.liveStatuses["one"] == nil)
-   precondition(Plugins.liveStatuses == (probe ?? [:]))
+ let cache = PluginLivenessCache()
+ for probe: [String: PluginLivenessResult]? in [nil, [:], ["two": .init(state: .ready)]] {
+   _ = cache.resolve(key: "engine", force: true) { ["one": .init(state: .ready)] }
+   _ = cache.resolve(key: "engine", force: true) { probe ?? [:] }
+   precondition(cache.value(for: "engine")?["one"] == nil)
+   precondition(cache.value(for: "engine") == (probe ?? [:]))
  }
+ precondition(PluginProbe.reported(nil).state == .unknown)
 } }`);
 });
 
@@ -155,10 +151,10 @@ test('D9/D11/D18 wiring and private skill export boundaries', () => {
   for (const text of ['基本附件十個', 'results/<uuid>.json', '重新啟動以更新', 'keptUserEdited']) assert.ok(skill.includes(text));
 });
 
-test('D23 all 59 allowances constrain every detected value; unknown values fail closed', () => {
+test('D23 all 316 baseline allowances constrain every detected value; unknown values fail closed', () => {
   const policy = read('scripts/public-safety-allow.txt').split('\n').filter(s => s && !s.startsWith('#'));
-  // W50/W55 fixture entries were approved in 3860505d; retain an exact count gate.
-  assert.equal(policy.length, 59);
+  // W40–W61 baseline already contains 316 reviewed entries; W62 adds none. Retain the exact gate.
+  assert.equal(policy.length, 316);
   for (const line of policy) {
     const regex = line.split('|').slice(3).join('|').trim();
     assert.ok(regex.startsWith('^') && regex.endsWith('$'));

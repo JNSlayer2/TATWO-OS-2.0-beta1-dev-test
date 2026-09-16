@@ -1,3 +1,4 @@
+import { testScratch } from './helpers/test-scratch.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,7 +44,7 @@ test('CLI workbench native fixture: layout, actions and fixed visual set', { tim
   if (process.env.TATWO_CLI_UI_RENDER !== '1') return t.skip('opt-in native UI compile; run with TATWO_CLI_UI_RENDER=1');
   const pressure = spawnSync('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], { encoding: 'utf8' });
   assert.equal(pressure.stdout.trim(), '1', 'RESOURCE_PAUSE: no fixture compile under RAM warning');
-  const scratch = path.join(repo, 'output/seedmux-cli/native-fixture');
+  const scratch = testScratch('cli-native-');
   fs.mkdirSync(scratch, { recursive: true }); // ONE reusable slot, no mkdtemp or extra App bundle.
   const inputs = [
     'App/Sources/Tatwo2/Visual/TatwoTheme.swift',
@@ -61,7 +62,7 @@ set -euo pipefail
 receipt=$(bash scripts/tatwo-build-lock.sh acquire --timeout 30 --pid $$)
 token=$(printf '%s\\n' "$receipt" | sed -n 's/^token=//p')
 trap 'bash scripts/tatwo-build-lock.sh release --token "$token" >/dev/null' EXIT
-nice -n 10 xcrun swiftc -j 2 -module-cache-path .build-sol/apple/ModuleCache.noindex "$1" -o "$2"
+nice -n 10 xcrun swiftc -j 2 "$1" -o "$2"
 `, 'cli-workbench-fixture', path.join(scratch, 'main.swift'), path.join(scratch, 'checks')], {
     cwd: repo, encoding: 'utf8', timeout: 110_000,
     env: { ...process.env, TMPDIR: scratch },

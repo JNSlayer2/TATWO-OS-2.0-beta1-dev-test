@@ -5,7 +5,7 @@ struct BrowserMemorySettingsView: View {
     @State private var saveError: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: BrowserSettingsMetrics.rowSpacing) {
+        VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
             Picker("存活分頁上限", selection: $settings.liveTabLimit) {
                 ForEach(BrowserMemorySettings.limitOptions, id: \.self) { value in
                     Text(value == -1 ? "自動（\(BrowserMemoryPolicy.defaultLimit(physicalMemory: ProcessInfo.processInfo.physicalMemory)) 個）"

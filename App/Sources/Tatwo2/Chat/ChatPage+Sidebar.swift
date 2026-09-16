@@ -132,28 +132,6 @@ extension ChatPage {
                             Button(mode.displayName) { model.mode = mode }
                         }
                     }
-                    .overlay(alignment: .topLeading) {
-                        if !browserWorkSpaceStore.focusMode {
-                            Menu {
-                                ForEach(browserWorkSpaceStore.spaces) { space in
-                                    Button(space.name) { browserWorkSpaceStore.selectSpace(space.id) }
-                                }
-                                Button("新增空間", action: browserWorkSpaceStore.addSpace)
-                                Divider()
-                                Button("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport)
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Text(browserWorkSpaceStore.selectedSpace.name)
-                                        .font(.system(size: 12.5, weight: .bold)).lineLimit(1)
-                                    Image(systemName: "chevron.down").font(.system(size: 10))
-                                }
-                            }
-                            .menuStyle(.borderlessButton).menuIndicator(.hidden)
-                            .frame(maxHeight: .infinity, alignment: .center)
-                            .frame(maxWidth: 112, alignment: .leading).frame(height: WorkspaceSidebarMetrics.headerTopInset)
-                            .padding(.leading, 70)
-                        }
-                    }
                 if browserWorkSpaceStore.focusMode {
                     Spacer(minLength: 0)
                 } else {
@@ -164,7 +142,51 @@ extension ChatPage {
             }
             .frame(maxHeight: .infinity, alignment: .topLeading)
         }
+        // Window-relative band: deliberately outside both the mode section's top
+        // padding and the glass shell's internal content inset.
+        .overlay(alignment: .topLeading) {
+            browserSpaceSwitcher
+            .padding(.leading, WindowChromeMetrics.appControlLeadingX)
+            .padding(.top, WindowChromeMetrics.trafficLightTopInset
+                + WindowChromeMetrics.nativeTrafficLightDiameter / 2
+                - WorkspaceSidebarMetrics.spaceSwitcherHeight / 2)
+        }
         .ignoresSafeArea(.container, edges: [.top, .bottom])
+    }
+
+    /// 紅綠燈帶上的一列：空間切換膠囊 ＋ 側欄開關 ＋ 側欄固定。
+    /// 使用者 2026-09-15 指出缺的就是後兩顆（對照 Dia 側欄開關圖示）。
+    var browserSpaceSwitcher: some View {
+        HStack(spacing: WorkspaceSidebarMetrics.sidebarControlGap) {
+            if !browserWorkSpaceStore.focusMode { browserSpaceMenu }
+            BrowserSidebarControls(store: browserWorkSpaceStore)
+        }
+    }
+
+    private var browserSpaceMenu: some View {
+        Menu {
+            ForEach(browserWorkSpaceStore.spaces) { space in
+                Button(space.name) { browserWorkSpaceStore.selectSpace(space.id) }
+            }
+            Button("新增空間", action: browserWorkSpaceStore.addSpace)
+            Divider()
+            Button("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport)
+        } label: {
+            HStack(spacing: WorkspaceSidebarMetrics.spaceSwitcherSpacing) {
+                Text(browserWorkSpaceStore.selectedSpace.name)
+                    .font(.system(size: WorkspaceSidebarMetrics.spaceSwitcherFontSize, weight: .bold)).lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: WorkspaceSidebarMetrics.spaceSwitcherChevronSize))
+            }
+            .padding(.horizontal, WorkspaceSidebarMetrics.spaceSwitcherHorizontalInset)
+            .frame(maxWidth: .infinity)
+            .contentShape(Capsule())
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden)
+        .frame(width: WorkspaceSidebarMetrics.spaceSwitcherMenuWidth, height: WorkspaceSidebarMetrics.spaceSwitcherHeight)
+        .background(LiquidGlassTokens.browserFieldFill, in: Capsule())
+        .accessibilityLabel("切換瀏覽器空間")
+        .accessibilityIdentifier("browser.spaceSwitcher")
     }
 
     var chatSidebar: some View {
