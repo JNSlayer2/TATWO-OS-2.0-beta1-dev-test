@@ -71,21 +71,18 @@ test('W57d fullscreen restores owner geometry/focus and handles Escape even outs
   assert.doesNotMatch(swift, /window\.delegate\s*=/);
 });
 
-test('W57d host shortcuts are consumed before page JS, Tab and editing stay native', () => {
+test('host shortcuts are claimed synchronously, menu actions do not depend on bindings', () => {
   const keys = slice('  bool OnPreKeyEvent(', '  void OnFindResult(');
-  for (const name of ['@"focusAddress"', '@"newTab"', '@"closeTab"', '@"reload"', '@"print"', '@"printPDF"']) {
-    assert.ok(keys.includes(name), name);
-  }
-  assert.match(keys, /if \(os_event && ActorRequestPolicy\(owner_\)\.human/);
+  assert.match(keys, /!os_event \|\| !ActorRequestPolicy\(owner_\)\.human/);
+  assert.match(keys, /onBrowserKeyEquivalent\(native_event\)/);
   assert.match(keys, /\*is_keyboard_shortcut = true/);
-  assert.match(keys, /performKeyEquivalent:\(__bridge NSEvent \*\)os_event/);
+  assert.match(keys, /performKeyEquivalent:native_event/);
   assert.doesNotMatch(keys, /windows_key_code == 9\b|sendEvent:/);
-  // W57e: keys are bound through the settings shortcut map; host-forwarded kinds map to combos.
   const shortcuts = read(app + 'BrowserShortcuts.swift');
-  for (const kind of ['"print"', '"printPDF"', '"focusAddress"', '"newTab"', '"closeTab"', '"reload"']) assert.ok(shortcuts.includes(`case ${kind}`), kind);
+  for (const kind of ['menu:printPage', 'menu:printPDF', 'menu:openPDF']) assert.ok(shortcuts.includes(kind), kind);
   assert.match(shortcuts, /case printPage|, printPage/);
   const controls = read(app + 'BrowserDailyNavigationControls.swift');
-  assert.match(controls, /BrowserShortcutMap\.legacyCombo\(shortcutKind\)/);
+  assert.match(controls, /BrowserShortcutInvocation\(message: shortcutKind\)/);
   for (const file of ['EmbeddedBrowserView.swift', 'BrowserWorkSpaceDesignView.swift']) {
     const text = read(app + file);
     assert.ok(text.includes('onAction: performBrowserAction'), file);
@@ -104,8 +101,10 @@ test('W57d Print/PDF fallback remains human, document-bound and signature-checke
   assert.match(swift, /NSWorkspace\.shared\.open/);
   assert.match(swift, /com\.apple\.Preview/);
   const drm = 'DRM 影片（Widevine）：不支援';
+  // Assert shipped UI/report behavior; the release source archive omits the
+  // publisher's separate acceptance-note document.
   for (const file of [app + 'Diagnostics/BrowserDiagnosticsView.swift',
-    app + 'Diagnostics/BrowserDiagnosticsReport.swift', 'docs/reviews/2.0.7-browser-acceptance.md']) {
+    app + 'Diagnostics/BrowserDiagnosticsReport.swift']) {
     assert.ok(read(file).includes(drm), file);
   }
   assert.doesNotMatch(bridge, /RegisterWidevineCdm|widevinecdm\.dylib/);
@@ -122,6 +121,7 @@ test('W57d production UA pure function and file dialog callback fixture', {
     current: slice('bool W57dCurrent(', 'void TatwoClient::W57dCancel()'),
     cancel: slice('void TatwoClient::W57dCancel()', 'void W57dInvalidate(TatwoCEFBrowserView *view) {'),
     dialog: slice('bool TatwoClient::OnFileDialog(', '// Only a completed regular .pdf'),
+    pdfDownload: slice('bool W57dIsPDF(', '// CefPrintHandler is Linux-only'),
   })) source = source.replace(`// INSERT ${name}`, code);
   writeFileSync(join(dir, 'fixture.mm'), source);
   const build = spawnSync('xcrun', ['clang++', '-std=c++20', '-fobjc-arc', '-fblocks',

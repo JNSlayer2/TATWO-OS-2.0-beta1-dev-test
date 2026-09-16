@@ -90,13 +90,15 @@ test('bridge actors gate downloads, permissions, all resource entry points and c
   assert.match(swift, /beginAgentInteraction\(\)/);
 });
 
-test('human callbacks use bounded Island copy and process-local coalesced host consent', () => {
+test('human callbacks use visible native consent with coalesced allows and retryable denial', () => {
   const human = read(app + 'Browser/BrowserHumanInteraction.swift');
   assert.match(human, /decisions\[host\]/);
   assert.match(human, /pending\[host\]/);
   assert.match(human, /clean.count <= 14/);
   assert.match(human, /components\(separatedBy: .controlCharacters\)/);
-  assert.match(human, /timeout: 20/);
+  assert.match(human, /beginSheetModal/);
+  assert.match(human, /if allowed { decisions\[host\] = true }/);
+  assert.doesNotMatch(human, /timeout: 20/);
   assert.match(read(app + 'Browser/ChromiumCEFBackend.swift'), /initialURL: startupURL, actor: .human/);
   const store = read(app + 'Browser/BrowserDownloadStore.swift');
   assert.match(store, /QLPreviewPanel.shared\(\)/);
@@ -104,83 +106,17 @@ test('human callbacks use bounded Island copy and process-local coalesced host c
   assert.doesNotMatch(store, /removeItem\(|trashItem\(/);
 });
 
-test('swiftc: real host consent coalescing, bounded copy and download lifecycle without app UI', {skip: process.platform !== 'darwin'}, () => {
+test('swiftc: native consent and complete download lifecycle without app UI', {skip: process.platform !== 'darwin'}, () => {
   const dir = path.join(root, '.build/w45/interaction-fixture');
   fs.mkdirSync(dir, {recursive:true});
-  const sources = ['Browser/Diagnostics/BrowserDiagnosticsPrivacy.swift','Browser/Diagnostics/BrowserPolicyLog.swift',
-    'Chat/TatwoCodexSandboxMode.swift','Chat/TatwoPermissionPreset.swift','Browser/BrowserActor.swift',
-    'Browser/BrowserHumanInteraction.swift','Browser/BrowserDownloadStore.swift']
+  const sources = ['Browser/BrowserHumanInteraction.swift','Browser/BrowserDownloadStore.swift']
     .map(p => read(app+p).replace('import TatwoCEFBridge','')).join('\n');
-  const stubs = `
-  @MainActor final class TatwoCEFBrowserView {
-    var blocksThirdPartyCookies = true
-    var adBlock = true
-    var onPrivateNetworkRequested: ((String, @escaping (Bool)->Void)->Void)?
-    var onPermissionRequested: ((String,String,@escaping (Bool)->Void)->Void)?
-    var onPopupRequested: ((String)->Void)?
-    var onDownloadProgress: ((String,String,Int64,Int64,Bool)->Void)?
-  }
-  @MainActor final class IslandNotice {
-    static let shared = IslandNotice()
-    enum Decision { case allow, cancel, timeout }
-    var continuation: CheckedContinuation<Decision,Never>?
-    var asks = 0
-    var infos = 0
-    func ask(title: String, detail: String, allowLabel: String, timeout: Double) async -> Decision {
-      precondition(title.count <= 14 && !detail.contains("\\n") && !detail.contains("\\r"))
-      asks += 1
-      return await withCheckedContinuation { continuation = $0 }
-    }
-    func info(title: String, detail: String) {
-      precondition(title.count <= 14 && !detail.contains("\\n")); infos += 1
-    }
-    func answer(_ decision: Decision) { let c = continuation; continuation = nil; c?.resume(returning: decision) }
-  }
-  @main struct Fixture {
-    @MainActor static func main() async {
-      let notice = IslandNotice.shared
-      let consent = BrowserHumanInteraction.shared
-      let first = Task { await consent.allowPrivateHost("NAS.LOCAL.") }
-      let second = Task { await consent.allowPrivateHost("nas.local") }
-      while notice.continuation == nil { await Task.yield() }
-      precondition(notice.asks == 1)
-      notice.answer(.allow)
-      let firstValue = await first.value
-      let secondValue = await second.value
-      precondition(firstValue && secondValue)
-      let cached = await consent.allowPrivateHost("nas.local")
-      precondition(cached && notice.asks == 1)
-      let denied = Task { await consent.allowPrivateHost([192, 168, 1, 1].map(String.init).joined(separator: ".")) }
-      while notice.continuation == nil { await Task.yield() }
-      notice.answer(.cancel)
-      let deniedValue = await denied.value
-      let cachedDeny = await consent.allowPrivateHost([192, 168, 1, 1].map(String.init).joined(separator: "."))
-      precondition(!deniedValue && !cachedDeny && notice.asks == 2)
-      precondition(BrowserHumanInteraction.title(String(repeating: "x", count: 100)).count == 14)
-      precondition(!BrowserHumanInteraction.oneLine("a\\r\\nb").contains("\\n"))
-      let downloads = BrowserDownloadStore.shared
-      downloads.update(id: "first", filename: "report.pdf", received: 50, total: 100, done: false)
-      precondition(downloads.downloads.count == 1 && !downloads.downloads[0].done)
-      downloads.clearDownloads()
-      precondition(downloads.downloads.count == 1)
-      downloads.update(id: "first", filename: "report.pdf", received: 100, total: 100, done: true)
-      downloads.update(id: "first", filename: "report.pdf", received: 100, total: 100, done: true)
-      precondition(notice.infos == 1)
-      precondition(downloads.downloads[0].fileURL.lastPathComponent == "report.pdf")
-      downloads.update(id: "bad", filename: "../unsafe", received: 0, total: 0, done: true)
-      precondition(downloads.downloads.count == 1)
-      downloads.clearDownloads()
-      downloads.update(id: "first", filename: "report.pdf", received: 100, total: 100, done: true)
-      precondition(downloads.downloads.isEmpty && notice.infos == 1)
-      print("W45 real consent and download lifecycle PASS")
-    }
-  }
-  `;
+  const stubs = read('tests/fixtures/browser-download-permissions-checks.swift');
   fs.writeFileSync(path.join(dir,'fixture.swift'), sources+'\n'+stubs);
   const build=spawnSync('swiftc',['-parse-as-library',path.join(dir,'fixture.swift'),'-o',path.join(dir,'fixture')],{encoding:'utf8',timeout:60000});
   assert.equal(build.status,0,build.stderr);
   const run=spawnSync(path.join(dir,'fixture'),[],{encoding:'utf8',timeout:10000});
-  assert.equal(run.status,0,run.stderr);
+  assert.equal(run.status,0,run.stdout+run.stderr);
 });
 
 test('W45-fix: popups inherit the opener actor/ad-block flags and late permission replies stop at close_requested', () => {

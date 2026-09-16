@@ -58,7 +58,7 @@ private final class SidecarTerminationObserver {
     }
 }
 
-// Keeps the copied AppShell delegate unchanged; only the CLI termination gate is owned by this room.
+// CLI sessions remain attached while Quit is merely being confirmed.
 @MainActor private var retainedCLITerminationDelegate: Tatwo2CLITerminationDelegate?
 
 @MainActor private final class Tatwo2CLITerminationDelegate: NSObject, NSApplicationDelegate {
@@ -71,8 +71,13 @@ private final class SidecarTerminationObserver {
         wrapped.responds(to: selector) ? wrapped : super.forwardingTarget(for: selector)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard CLISessionsTermination.shouldTerminate() else { return .terminateCancel }
         return wrapped.applicationShouldTerminate(sender)
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        // This function always returns true after synchronously saving, detaching
+        // and finishing pending writes. Run it only after AppKit accepted Quit.
+        _ = CLISessionsTermination.shouldTerminate()
+        wrapped.applicationWillTerminate(notification)
     }
     func application(_ application: NSApplication, open urls: [URL]) {
         wrapped.application(application, open: urls)

@@ -76,6 +76,9 @@ static NSString *const TatwoCEFErrorDomain = @"com.tatwo.ultrawork.cef";
     return NO;
 }
 
+- (BOOL)preventsAutomaticSleep { return NO; }
+- (BOOL)currentDocumentIsPDF { return NO; }
+
 - (nullable instancetype)initWithFrame:(NSRect)frame
                    sharingContextWith:(TatwoCEFBrowserView *)source
                            initialURL:(NSString *)initialURL
@@ -165,6 +168,11 @@ static NSString *const TatwoCEFErrorDomain = @"com.tatwo.ultrawork.cef";
 - (void)stopLoading {}
 - (void)performContextEdit:(NSString *)kind {}
 - (void)downloadImageURL:(NSString *)url {}
+- (BOOL)cancelDownloadIdentifier:(NSString *)identifier { return NO; }
+- (BOOL)pauseDownloadIdentifier:(NSString *)identifier { return NO; }
+- (BOOL)resumeDownloadIdentifier:(NSString *)identifier { return NO; }
+- (BOOL)retryDownloadURL:(NSString *)url { return NO; }
+- (BOOL)resetCurrentDownloadPermission { return NO; }
 #pragma mark - W57a end
 - (void)goBack {}
 #pragma mark - W57d

@@ -69,7 +69,7 @@ final class CallerDirectoryCache: @unchecked Sendable {
 enum CallerUpstream {
     static func identity() -> [String: Any] {
         var candidates: [(String, String)] = [("entry", OSUpstream.overridePath)]
-        if let bundle = Bundle.module.url(forResource: "os-upstream", withExtension: "md")
+        if let bundle = TatwoResources.url(forResource: "os-upstream", withExtension: "md")
             ?? Bundle.main.url(forResource: "os-upstream", withExtension: "md") {
             candidates.append(("bundle", bundle.path))
         }

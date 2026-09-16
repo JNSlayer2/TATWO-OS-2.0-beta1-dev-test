@@ -121,7 +121,7 @@ struct EmbeddedBrowserWebView: NSViewRepresentable {
             enqueue = { if webView.canGoForward { webView.goForward() } }
         case .stopLoading: enqueue = { webView.stopLoading() }
         // W57d native print/PDF callbacks are CEF-only; this fallback does not export page data.
-        case .printPage, .printPDF, .openPDF: return
+        case .printPage, .printPDF, .openPDF, .resetDownloadPermission: return
         case .find, .stopFinding, .zoom: return // CEF-only daily navigation.
         case .reload:
             enqueue = { if webView.url != nil { webView.reload() } }

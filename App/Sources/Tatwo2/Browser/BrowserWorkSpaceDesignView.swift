@@ -301,6 +301,10 @@ final class BrowserWorkSpaceStore: ObservableObject {
         currentFolderID = tab.folderID
         select(tabKey(tab.id))
     }
+    var canReopenClosedTab: Bool {
+        guard let spaceID = currentSpaceUUID else { return false }
+        return registry.recentlyClosed.contains { $0.owner == .workSpace(spaceID: spaceID) }
+    }
     func selectTabNumber(_ number: Int) {
         guard let index = BrowserDailyNavigation.tabIndex(number: number, count: tabs.count) else { return }
         select(tabs[index].id)
@@ -352,8 +356,10 @@ struct BrowserWorkSpaceDesignView: View {
     @ObservedObject private var runtime = BrowserWorkSpaceRuntime.shared
     @FocusState private var addressFocused: Bool
     @State private var diagnosticsPresented = false
+    @State private var loginHelpPresented = false
     @State private var browserFocused = false
     @State private var findPresented = false
+    @State private var findFocusRequest = 0
     @State private var shortcutMap = BrowserGeneralSettings.load().shortcuts
     @State private var query = ""
     @State private var command: EmbeddedBrowserCommand?
@@ -393,6 +399,7 @@ struct BrowserWorkSpaceDesignView: View {
             }
             .overlay { if tabSearchPresented { tabSearchOverlay } }
             .sheet(isPresented: $diagnosticsPresented) { BrowserDiagnosticsView() }
+            .sheet(isPresented: $loginHelpPresented) { BrowserLoginHelpView(currentURL: store.selectedTab.url) }
             .sheet(item: $store.annotationTab) { BrowserAnnotationSheet(tab: $0).background(BrowserAnnotationShortcutDismiss()) }
             .sheet(isPresented: $store.importPresented) { importSheet }
             .onChange(of: store.selectedSpaceID) { _, _ in
@@ -401,7 +408,18 @@ struct BrowserWorkSpaceDesignView: View {
             .onChange(of: store.selectedID) { _, _ in command = nil; restoreAddress() }
             .onChange(of: store.selectedTab.url) { _, _ in if focusedField != .search { restoreAddress() } }
             .onAppear { restoreAddress() }
-            .onChange(of: store.searchFocusRequest) { _, _ in focusedField = .search }
+            .task(id: store.searchFocusRequest) {
+                guard store.searchFocusRequest > 0 else { return }
+                let requestedTab = store.selectedRegistryID
+                let previousFindRequest = findFocusRequest
+                addressFocused = false; focusedField = nil
+                // This task runs after the newly selected toolbar is mounted.
+                await Task.yield()
+                guard !Task.isCancelled, previousFindRequest == findFocusRequest,
+                      requestedTab == store.selectedRegistryID else { return }
+                focusedField = .search
+                addressFocused = requestedTab != nil
+            }
             .onExitCommand { tabSearchPresented = false; focusedField = nil; restoreAddress() }
     }
 
@@ -497,10 +515,20 @@ struct BrowserWorkSpaceDesignView: View {
                         openTabs: store.tabs.map { BrowserAddressSuggestion(id: String($0.id), title: $0.title, url: $0.url) },
                         onSelectTab: { if let id = Int($0) { store.select(id) } })
                     Menu {
+                        Button("在網頁中尋找…") { performBrowserAction(.findInPage) }
+                        Button("列印…") { send(.printPage) }
+                        Button("存成 PDF 並用系統預覽開啟") { send(.printPDF) }
+                        if runtime.navigationTabID == tabID && runtime.navigationState.isPDF {
+                            Button("下載 PDF 並用系統預覽開啟") { send(.openPDF) }
+                        }
+                        Button("登入協助…") { loginHelpPresented = true }
+                        Button("重設此網站的多檔下載權限") { send(.resetDownloadPermission) }
+                        Divider()
                         Button("搜尋分頁…", action: openTabSearch)
                         Button(store.focusMode ? "離開專注模式" : "專注模式") { store.focusMode.toggle() }
                         Divider()
-                        Button("重新開啟關閉的分頁", action: store.reopenClosedTab)
+                        Button("關閉目前分頁") { store.close(store.selectedID) }
+                        Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
                         Button("復原刪除的書籤", action: store.undoBookmarkDeletion).disabled(store.lastRemovedBookmark == nil)
                         Button("診斷…") { diagnosticsPresented = true }
                         Button("新增 space", action: store.addSpace)
@@ -517,8 +545,16 @@ struct BrowserWorkSpaceDesignView: View {
                 }
                 BrowserNavigationProgress(tabID: tabID,
                     state: runtime.navigationTabID == tabID ? runtime.navigationState : .blank)
+                if runtime.navigationTabID == tabID && runtime.navigationState.isPDF {
+                    HStack {
+                        Text("PDF 未顯示內容時，可使用系統預覽。").font(.callout)
+                        Spacer()
+                        Button("下載 PDF 並開啟") { send(.openPDF) }
+                    }.padding(10).background(.quaternary)
+                }
                 if findPresented {
-                    BrowserFindBar(presented: $findPresented, count: runtime.findCount, activeIndex: runtime.findIndex, onCommand: send)
+                    BrowserFindBar(presented: $findPresented, count: runtime.findCount, activeIndex: runtime.findIndex,
+                                   onCommand: send, focusRequest: findFocusRequest)
                         .id(tabID)
                 }
                 // This surface mounts TatwoCEFBrowserView through the shared native tab host (actor: .human).
@@ -530,24 +566,30 @@ struct BrowserWorkSpaceDesignView: View {
             if let settingsError { Text(settingsError).font(.caption).padding(8).background(.regularMaterial) }
         }
         .background {
-            BrowserDailyNavigationControls(focused: browserFocused && !store.bookmarkEditorActive && store.annotationTab == nil && !store.importPresented && !tabSearchPresented && !diagnosticsPresented,
+            BrowserDailyNavigationControls(focused: browserFocused && !store.bookmarkEditorActive && store.annotationTab == nil && !store.importPresented && !tabSearchPresented && !diagnosticsPresented && !loginHelpPresented,
                 shortcutSerial: runtime.shortcutSerial, shortcutKind: runtime.shortcutKind,
                 hasTab: store.selectedRegistryID != nil, editingAddress: addressFocused || focusedField != nil,
                 url: runtime.navigationState.urlString, findPresented: $findPresented,
                 onCommand: send, onReopen: store.reopenClosedTab, onTabNumber: store.selectTabNumber,
                 onAction: performBrowserAction)
         }
-        .background(BrowserDailyFocusScope(focused: $browserFocused))
+        .background(BrowserDailyFocusScope(focused: $browserFocused, acceptsWindowResponder: true))
         .onChange(of: focusedField) { _, value in if value == .search { addressFocused = true } }
         .onChange(of: addressFocused) { _, value in focusedField = value ? .search : nil }
+        .onChange(of: findPresented) { _, value in
+            if value { addressFocused = false; focusedField = nil }
+        }
         .onChange(of: store.selectedID) { _, _ in findPresented = false }
     }
 
     private func performBrowserAction(_ action: BrowserAction) {
         switch action {
-        case .newTab: if store.canAddTab { store.addTab(); focusedField = .search }
+        case .newTab: if store.canAddTab { store.addTab(); store.searchFocusRequest += 1 }
         case .closeTab: store.close(store.selectedID)
-        case .focusAddressBar: addressFocused = true; focusedField = .search
+        case .focusAddressBar: store.searchFocusRequest += 1
+        case .findInPage:
+            addressFocused = false; focusedField = nil
+            findFocusRequest &+= 1; findPresented = true
         case .nextTab, .previousTab:
             let tabs = store.tabs
             guard !tabs.isEmpty, let index = tabs.firstIndex(where: { $0.id == store.selectedID }) else { return }
@@ -563,19 +605,11 @@ struct BrowserWorkSpaceDesignView: View {
     }
 
     private var extensionStrip: some View {
-        HStack(spacing: 4) {
-            ForEach(["文A", "S"], id: \.self) { name in
-                Button(action: store.showDesignNotice) {
-                    Text(name).font(.system(size: 8.5, weight: .bold)).foregroundStyle(fieldFill)
-                        .frame(width: 18, height: 18)
-                        .background(name == "S" ? folderFill : palette.brandAccent,
-                                    in: RoundedRectangle(cornerRadius: 5))
-                }.accessibilityLabel("擴充插件 \(name)")
-            }
-            Button(action: store.showDesignNotice) {
-                Image(systemName: "puzzlepiece.extension").frame(width: 18, height: 18)
-            }.accessibilityLabel("管理擴充插件")
-        }.buttonStyle(.plain).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
+            Label("擴充功能尚未支援", systemImage: "puzzlepiece.extension")
+                .font(.caption).foregroundStyle(.secondary)
+        }.buttonStyle(.borderless)
     }
 
     private var searchBox: some View {
@@ -587,7 +621,7 @@ struct BrowserWorkSpaceDesignView: View {
                     .onSubmit(submitSearch).contextMenu { searchEngineMenu }
             }.padding(.horizontal, 2).padding(.top, 2).padding(.bottom, 12)
             HStack {
-                roundButton("加入分頁", "plus") { store.addTab(); focusedField = .search }.disabled(!store.canAddTab)
+                roundButton("加入分頁", "plus") { store.addTab(); store.searchFocusRequest += 1 }.disabled(!store.canAddTab)
                 Spacer()
                 roundButton("搜尋", "arrow.up", action: submitSearch)
                     .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -750,6 +784,7 @@ struct BrowserWorkSpaceSidebarList: View {
     @State private var folderName = ""
     @State private var pinsExpanded = true
     @State private var downloadQuery = ""
+    @State private var downloadStatusFilter = "全部"
     @State private var selectedDownloadID: String?
     @State private var hoveredDownloadID: String?
     @State private var downloadsPresented = false
@@ -778,7 +813,7 @@ struct BrowserWorkSpaceSidebarList: View {
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .contextMenu {
-                    Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canAddTab)
+                    Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
                     Button("復原刪除的書籤", action: store.undoBookmarkDeletion).disabled(store.lastRemovedBookmark == nil)
                     Button("新增分頁") { store.addTab(); store.searchFocusRequest += 1 }.disabled(!store.canAddTab)
                     Button("新增書籤（目前分頁）", action: store.bookmarkCurrentTab)
@@ -863,7 +898,7 @@ struct BrowserWorkSpaceSidebarList: View {
                 Image(systemName: "arrow.down.circle").frame(width: 28, height: 28)
             }
             .accessibilityLabel("瀏覽器下載")
-            .popover(isPresented: $downloadsPresented, arrowEdge: .bottom) { downloadsPopover }
+            .sheet(isPresented: $downloadsPresented) { downloadsSheet }
             Spacer(minLength: 0)
             ScrollView(.horizontal) {
                 HStack(spacing: 0) {
@@ -894,27 +929,51 @@ struct BrowserWorkSpaceSidebarList: View {
         .buttonStyle(.plain).foregroundStyle(.secondary).padding(.horizontal, 6)
     }
 
-    private var downloadsPopover: some View {
+    private var downloadsSheet: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("下載").font(.headline)
+                Spacer()
+                Button("完成") { downloadsPresented = false }
+                    .keyboardShortcut(.cancelAction)
+            }.padding(16)
+            Divider()
+            downloadsContent
+        }
+        .frame(width: 660, height: 520)
+        .background { LiquidGlassPanelCard(cornerRadius: LiquidGlassTokens.radiusCard) { Color.clear } }
+        .onExitCommand { downloadsPresented = false }
+    }
+
+    private var downloadsContent: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search", text: $downloadQuery).textFieldStyle(.plain)
-                    Button(action: store.showDesignNotice) {
+                    TextField("搜尋下載", text: $downloadQuery).textFieldStyle(.plain)
+                    Menu {
+                        ForEach(["全部", "進行中", "已完成", "未完成"], id: \.self) { filter in
+                            Button(filter) { downloadStatusFilter = filter }
+                        }
+                    } label: {
                         Image(systemName: "line.3.horizontal.decrease").frame(width: 28, height: 28)
-                    }.accessibilityLabel("篩選下載")
+                    }.accessibilityLabel("篩選下載：\(downloadStatusFilter)")
                 }
                 HStack {
-                    Text("下載").font(.headline)
                     Spacer()
-                    Button("清除", action: downloadStore.clearDownloads).disabled(downloadStore.downloads.isEmpty)
+                    Button("清除紀錄", action: downloadStore.clearDownloads)
+                        .disabled(!downloadStore.downloads.contains { $0.state.isTerminal })
                 }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if downloadStore.downloads.isEmpty { Text("尚無下載").foregroundStyle(.secondary) }
                         ForEach(["今天", "昨天", "Earlier"], id: \.self) { section in
                             let files = downloadStore.downloads.filter {
-                                $0.section == section && (downloadQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(downloadQuery))
+                                $0.section == section && (downloadQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(downloadQuery)) &&
+                                (downloadStatusFilter == "全部" ||
+                                 (downloadStatusFilter == "進行中" && !$0.state.isTerminal) ||
+                                 (downloadStatusFilter == "已完成" && $0.done) ||
+                                 (downloadStatusFilter == "未完成" && ($0.state == .failed || $0.state == .cancelled)))
                             }
                             if !files.isEmpty {
                                 Text(section).font(.caption).foregroundStyle(.secondary).padding(.top, 8)
@@ -928,8 +987,6 @@ struct BrowserWorkSpaceSidebarList: View {
             downloadPreview.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.plain)
-        .frame(width: 660, height: 520)
-        .background { LiquidGlassPanelCard(cornerRadius: LiquidGlassTokens.radiusCard) { Color.clear } }
     }
 
     private func downloadRow(_ download: BrowserDownloadStore.Item) -> some View {
@@ -946,11 +1003,18 @@ struct BrowserWorkSpaceSidebarList: View {
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
             }.accessibilityAddTraits(selected ? .isSelected : [])
+            if downloadStore.canCancel(download) {
+                Button { downloadStore.cancel(download) } label: { Image(systemName: "xmark.circle").frame(width: 28, height: 32) }
+                    .accessibilityLabel("取消下載 \(download.name)")
+            } else if downloadStore.canRetry(download) {
+                Button { downloadStore.retry(download) } label: { Image(systemName: "arrow.clockwise").frame(width: 28, height: 32) }
+                    .accessibilityLabel("重試下載 \(download.name)")
+            }
             Button { downloadStore.hide(download) } label: {
                 Image(systemName: "trash").frame(width: 28, height: 32)
             }
             .accessibilityLabel("隱藏下載紀錄 \(download.name)")
-            .disabled(!download.done)
+            .disabled(!download.state.isTerminal)
             .opacity(trashVisible ? 1 : 0).allowsHitTesting(trashVisible)
         }
         .padding(8)
@@ -959,6 +1023,8 @@ struct BrowserWorkSpaceSidebarList: View {
         .contextMenu {
             Button("在 Finder 顯示") { downloadStore.reveal(download) }.disabled(!download.done)
             Button("快速預覽") { downloadStore.preview(download) }.disabled(!download.done)
+            Button("取消下載") { downloadStore.cancel(download) }.disabled(!downloadStore.canCancel(download))
+            Button("重試下載") { downloadStore.retry(download) }.disabled(!downloadStore.canRetry(download))
         }
     }
 
@@ -968,8 +1034,17 @@ struct BrowserWorkSpaceSidebarList: View {
                 downloadArtwork(download, large: true)
                 Text(download.name).font(.headline).lineLimit(2)
                 Text(download.time).font(.caption).foregroundStyle(.secondary)
-                if !download.done && download.total > 0 {
+                if !download.state.isTerminal && download.total > 0 {
                     ProgressView(value: Double(download.received), total: Double(max(download.total, download.received)))
+                }
+                if let failure = download.failure {
+                    Text(failure).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                HStack {
+                    if downloadStore.canPause(download) { Button("暫停") { downloadStore.pause(download) } }
+                    if downloadStore.canResume(download) { Button("繼續下載") { downloadStore.resume(download) } }
+                    if downloadStore.canCancel(download) { Button("取消下載") { downloadStore.cancel(download) } }
+                    if downloadStore.canRetry(download) { Button("重試下載") { downloadStore.retry(download) } }
                 }
                 Button("快速預覽") { downloadStore.preview(download) }.disabled(!download.done)
                 Button("在 Finder 顯示") { downloadStore.reveal(download) }.disabled(!download.done)
@@ -1103,7 +1178,6 @@ struct BrowserWorkSpaceSidebarList: View {
 
     private func tabRow(_ tab: BrowserWorkSpaceStore.Tab) -> some View {
         let selected = store.selectedID == tab.id
-        let closeVisible = hoveredTab == tab.id || focusedField == .close(tab.id)
         return HStack(spacing: 2) {
             BrowserTabRow(variant: .workspace, title: tab.title, favicon: tab.faviconPNG, selected: selected,
                 sleeping: tab.sleeping, workspaceIconFill: tab.id.isMultiple(of: 2) ? palette.brandAccent : folderFill,
@@ -1112,14 +1186,18 @@ struct BrowserWorkSpaceSidebarList: View {
                 Image(systemName: "xmark").font(.system(size: 10)).frame(width: 24, height: 30)
             }
             .accessibilityLabel("關閉 \(tab.title)")
+            .help("關閉分頁")
             .focused($focusedField, equals: .close(tab.id))
-            .opacity(closeVisible ? 1 : 0).allowsHitTesting(closeVisible)
         }
         .buttonStyle(.plain)
         .foregroundStyle(tab.sleeping ? .tertiary : .primary)
         .background(selected ? fieldFill : .clear, in: RoundedRectangle(cornerRadius: 9))
         .shadow(color: shadowColor.opacity(selected ? 0.14 : 0), radius: 4, x: 0, y: 2)
-        .contextMenu { Button("註解…") { store.showAnnotations(tab.id) } }
+        .contextMenu {
+            Button("關閉分頁") { store.close(tab.id) }
+            Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
+            Button("註解…") { store.showAnnotations(tab.id) }
+        }
         .onHover { hoveredTab = $0 ? tab.id : nil }
         .onDrag { NSItemProvider(object: "tatwo-browser-tab:\(tab.id)" as NSString) }
     }

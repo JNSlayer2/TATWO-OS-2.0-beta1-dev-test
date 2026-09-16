@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import vm from 'node:vm';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const browser = 'App/Sources/Tatwo2/Browser/';
@@ -47,6 +48,9 @@ test('W60b production policy: memory boundaries, deterministic LRU, selected imm
   let selected: Set<UUID> = [ids[0]]
   precondition(BrowserMemoryPolicy.sleepCandidates(tabs:tabs,selected:selected,limit:4) == Array(ids[1...3]))
   precondition(BrowserMemoryPolicy.sleepCandidates(tabs:tabs,selected:selected,limit:nil).isEmpty)
+  let protected: Set<UUID> = [ids[1], ids[2]]
+  precondition(BrowserMemoryPolicy.sleepCandidates(tabs:tabs,selected:selected,limit:4,protected:protected) == Array(ids[3...5]))
+  precondition(BrowserMemoryPolicy.sleepCandidates(tabs:tabs,selected:selected,limit:1,protected:protected,pressure:.critical) == Array(ids[3...6]))
   for pressure in [BrowserMemoryPressure.warning, .critical] {
     precondition(BrowserMemoryPolicy.sleepCandidates(tabs:tabs,selected:selected,limit:nil,pressure:pressure) == Array(ids[1...6]))
     precondition(BrowserMemoryPolicy.sleepCandidates(tabs:tabs,selected:Set(ids),limit:1,pressure:pressure).isEmpty)
@@ -221,9 +225,94 @@ test('W60b actual admission budget holds closing slots, wakes across hosts and n
   precondition(budget.count == 30)
   for slot in unlimited { budget.release(slot) }
   precondition(budget.count == 0)
+  // A new selected tab must be admitted even when every old tab has edits.
+  budget.configure(limit:2, protectedMinimum:5)
+  let protectedSlots = owners.map { budget.acquire(owner:$0,retry:{})! }
+  precondition(budget.count == 5 && budget.effectiveLimit == 5)
+  budget.configure(limit:2, protectedMinimum:1)
+  precondition(budget.acquire(owner:owners[0],retry:{}) == nil)
+  budget.cancelWait(owner:owners[0])
+  for slot in protectedSlots { budget.release(slot) }
+  precondition(budget.count == 0 && budget.effectiveLimit == 2)
   print("W60b close-budget PASS")
  }
 }`), /W60b close-budget PASS/);
+});
+
+test('activity helper retains edits and playback without reading form values', () => {
+  const source = read('Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridge.mm');
+  const script = source.match(/const char kBrowserActivityScript\[\] = R"JS\(([\s\S]*?)\)JS";/)?.[1];
+  assert.ok(script);
+  const listeners = new Map(), reports = [], timers = [];
+  const media = [{paused:true, ended:false}];
+  const document = {
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    querySelectorAll: selector => { assert.equal(selector, 'audio,video'); return media; },
+  };
+  const install = vm.runInNewContext(script, {document, setInterval: callback => timers.push(callback)});
+  assert.equal(install((dirty, playing) => reports.push([dirty, playing])), true);
+  const target = {closest: () => true, get value() { throw Error('must not read a secret'); }};
+  listeners.get('input')({target}); assert.deepEqual(reports.at(-1), [true, false]);
+  media[0].paused = false; listeners.get('play')(); assert.deepEqual(reports.at(-1), [true, true]);
+  media[0].paused = true; listeners.get('pause')(); assert.deepEqual(reports.at(-1), [true, false]);
+  const trackEvents = new Map();
+  const track = {readyState:'live', addEventListener:(name, callback) => trackEvents.set(name, callback),
+    get label() { throw Error('must not inspect camera or microphone identity'); }};
+  media[0].srcObject = {getTracks:() => [track]};
+  timers[0](); assert.deepEqual(reports.at(-1), [true, true], 'paused preview still protects a live stream');
+  const reportCount = reports.length;
+  timers[0](); assert.equal(reports.length, reportCount, 'unchanged activity does not emit IPC');
+  track.readyState = 'ended'; trackEvents.get('ended')();
+  assert.deepEqual(reports.at(-1), [true, false]);
+  // A fresh renderer context alone resets sticky edits; media events do not.
+  const fresh = [], second = new Map();
+  vm.runInNewContext(script, {setInterval:() => {}, document: {
+    addEventListener: (name, callback) => second.set(name, callback),
+    querySelectorAll: () => [],
+  }})((dirty, playing) => fresh.push([dirty, playing]));
+  second.get('DOMContentLoaded')(); assert.deepEqual(fresh.at(-1), [false, false]);
+  assert.match(source, /found->second.token != token/);
+  assert.match(source, /!state->activity_main_ready/);
+  assert.match(source, /HasActiveHumanDownloads\(\)/);
+  assert.match(source, /HasActiveMediaCapture\(\)/);
+  assert.match(source, /main_world->IsSame\(context\)/);
+});
+
+test('production activity reducer rejects stale frame contexts and keeps edit state sticky', {
+  skip: process.platform !== 'darwin',
+}, () => {
+  const source = read('Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridge.mm');
+  const reducer = source.slice(source.indexOf('void UpdateBrowserActivity('), source.indexOf('bool HasActiveBrowserPumpWork(const BrowserState'));
+  const fields = source.match(/struct BrowserState \{([\s\S]*?)#pragma mark - W57a/)?.[1];
+  assert.ok(reducer && fields);
+  const dir = path.join(root, '.build/w60b/tests/activity');
+  fs.mkdirSync(dir, {recursive:true});
+  const input = path.join(dir, 'Activity.cpp'), output = path.join(dir, 'activity');
+  fs.writeFileSync(input, `#include <map>\n#include <string>\n#include <cassert>\n#include <iostream>\nstruct BrowserState {${fields}};\n${reducer}\n` + String.raw`
+int main() {
+  BrowserState s;
+  auto send = [&](const char *frame, const char *token, const char *kind, bool main, bool dirty=false, bool playing=false) {
+    UpdateBrowserActivity(&s, frame, token, kind, main, dirty, playing);
+  };
+  send("main", "old", "update", true, true); assert(s.activity_frames.empty());
+  send("main", "old", "ready", true); assert(s.activity_main_ready);
+  send("main", "old", "update", true, true, true);
+  send("main", "old", "update", true, false, false);
+  assert(s.activity_frames.at("main").dirty && !s.activity_frames.at("main").playing);
+  send("main", "old", "ready", true); assert(s.activity_frames.at("main").dirty);
+  send("main", "new", "ready", true); assert(!s.activity_frames.at("main").dirty);
+  send("main", "new", "update", true, true);
+  send("main", "old", "released", true); assert(s.activity_main_ready);
+  send("main", "old", "update", true, false, true);
+  assert(s.activity_frames.at("main").dirty && !s.activity_frames.at("main").playing);
+  send("child", "c1", "ready", false); send("child", "c1", "update", false, true);
+  send("child", "c1", "released", false); assert(s.activity_main_ready);
+  assert(s.activity_frames.size() == 1);
+  send("main", "new", "released", true); assert(!s.activity_main_ready && s.activity_frames.empty());
+  std::cout << "activity frame context reducer PASS\n";
+}`);
+  run('xcrun', ['clang++', '-std=c++17', input, '-o', output]);
+  assert.match(run(output, []), /activity frame context reducer PASS/);
 });
 
 test('W60b native wiring, secure flags, settings and diagnostics retain honest process semantics', () => {

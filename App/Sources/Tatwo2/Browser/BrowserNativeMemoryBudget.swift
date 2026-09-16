@@ -7,19 +7,24 @@ import Foundation
 final class BrowserNativeMemoryBudget {
     static let shared = BrowserNativeMemoryBudget()
     private(set) var limit: Int? = BrowserMemorySettings.load().limit()
+    private(set) var protectedMinimum = 0
+    var effectiveLimit: Int? { limit.map { max($0, protectedMinimum) } }
     private var slots: Set<UUID> = []
     private var waiters: [ObjectIdentifier: () -> Void] = [:]
     private var wakeScheduled = false
     var count: Int { slots.count }
 
-    func configure(limit: Int?) {
+    func configure(limit: Int?, protectedMinimum: Int = 0) {
+        let minimum = max(0, protectedMinimum)
+        guard self.limit != limit || self.protectedMinimum != minimum else { return }
         self.limit = limit
+        self.protectedMinimum = minimum
         wakeWaiters()
     }
 
     func acquire(owner: AnyObject, retry: @escaping () -> Void) -> UUID? {
         let key = ObjectIdentifier(owner)
-        guard limit.map({ slots.count < $0 }) ?? true else {
+        guard effectiveLimit.map({ slots.count < $0 }) ?? true else {
             waiters[key] = retry // Caller captures its host weakly.
             return nil
         }

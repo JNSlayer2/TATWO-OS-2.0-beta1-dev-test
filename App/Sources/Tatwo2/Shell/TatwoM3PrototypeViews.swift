@@ -430,17 +430,8 @@ enum ProviderSVGIconLoader {
     ]
 
     static func image(for providerID: String) -> NSImage? {
-        // SwiftPM 把 .process("Resources/ProviderIcons") 打進 <Package>_<Target>.bundle，
-        // 不是 Bundle.main（app 的 Contents/Resources）；先問 Bundle.module，找不到才退回 Bundle.main。
         guard let fileName = fileNames[providerID],
-              let url = Bundle.module.url(forResource: fileName, withExtension: "svg")
-                ?? Bundle.module.url(forResource: fileName, withExtension: "svg", subdirectory: "ProviderIcons")
-                ?? Bundle.main.url(forResource: fileName, withExtension: "svg")
-                ?? Bundle.main.url(
-                    forResource: fileName,
-                    withExtension: "svg",
-                    subdirectory: "ProviderIcons"
-                ),
+              let url = ProviderIconResources.url(for: fileName),
               let data = try? Data(contentsOf: url),
               let image = NSImage(data: data)
         else {

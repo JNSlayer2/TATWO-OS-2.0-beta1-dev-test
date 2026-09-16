@@ -31,11 +31,14 @@ test('production resource callbacks isolate subresources and stale DNS errors', 
     policy: slice('struct BrowserRequestPolicySnapshot {', 'bool ApplyPrivacyStrictRequestContextPreferences('),
     actor: slice('BrowserRequestPolicySnapshot ActorRequestPolicy(', 'bool IsDeniedByLocalHostList('),
     decision: slice('bool IsDeniedByLocalHostList(', 'bool IsDeniedHostSwitch('),
+    privateRetry: slice('void RememberPrivateNetworkRetry(TatwoCEFBrowserView *view,\n                                 ResourceErrorContext context, NSString *url) {', 'NSString *TakePrivateNetworkRetry('),
     handler: slice('class TatwoResourceRequestHandler final', '// Metadata callbacks are bound'),
     delivery: slice('void PublishResourceError(TatwoCEFBrowserView *view,\n                          ResourceErrorContext context,\n                          NSString *message,\n                          bool dns_failure) {', 'void UpdateLoadingState(TatwoCEFBrowserView *view, bool is_loading) {'),
     finishNavigation: slice('void FinishNavigationFrameTelemetry(TatwoCEFBrowserView *view) {', 'void InvalidateWebMCPForRendererTermination('),
     rendererNavigation: slice('void BeginRendererNavigationIfNeeded(TatwoCEFBrowserView *view) {', 'void FinishNavigationFrameTelemetry(TatwoCEFBrowserView *view) {'),
     loadError: slice('  void OnLoadError(CefRefPtr<CefBrowser> browser,', '  void OnRenderProcessTerminated('),
+    documentMIME: slice('void PublishDocumentMIME(TatwoCEFBrowserView *view, ResourceErrorContext context,\n                         NSString *url, NSString *mime) {', 'void InvalidateSecurityDocumentEpoch('),
+    pdfGetter: slice('- (BOOL)currentDocumentIsPDF {', '- (uint64_t)navigationGeneration'),
   };
   let fixture = fs.readFileSync(path.join(repo, 'tests/fixtures/browser-resource-block.mm.in'), 'utf8');
   for (const [key, value] of Object.entries(sections)) fixture = fixture.replace(`// INSERT ${key}`, value);
@@ -62,7 +65,7 @@ test('production resource callbacks isolate subresources and stale DNS errors', 
   ]) {
     assert.ok(fixture.includes(before));
     const source = path.join(scratch, `${name}.mm`), binary = path.join(scratch, name);
-    fs.writeFileSync(source, fixture.replace(before, after));
+    fs.writeFileSync(source, fixture.replaceAll(before, after));
     const compiled = spawnSync('xcrun', ['clang++', '-std=c++20', '-fobjc-arc', '-fblocks', '-I' + sdk,
       '-framework', 'Foundation', source, '-o', binary], { encoding: 'utf8', timeout: 60000 });
     assert.equal(compiled.status, 0, compiled.stderr);
@@ -75,7 +78,7 @@ test('production resource callbacks isolate subresources and stale DNS errors', 
   // Lifecycle wiring is checked separately from the fake DNS/UI adapters.
   const callbacks = sections.handler;
   assert.doesNotMatch(callbacks, /frame->IsMain\(\)/);
-  assert.equal((callbacks.match(/IsMainFrameRequest\(request\)/g) ?? []).length, 2);
+  assert.equal((callbacks.match(/IsMainFrameRequest\(request\)/g) ?? []).length, 3);
   assert.doesNotMatch(callbacks, /PublishVisibleError\(/);
   assert.match(bridge, /IsMainFrameRequest\(request\) && !is_redirect\) \{\s+InvalidateResourceErrors\(\)/);
   assert.match(bridge, /resource_epoch_, resource_epoch_->Capture\(\), mount_generation_/);

@@ -20,7 +20,7 @@ enum OSUpstream {
 
     static func declaration() -> String? {
         var candidates = [overridePath]
-        if let bundled = Bundle.module.url(forResource: "os-upstream", withExtension: "md")
+        if let bundled = TatwoResources.url(forResource: "os-upstream", withExtension: "md")
             ?? Bundle.main.url(forResource: "os-upstream", withExtension: "md") { candidates.append(bundled.path) }
         candidates.append("\(NSHomeDirectory())/Library/Application Support/tatwo2/docs/os-upstream.md")
         for path in candidates {

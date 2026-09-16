@@ -14,7 +14,7 @@ struct BrowserMemorySettingsView: View {
             }
             .onChange(of: settings.liveTabLimit) { _, value in save(.liveTabLimit, value: value) }
             if settings.liveTabLimit == 0 {
-                Text("不限制可能耗盡記憶體，導致系統終止 App；記憶體壓力保護仍會釋放背景分頁。")
+                Text("不限制可能耗盡記憶體；系統會優先釋放沒有進行中工作的背景分頁。")
                     .foregroundStyle(.orange)
             }
             Picker("背景分頁睡眠", selection: $settings.sleepMinutes) {
@@ -24,7 +24,7 @@ struct BrowserMemorySettingsView: View {
                 }
             }
             .onChange(of: settings.sleepMinutes) { _, value in save(.sleepMinutes, value: value) }
-            Text("睡眠會釋放網頁並保留網址、標題與圖示；切回時重新載入，未送出的表單可能遺失。分頁上限立即生效，CEF 程序上限重開 App 後生效。")
+            Text("睡眠會釋放網頁，切回時重新載入。偵測到編輯、播放、下載或開啟中視窗的分頁會保留，必要時暫時超出分頁上限；記憶體吃緊時請先儲存並手動關頁。編輯保護會維持到重新載入網頁。")
                 .font(.footnote).foregroundStyle(.secondary)
             if let saveError { Text(saveError).foregroundStyle(.red) }
         }

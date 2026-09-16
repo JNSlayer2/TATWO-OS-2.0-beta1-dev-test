@@ -15,7 +15,7 @@ test('W57e only map-derived browser shortcuts, ordered settings and recording UI
   const settings = read('App/Sources/Tatwo2/Shell/ChatPageSettings.swift');
   assert.match(settings, /browserSettingsCard\("Browser work space"\)[\s\S]*?browserSettingsCard\("快捷鍵"\) \{ BrowserShortcutsSettingsView\(\) \}[\s\S]*?browserSettingsCard\("Session 瀏覽器"\)/);
   const ui = read(b+'BrowserShortcutsSettingsView.swift');
-  for (const copy of ['預設只有 ⌘T 新分頁；其餘功能請自行指定','全部還原預設','未設定','設定…','Delete 清除']) assert.ok(ui.includes(copy),copy);
+  for (const copy of ['已提供常用瀏覽器快捷鍵；可自訂或清除個別設定','全部還原預設','未設定','設定…','Delete 清除']) assert.ok(ui.includes(copy),copy);
   assert.match(ui, /BrowserAction\.allCases/);
   assert.match(ui, /map\.validationError\(for: combo, action: action\)/);
   const model = read(b+'BrowserShortcuts.swift');
@@ -27,7 +27,7 @@ test('W57e only map-derived browser shortcuts, ordered settings and recording UI
   assert.match(design, /Button\(store\.focusMode \? "離開專注模式" : "專注模式"\) \{ store\.focusMode\.toggle\(\) \}/);
   assert.match(ui, /firstResponder === self/);
   assert.doesNotMatch(ui, /addGlobalMonitor|addLocalMonitor/);
-  assert.match(read(b+'BrowserDailyNavigationControls.swift'), /legacyCombo\(shortcutKind\)/);
+  assert.match(read(b+'BrowserDailyNavigationControls.swift'), /BrowserShortcutInvocation\(message: shortcutKind\)/);
   for (const file of ['BrowserWorkSpaceDesignView.swift','EmbeddedBrowserView.swift']) {
     assert.match(read(b+file), /BrowserAnnotationSheet\(tab: [^)]*\)\.background\(BrowserAnnotationShortcutDismiss\(\)\)/);
   }
@@ -41,7 +41,7 @@ import Foundation
 @main struct Checks {
  static func main() throws {
     let defaults = BrowserShortcutMap.defaults
-    precondition(defaults.bindings.count == 1 && defaults.bindings[.newTab] == BrowserKeyCombo(key: "t", modifiers: ["command"]))
+    precondition(defaults.bindings.count == 16 && defaults.bindings[.newTab] == BrowserKeyCombo(key: "t", modifiers: ["command"]))
     for action in BrowserAction.allCases {
         precondition(action.title.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) })
         precondition(["分頁", "導覽", "檢視", "工具"].contains(action.group))
@@ -53,7 +53,8 @@ import Foundation
     precondition(BrowserKeyCombo(key: "t", modifiers: ["command", "shift"]).display == "⇧⌘T")
     precondition(BrowserKeyCombo(key: "TAB", modifiers: ["control"]).display == "⌃⇥")
     precondition(BrowserAction.closeTab.requiresTab && !BrowserAction.newTab.requiresTab)
-    for key in ["q", "w", "h", "m", ",", "n", "s", "l"] { precondition(BrowserShortcutMap.isReserved(BrowserKeyCombo(key: key, modifiers: ["command"]))) }
+    for key in ["q", "h", "m", ",", "n", "s"] { precondition(BrowserShortcutMap.isReserved(BrowserKeyCombo(key: key, modifiers: ["command"]))) }
+    for key in ["w", "l"] { precondition(!BrowserShortcutMap.isReserved(BrowserKeyCombo(key: key, modifiers: ["command"]))) }
     precondition(BrowserShortcutMap.isReserved(BrowserKeyCombo(key: "a", modifiers: ["shift", "command"])))
     precondition(!BrowserShortcutMap.isReserved(BrowserKeyCombo(key: "f", modifiers: ["command"])))
     var custom = BrowserShortcutMap(bindings: [.tabNumber: BrowserKeyCombo(key:"3",modifiers:["command", "option"])])
@@ -62,7 +63,7 @@ import Foundation
     precondition(custom.validationError(for: BrowserKeyCombo(key:"8",modifiers:["command","option"]),action:.back) == "與『切到第 N 個分頁』相同")
     let single = BrowserShortcutMap(bindings:[.back: BrowserKeyCombo(key:"8",modifiers:["command","option"])])
     precondition(single.validationError(for: BrowserKeyCombo(key:"1",modifiers:["command","option"]),action:.tabNumber) == "與『返回』相同")
-    precondition(single.validationError(for: BrowserKeyCombo(key:"w",modifiers:["command"]),action:.closeTab) == "已被 OS 使用")
+    precondition(single.validationError(for: BrowserKeyCombo(key:"w",modifiers:["command"]),action:.closeTab) == nil)
     precondition(single.validationError(for: BrowserKeyCombo(key:"t",modifiers:[]),action:.newTab) != nil)
     precondition(single.validationError(for: BrowserKeyCombo(key:"t",modifiers:["command"]),action:.tabNumber) != nil)
     precondition(single.validationError(for: BrowserKeyCombo(key:"1",modifiers:["control"]),action:.tabNumber) == nil)
@@ -91,8 +92,8 @@ import Foundation
     do { try BrowserGeneralSettings.saveShortcuts(defaults,to:url); preconditionFailure() } catch {}
     let preserved = try String(contentsOf:url,encoding:.utf8)
     precondition(preserved == "broken")
-    precondition(BrowserShortcutMap.legacyCombo("find") == BrowserKeyCombo(key:"f",modifiers:["command"]))
-    precondition(BrowserShortcutMap.legacyCombo("zoomIn") == nil) // missing Shift identity must fail closed
+    precondition(defaults.invocation(for: BrowserKeyCombo(key:"f",modifiers:["command"]))?.action == .findInPage)
+    precondition(defaults.invocation(for: BrowserKeyCombo(key:"+",modifiers:["command","shift"]))?.action == .zoomIn)
     print("W57e fixtures passed")
  }
 }

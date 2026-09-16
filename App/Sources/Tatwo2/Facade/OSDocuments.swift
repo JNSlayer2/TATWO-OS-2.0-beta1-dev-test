@@ -157,7 +157,7 @@ enum OSDocuments {
             at: destination.deletingLastPathComponent(),
             withIntermediateDirectories: true)
 
-        let bundled = Bundle.module.url(forResource: "os-upstream", withExtension: "md")
+        let bundled = TatwoResources.url(forResource: "os-upstream", withExtension: "md")
             ?? Bundle.main.url(forResource: "os-upstream", withExtension: "md")
         let projectSource = docsURL.appendingPathComponent("os-upstream.md")
         let source = bundled

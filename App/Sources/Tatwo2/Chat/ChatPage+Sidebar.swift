@@ -140,7 +140,7 @@ extension ChatPage {
                                 }
                                 Button("新增空間", action: browserWorkSpaceStore.addSpace)
                                 Divider()
-                                Button("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport)
+                                Button("從其他瀏覽器導入…", action: browserWorkSpaceStore.requestImport)
                             } label: {
                                 HStack(spacing: 6) {
                                     Text(browserWorkSpaceStore.selectedSpace.name)

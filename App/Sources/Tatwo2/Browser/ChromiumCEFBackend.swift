@@ -2101,9 +2101,40 @@ extension TatwoCEFBrowserView: BrowserPasswordAssistBridge {
 
 @MainActor
 final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到 CEF 視圖（原 private）
+    /// Holds a native view from successful construction, including the interval
+    /// before installation. Its fallback never captures a deallocating owner.
+    @MainActor final class BrowserLifetime {
+        private var browser: TatwoCEFBrowserView?
+        private var closing = false
+        private var completed = false
+        private var completions: [() -> Void] = []
+        init(_ browser: TatwoCEFBrowserView) { self.browser = browser }
+
+        @MainActor func close(completion: @escaping () -> Void) {
+            if completed { completion(); return }
+            completions.append(completion)
+            guard !closing, let browser else { return }
+            closing = true
+            self.browser = nil
+            browser.closeBrowser {
+                self.completed = true
+                let handlers = self.completions
+                self.completions.removeAll()
+                handlers.forEach { $0() }
+            }
+        }
+
+        deinit {
+            guard let browser else { return }
+            // The block owns an alive browser, never self or its former host.
+            DispatchQueue.main.async { browser.closeBrowser {} }
+        }
+    }
+
     private var passwordAssist: BrowserPasswordAssist?
     private var webFeatures: BrowserWebFeatures?
     private(set) var browserView: TatwoCEFBrowserView?
+    private var browserLifetime: BrowserLifetime?
     private(set) var mountIdentity: EmbeddedChromiumBrowserMountIdentity?
     private var profileLease: TatwoCEFProfileLeaseRegistry.Lease?
     private var lastEmbeddingSignature: String?
@@ -2117,9 +2148,13 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
     func install(
         _ browserView: TatwoCEFBrowserView,
         mountIdentity: EmbeddedChromiumBrowserMountIdentity,
-        profileLease: TatwoCEFProfileLeaseRegistry.Lease?
+        profileLease: TatwoCEFProfileLeaseRegistry.Lease?,
+        lifetime: BrowserLifetime? = nil
     ) {
+        precondition(browserView !== self.browserView && self.browserView == nil,
+                     "Close the installed browser before replacing its native view")
         self.browserView = browserView
+        browserLifetime = lifetime ?? BrowserLifetime(browserView)
         webFeatures = BrowserWebFeatures(browser: browserView, container: self)
         if browserView.browserActor == .human {
             passwordAssist = BrowserPasswordAssist(bridge: browserView)
@@ -2139,6 +2174,21 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
             phase: "container_install",
             forceLog: true)
         logEmbeddingSnapshot(phase: "container_after_install", force: true)
+    }
+
+    deinit {
+        let lifetime = browserLifetime
+        let lease = profileLease
+        // Normal close already transferred these. Unexpected owner disposal
+        // uses detached values, so its completion cannot resurrect this view.
+        guard lifetime != nil || lease != nil else { return }
+        DispatchQueue.main.async {
+            let finish = {
+                if let lease { TatwoCEFProfileLeaseRegistry.shared.release(lease) }
+            }
+            if let lifetime { lifetime.close(completion: finish) }
+            else { finish() }
+        }
     }
 
     override func viewDidMoveToSuperview() {
@@ -2305,6 +2355,8 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
         geometrySyncWorkItem?.cancel()
         geometrySyncWorkItem = nil
         let closingBrowser = browserView
+        let closingLifetime = browserLifetime
+        browserLifetime = nil
         closingBrowser?.stateHandler = nil
         closingBrowser?.webMCPToolsHandler = nil
         let lease = profileLease
@@ -2317,11 +2369,13 @@ final class TatwoCEFContainerView: NSView { // 2.0：開放給瀏覽器橋找到
         }
         TatwoCEFContainerTeardownContract.detachFromHostWindow(
             closingBrowser)
-        closingBrowser.closeBrowser {
+        let finish: () -> Void = {
             Task { @MainActor in
                 self.finishClose(lease: lease)
             }
         }
+        if let closingLifetime { closingLifetime.close(completion: finish) }
+        else { closingBrowser.closeBrowser(completion: finish) }
     }
 
     private func finishClose(lease: TatwoCEFProfileLeaseRegistry.Lease?) {
@@ -2454,6 +2508,14 @@ final class TatwoCEFTabHostView: NSView {
     var onTabPopupRequested: ((String, URL) -> Void)?
     var onIdle: (() -> Void)?
     var isIdle: Bool { entries.isEmpty && closingCount == 0 }
+    var protectedTabIDs: Set<String> {
+        Set(entries.compactMap { id, entry in
+            entry.container.browserView?.preventsAutomaticSleep == true ? id : nil
+        })
+    }
+    func preventsAutomaticSleep(tabID: String) -> Bool {
+        entries[tabID]?.container.browserView?.preventsAutomaticSleep == true
+    }
     var onDailyShortcut: ((String, String) -> Void)?
     var onFindResult: ((String, Int, Int) -> Void)?
     var onPageMetadataChange: ((String, String, String?, Data?) -> Void)?
@@ -2616,7 +2678,10 @@ final class TatwoCEFTabHostView: NSView {
         }
         // Do not race an old context's asynchronous native close with a new
         // root context at the same profile path.
-        guard !entries.isEmpty || closingCount == 0 else { return }
+        guard !entries.isEmpty || closingCount == 0 else {
+            publishClosingWait(tabID)
+            return
+        }
         // W58 actor is fixed at construction, not inferred from takeover or a login argument.
         // Existing human tabs are never converted into agent tabs to satisfy browser_login.
         let agentMount = selectedIsAgentTab
@@ -2625,7 +2690,10 @@ final class TatwoCEFTabHostView: NSView {
             .first { $0.canShareRequestContext && $0.browserActor == (agentMount ? .agent : .human) &&
                 (agentMount || !$0.agentControlled) }
         // A different actor may remain alive while the last context in this group closes.
-        guard source != nil || closingCount == 0 else { return }
+        guard source != nil || closingCount == 0 else {
+            publishClosingWait(tabID)
+            return
+        }
         if !sameActorEntries.isEmpty && source == nil {
             // The first context's actual readiness callback resumes this work.
             // A failed source is not readiness and must not cause a retry loop.
@@ -2648,8 +2716,14 @@ final class TatwoCEFTabHostView: NSView {
         }
         guard let memorySlot = BrowserNativeMemoryBudget.shared.acquire(owner: self, retry: { [weak self] in
             self?.ensureSelectedTab()
-        }) else { return }
+        }) else {
+            publish(EmbeddedBrowserNavigationState(
+                urlString: requestedURL.absoluteString, canGoBack: false, canGoForward: false,
+                visibleError: .runtimeMessage("正在整理背景分頁，請稍候；有編輯、播放或下載的分頁會保留。")), tabID: tabID)
+            return
+        }
         var slotTransferred = false
+        var uninstalledLifetime: TatwoCEFContainerView.BrowserLifetime?
         defer {
             if !slotTransferred { BrowserNativeMemoryBudget.shared.release(memorySlot) }
         }
@@ -2710,6 +2784,8 @@ final class TatwoCEFTabHostView: NSView {
                 }
             }
             let browser = try create()
+            let browserLifetime = TatwoCEFContainerView.BrowserLifetime(browser)
+            uninstalledLifetime = browserLifetime
             if !agentMount { BrowserHumanInteraction.shared.configure(browser) { [weak self] url in
                 guard let self else { return }
                 if let handler = self.onTabPopupRequested { handler(tabID, url) }
@@ -2728,7 +2804,7 @@ final class TatwoCEFTabHostView: NSView {
             entry.memorySlot = memorySlot
             slotTransferred = true
             entries[tabID] = entry
-            browser.stateHandler = { [weak self, weak entry] (
+            browser.stateHandler = { [weak self, weak entry, weak browser] (
                 committedURL, generation, canGoBack, canGoForward,
                 isLoading, phase, httpStatus, errorKind, errorCode, visibleError
             ) in
@@ -2741,6 +2817,7 @@ final class TatwoCEFTabHostView: NSView {
                     isLoading: isLoading, phase: phase,
                     httpStatusCode: httpStatus, errorKind: errorKind,
                     errorCode: errorCode, visibleError: visibleError)
+                entry.state.isPDF = browser?.currentDocumentIsPDF == true
                 self.publish(entry.state, tabID: tabID)
                 // A native context-ready notification, not a timer or a fake
                 // completion, opens a tab selected during context startup.
@@ -2780,10 +2857,30 @@ final class TatwoCEFTabHostView: NSView {
                 }
             }
             browser.contextSearchEngineTitle = BrowserGeneralSettings.load().searchEngine.title
+            browser.onBrowserKeyEquivalent = { [weak self, weak browser, weak entry] event in
+                guard let self, let browser, let entry, !self.isClosing,
+                      self.entries[tabID] === entry, self.selectedTabID == tabID,
+                      browser.browserActor == .human, !browser.agentControlled,
+                      browser.window != nil, !entry.container.isHiddenOrHasHiddenAncestor,
+                      let combo = BrowserKeyCombo(event: event),
+                      !combo.modifiers.isEmpty,
+                      let invocation = BrowserGeneralSettings.load().shortcuts.invocation(for: combo),
+                      let dispatch = self.onDailyShortcut else { return false }
+                dispatch(tabID, invocation.message)
+                return true
+            }
             browser.onDailyShortcut = { [weak self, weak browser, weak entry] kind in
                 guard let self, let browser, let entry, !self.isClosing,
                       self.entries[tabID] === entry, self.selectedTabID == tabID,
                       browser.browserActor == .human, !browser.agentControlled else { return }
+                if let action = BrowserNativeMenuAction(rawValue: kind) {
+                    switch action {
+                    case .printPage: browser.printPage()
+                    case .printPDF: entry.container.requestPDF()
+                    case .openPDF: entry.container.requestPDF(download: true)
+                    }
+                    return
+                }
                 self.onDailyShortcut?(tabID, kind)
             }
             browser.onFindResult = { [weak self, weak entry] count, active in
@@ -2834,12 +2931,27 @@ final class TatwoCEFTabHostView: NSView {
                 self.pendingCommand = nil
             }
             entry.container.install(
-                browser, mountIdentity: mountIdentity, profileLease: nil)
+                browser, mountIdentity: mountIdentity, profileLease: nil,
+                lifetime: browserLifetime)
+            uninstalledLifetime = nil
             addSubview(entry.container)
             showSelectedTab()
             executePendingCommand(on: browser)
         } catch {
-            releaseLeaseIfIdle()
+            if let lifetime = uninstalledLifetime {
+                // A revoked agent navigation can throw after context creation
+                // but before installation. It still owns the lease and slot
+                // until native close; do not release either via the early exit.
+                slotTransferred = true
+                closingCount += 1
+                lifetime.close { [self] in
+                    closingCount -= 1
+                    BrowserNativeMemoryBudget.shared.release(memorySlot)
+                    releaseLeaseIfIdle()
+                }
+            } else {
+                releaseLeaseIfIdle()
+            }
             fail(tabID, message: "瀏覽器建立失敗，請重新載入")
         }
     }
@@ -2858,6 +2970,7 @@ final class TatwoCEFTabHostView: NSView {
         case .printPage: enqueue = { browser.printPage() }
         case .printPDF: enqueue = { container?.requestPDF() }
         case .openPDF: enqueue = { container?.requestPDF(download: true) }
+        case .resetDownloadPermission: enqueue = { BrowserHumanInteraction.resetDownloadPermission(browser) }
         case let .find(text, forward, matchCase): enqueue = { browser.findText(text, forward: forward, matchCase: matchCase) }
         case .stopFinding: enqueue = { browser.stopFinding() }
         case let .zoom(level): enqueue = {
@@ -2896,6 +3009,14 @@ final class TatwoCEFTabHostView: NSView {
                   self.entries[tabID] === entry else { return }
             self.onNavigationStateChange(tabID, state)
         }
+    }
+
+    private func publishClosingWait(_ tabID: String) {
+        // Do not mark the tab failed or consume its pending command. A real
+        // OnBeforeClose resumes ensureSelectedTab automatically.
+        publish(EmbeddedBrowserNavigationState(
+            urlString: selectedURL?.absoluteString, canGoBack: false, canGoForward: false,
+            visibleError: .runtimeMessage("瀏覽器仍在關閉，請稍候；若持續未完成請重新啟動 App")), tabID: tabID)
     }
 
     private func fail(_ tabID: String, message: String) {
@@ -2942,6 +3063,35 @@ final class TatwoCEFTabHostView: NSView {
             self.profileLease = nil
         }
         onIdle?()
+    }
+
+    deinit {
+        let retired = Array(entries.values)
+        let lease = profileLease
+        let inputMonitor = humanInputMonitor
+        // An NSView owner can disappear without SwiftUI's dismantle callback.
+        // Transfer its children first; their native views are still alive.
+        // No closure retains this deinitializing host or calls back into it.
+        DispatchQueue.main.async {
+            if let inputMonitor { NSEvent.removeMonitor(inputMonitor) }
+            guard !retired.isEmpty else {
+                if let lease { TatwoCEFProfileLeaseRegistry.shared.release(lease) }
+                return
+            }
+            var remaining = retired.count
+            for entry in retired {
+                let container = entry.container
+                let slot = entry.memorySlot
+                container.close {
+                    if let slot { BrowserNativeMemoryBudget.shared.release(slot) }
+                    remaining -= 1
+                    if remaining == 0, let lease {
+                        TatwoCEFProfileLeaseRegistry.shared.release(lease)
+                    }
+                }
+                container.removeFromSuperview()
+            }
+        }
     }
 
     func close() {

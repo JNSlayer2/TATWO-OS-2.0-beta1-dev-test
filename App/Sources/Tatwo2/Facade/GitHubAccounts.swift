@@ -362,7 +362,7 @@ final class GitHubAccountsStore: ObservableObject, @unchecked Sendable {
     }
 
     func installHelper() throws {
-        let source = Bundle.module.url(forResource: "tatwo2-git-credential", withExtension: nil)
+        let source = TatwoResources.url(forResource: "tatwo2-git-credential", withExtension: nil)
         guard let source else { throw GitHubAccountsError.helperResourceMissing }
         try fileManager.createDirectory(
             at: helperDestinationURL.deletingLastPathComponent(),

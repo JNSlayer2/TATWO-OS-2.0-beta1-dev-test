@@ -37,6 +37,8 @@ private struct ChatBrowserPanel: View {
     @ObservedObject private var runtime: BrowserWorkSpaceRuntime
     @State private var browserFocused = false
     @State private var findPresented = false
+    @State private var findFocusRequest = 0
+    @State private var addressFocusRequest = 0
     @State private var diagnosticsPresented = false
     @State private var annotationsPresented = false
     @State private var panelID = UUID()
@@ -106,7 +108,7 @@ private struct ChatBrowserPanel: View {
                 state: runtime.navigationTabID == selected?.id ? runtime.navigationState : .blank)
             if findPresented {
                 BrowserFindBar(presented: $findPresented, count: runtime.findCount, activeIndex: runtime.findIndex,
-                    onCommand: { issue($0) }).id(selected?.id)
+                    onCommand: { issue($0) }, focusRequest: findFocusRequest).id(selected?.id)
             }
             Divider()
             if let validationMessage {
@@ -147,6 +149,17 @@ private struct ChatBrowserPanel: View {
             consumeBrowserAgentRequest()
         }
         .onChange(of: selected?.id) { _, _ in syncSelection() }
+        .onChange(of: findPresented) { _, visible in if visible { addressFieldFocused = false } }
+        .task(id: addressFocusRequest) {
+            guard addressFocusRequest > 0 else { return }
+            let requestedTab = selected?.id
+            let previousFindRequest = findFocusRequest
+            addressFieldFocused = false
+            await Task.yield()
+            guard !Task.isCancelled, previousFindRequest == findFocusRequest,
+                  requestedTab == selected?.id else { return }
+            addressFieldFocused = true
+        }
         .onChange(of: runtime.surfaceID) { _, _ in consumeBrowserAgentRequest() }
         .onChange(of: model.requestedBrowserAgentURL) { _, _ in consumeBrowserAgentRequest() }
         .onChange(of: runtime.navigationState) { _, state in
@@ -166,7 +179,9 @@ private struct ChatBrowserPanel: View {
         switch action {
         case .newTab: openNewTab()
         case .closeTab: if let selected { registry.close(selected.id) }
-        case .focusAddressBar: addressFieldFocused = true
+        case .focusAddressBar: addressFocusRequest &+= 1
+        case .findInPage:
+            addressFieldFocused = false; findFocusRequest &+= 1; findPresented = true
         case .toggleAnnotations: annotationsPresented = true
         case .nextTab, .previousTab:
             guard !tabs.isEmpty, let index = tabs.firstIndex(where: { $0.id == selected?.id }) else { return }
@@ -188,7 +203,10 @@ private struct ChatBrowserPanel: View {
         model.clearBrowserAgentActivePage(sessionID: sessionID)
     }
     private func select(_ id: UUID) { registry.select(id) }
-    private func openNewTab() { select(registry.openTab(owner: owner).id) }
+    private func openNewTab() {
+        select(registry.openTab(owner: owner).id)
+        addressFocusRequest &+= 1
+    }
     private func consumeBrowserAgentRequest() {
         guard agentControllable,
               BrowserChatRequestRouting.canConsume(panelID: panelID, mountedSurfaceID: runtime.surfaceID),

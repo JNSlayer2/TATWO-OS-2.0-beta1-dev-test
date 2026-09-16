@@ -96,6 +96,8 @@ typedef void (^TatwoCEFDecisionHandler)(BOOL allow);
 typedef void (^TatwoCEFPermissionRequestHandler)(NSString *site, NSString *permission, TatwoCEFDecisionHandler completion);
 typedef void (^TatwoCEFPrivateNetworkHandler)(NSString *host, TatwoCEFDecisionHandler completion);
 typedef void (^TatwoCEFDownloadProgressHandler)(NSString *identifier, NSString *filename, int64_t received, int64_t total, BOOL done);
+/// Human downloads only. Full source URLs stay in memory and must never be logged.
+typedef void (^TatwoCEFDownloadEventHandler)(NSDictionary<NSString *, id> *event);
 
 #pragma mark - W57d
 typedef void (^TatwoCEFFileDialogCompletion)(NSArray<NSString *> * _Nullable paths);
@@ -114,10 +116,27 @@ typedef void (^TatwoCEFFileDialogHandler)(NSInteger mode, NSString *title, NSStr
 @property(atomic, readonly) TatwoCEFBrowserActor browserActor;
 @property(atomic, readonly) BOOL agentControlled;
 @property(atomic, readonly) BOOL humanPreferencesDeferred;
+/// Conservative activity only: unsent edits, media, downloads and native startup/close.
+@property(nonatomic, readonly) BOOL preventsAutomaticSleep;
+/// True only after this document's main response reports application/pdf.
+@property(nonatomic, readonly) BOOL currentDocumentIsPDF;
 @property(atomic) BOOL blocksThirdPartyCookies;
 @property(atomic) BOOL adBlock;
 @property(nonatomic, copy, nullable) TatwoCEFDownloadProgressHandler onDownloadProgress;
+@property(nonatomic, copy, nullable) TatwoCEFDownloadEventHandler onDownloadEvent;
+- (BOOL)cancelDownloadIdentifier:(NSString *)identifier NS_SWIFT_NAME(cancelDownload(_:));
+- (BOOL)pauseDownloadIdentifier:(NSString *)identifier NS_SWIFT_NAME(pauseDownload(_:));
+- (BOOL)resumeDownloadIdentifier:(NSString *)identifier NS_SWIFT_NAME(resumeDownload(_:));
+/// Retains this view's CEF request context, cookies and human permission policy.
+- (BOOL)retryDownloadURL:(NSString *)url NS_SWIFT_NAME(retryDownload(_:));
+/// Human gesture only: remove this origin's automatic-download exception in
+/// this browser's request context. Never changes other sites or global defaults.
+- (BOOL)resetCurrentDownloadPermission;
 @property(nonatomic, copy, nullable) void (^onPopupRequested)(NSString *url);
+/// A CEF-owned popup keeps its opener and request context; configure its own human UI callbacks.
+@property(nonatomic, copy, nullable) void (^onPopupCreated)(TatwoCEFBrowserView *popup);
+/// Return YES only when the selected human browser actually handles this native key.
+@property(nonatomic, copy, nullable) BOOL (^onBrowserKeyEquivalent)(NSEvent *event);
 @property(nonatomic, copy, nullable) TatwoCEFPermissionRequestHandler onPermissionRequested;
 @property(nonatomic, copy, nullable) TatwoCEFPrivateNetworkHandler onPrivateNetworkRequested;
 #pragma mark - W57d

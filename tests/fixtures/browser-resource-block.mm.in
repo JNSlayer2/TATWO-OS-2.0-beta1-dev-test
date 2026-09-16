@@ -19,7 +19,7 @@ using CefString = std::string;
 template<class T> using CefRefPtr = T*;
 class CefBrowser {};
 class CefFrame { public: bool main=true; bool IsMain() { return main; } };
-class CefResponse {};
+class CefResponse { public: int status=200; std::string mime="text/html"; int GetStatus() { return status; } CefString GetMimeType() { return mime; } };
 class CefCallback {};
 class CefCookieAccessFilter {};
 class CefRequest {
@@ -36,6 +36,7 @@ class CefResourceRequestHandler {
  public:
   virtual CefCookieAccessFilter* GetCookieAccessFilter(CefBrowser*, CefFrame*, CefRequest*) = 0;
   virtual cef_return_value_t OnBeforeResourceLoad(CefBrowser*, CefFrame*, CefRequest*, CefCallback*) = 0;
+  virtual bool OnResourceResponse(CefBrowser*, CefFrame*, CefRequest*, CefResponse*) = 0;
   virtual void OnResourceRedirect(CefBrowser*, CefFrame*, CefRequest*, CefResponse*, CefString&) = 0;
   virtual void OnProtocolExecution(CefBrowser*, CefFrame*, CefRequest*, bool&) = 0;
 };
@@ -58,6 +59,7 @@ typedef NS_ENUM(NSInteger, TatwoCEFBrowserActor) { TatwoCEFBrowserActorAgent, Ta
 @property BOOL blocksThirdPartyCookies;
 @property BOOL adBlock;
 @property TatwoCEFBrowserActor browserActor;
+@property(readonly) BOOL currentDocumentIsPDF;
 @property(copy) void (^onPrivateNetworkRequested)(NSString*, void (^)(BOOL));
 @end
 @implementation TatwoCEFBrowserView @end
@@ -66,9 +68,16 @@ std::shared_ptr<const BrowserHostDenyListSnapshot> g_host_deny_list;
 // INSERT decision
 enum TatwoCEFBrowserErrorKind { TatwoCEFBrowserErrorKindNavigation, TatwoCEFBrowserErrorKindSecurity };
 enum TatwoCEFBrowserPhase { TatwoCEFBrowserPhaseNavigationFailed, TatwoCEFBrowserPhaseBlockedBySecurity };
-struct BrowserState { uint64_t mount_generation=7; bool close_requested=false, close_completed=false; bool navigation_in_flight=false; uint64_t navigation_generation=1; };
+struct BrowserState { NSString *private_network_retry_url=nil; uint64_t private_network_retry_generation=0; uint64_t mount_generation=7; bool close_requested=false, close_completed=false; bool navigation_in_flight=false; uint64_t navigation_generation=1; NSString *committed_url=nil, *document_mime_url=nil; bool document_is_pdf=false; };
 BrowserState state;
 BrowserState *State(TatwoCEFBrowserView*) { return &state; }
+@implementation TatwoCEFBrowserView (PDF)
+// INSERT pdfGetter
+@end
+int statePublications=0;
+void PublishStateNow(TatwoCEFBrowserView*) { ++statePublications; }
+// INSERT privateRetry
+// INSERT documentMIME
 int visibleErrors=0, checks=0;
 NSString *lastMessage;
 int lastCode=0;
@@ -87,7 +96,9 @@ uint64_t BeginNavigationFrameTelemetry(TatwoCEFBrowserView*, BrowserState *curre
 enum class PublicAddressResult { kPublic, kNonPublic, kDNSFailure };
 PublicAddressResult dnsResult=PublicAddressResult::kPublic;
 dispatch_semaphore_t dnsGate;
+std::atomic<int> dnsCalls{0};
 PublicAddressResult ResolvePublicAddressResult(NSString*) {
+  ++dnsCalls;
   if (dnsGate) dispatch_semaphore_wait(dnsGate, DISPATCH_TIME_FOREVER);
   return dnsResult;
 }
@@ -98,7 +109,8 @@ bool IsSameOrigin(NSString*, NSString*) { return false; }
 NSString *OriginForURLString(NSString*) { return nil; }
 std::atomic<int> completions{0};
 std::atomic<bool> lastAllowed{false};
-bool RegisterPendingResourceDecision(CefCallback*, uint64_t *id) { *id=1; return true; }
+std::atomic<int> registeredDecisions{0};
+bool RegisterPendingResourceDecision(CefCallback*, uint64_t *id) { ++registeredDecisions; *id=1; return true; }
 void CompletePendingResourceDecision(uint64_t, bool allowed) { lastAllowed=allowed; ++completions; }
 int blockedMain=0, blockedSub=0;
 void RecordHostBlocklistRequest(bool main, cef_resource_type_t) { if(main) ++blockedMain; else ++blockedSub; }
@@ -235,6 +247,7 @@ int main() { @autoreleasepool {
   for (const char* url : {"http://192." "168.1.1/", "https://example.com/private"}) {
     dnsResult=PublicAddressResult::kNonPublic;
     for (bool consent : {false,true}) {
+      state.private_network_retry_url=nil;
       __block int prompts=0;
       view.onPrivateNetworkRequested=^(NSString* host, void (^done)(BOOL)) { ++prompts; done(consent); };
       TatwoResourceRequestHandler h(view,@"",human,context());
@@ -242,6 +255,7 @@ int main() { @autoreleasepool {
       check(h.OnBeforeResourceLoad(nullptr,&frame,&r,&callback)==RV_CONTINUE_ASYNC,"human private network waits");
       waitCompletion(target);
       check(prompts==1 && lastAllowed==consent,"human allow and deny enforced at resource boundary");
+      check(consent ? state.private_network_retry_url==nil : [state.private_network_retry_url isEqualToString:FromCefString(url)],"only denied main navigation remembers exact retry target");
     }
   }
   // Downgrade while Island is open cannot reuse a human decision for an agent.
@@ -265,6 +279,74 @@ int main() { @autoreleasepool {
   check(strict.OnBeforeResourceLoad(nullptr,&frame,&local,&callback)==RV_CANCEL,"agent private IP unchanged");
   check(agent.blocks_third_party_cookies,"agent cookies stay blocked");
   check(!IsActorURLAllowed(human,@"file:///tmp/a"),"human cannot open local files");
+  // Execute the production PDF policy and request handler, with DNS counters.
+  // The built-in viewer receives its narrowly scoped assets, never a global URL exemption.
+  NSString *pdfViewer=@"chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html";
+  NSString *pdfAsset=@"chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/pdf_viewer.js";
+  check(IsBuiltinPDFViewerURL(pdfViewer),"exact built-in PDF extension recognized");
+  check(!IsActorURLAllowed(human,pdfViewer) && !IsActorURLAllowed(agent,pdfViewer),"PDF viewer never expands global actor navigation policy");
+  check(!IsActorURLAllowed(human,@"chrome://resources/js/load_time_data.js"),"chrome resources remain excluded from global navigation");
+  struct PDFCase { bool human; NSString *url; NSString *initiator; bool main; bool allowed; };
+  const PDFCase pdfCases[] = {
+    {true,pdfAsset,@"https://example.com/doc.pdf",false,true},
+    {true,@"chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/",@"",false,true},
+    {true,@"chrome://resources/js/load_time_data.js",pdfViewer,false,true},
+    {true,@"chrome://strings/",pdfViewer,false,true},
+    {false,pdfAsset,pdfViewer,false,false},
+    {false,@"chrome://resources/a.js",pdfViewer,false,false},
+    {true,pdfAsset,pdfViewer,true,false},
+    {true,@"chrome://resources/a.js",pdfViewer,true,false},
+    {true,@"chrome-extension://anotherextension/index.html",pdfViewer,false,false},
+    {true,@"chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai.evil/pdf.js",pdfViewer,false,false},
+    {true,@"chrome-extension://user:password@mhjfbmdgcfjbbpaeojofohoefgiehjai/pdf.js",pdfViewer,false,false},
+    {true,@"chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai:443/pdf.js",pdfViewer,false,false},
+    {true,@"chrome://resources:443/a.js",pdfViewer,false,false},
+    {true,@"chrome://user:password@resources/a.js",pdfViewer,false,false},
+    {true,@"chrome://settings/",pdfViewer,false,false},
+    {true,@"chrome://version/",pdfViewer,false,false},
+    {true,@"chrome://resources/a.js",@"https://example.com/",false,false},
+    {true,@"chrome://strings/",@"chrome-extension://anotherextension/index.html",false,false},
+    {true,@"chrome://resources/a.js",@"chrome-extension://user@mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html",false,false},
+    {true,@"file:///tmp/local.pdf",pdfViewer,false,false},
+  };
+  view.agentControlled=NO;
+  const int pdfDNSBefore=dnsCalls, pdfDecisionsBefore=registeredDecisions;
+  for (const auto &entry:pdfCases) {
+    check(IsBuiltinPDFResource(entry.human,entry.url,entry.initiator,entry.main)==entry.allowed,"built-in PDF resource policy boundary");
+    auto pdfPolicy=human; pdfPolicy.human=entry.human;
+    TatwoResourceRequestHandler h(view,entry.initiator,pdfPolicy,context());
+    CefRequest r{entry.main ? RT_MAIN_FRAME : RT_SCRIPT,entry.url.UTF8String};
+    check(h.OnBeforeResourceLoad(nullptr,&frame,&r,&callback)==(entry.allowed ? RV_CONTINUE : RV_CANCEL),"PDF resource callback applies the production allowlist");
+    drain();
+  }
+  check(dnsCalls==pdfDNSBefore && registeredDecisions==pdfDecisionsBefore,"built-in and rejected internal PDF resources never enter DNS or pending permission work");
+  // Real response classification drives the native getter; suffixes are irrelevant.
+  state.committed_url=@"https://example.com/document?id=pdf";
+  CefRequest document{RT_MAIN_FRAME,"https://example.com/document?id=pdf"};
+  CefResponse pdfResponse; pdfResponse.mime="application/pdf";
+  TatwoResourceRequestHandler pdfDocument(view,@"",human,context());
+  check(!pdfDocument.OnResourceResponse(nullptr,&frame,&document,&pdfResponse),"MIME observation never restarts the response");
+  drain(); check(view.currentDocumentIsPDF,"extensionless PDF is recognized by its actual main response MIME");
+  state.committed_url=@"https://example.com/different";
+  check(!view.currentDocumentIsPDF,"MIME from a different committed URL cannot enable fallback");
+  state.committed_url=@"https://example.com/document?id=pdf";
+  CefRequest image{RT_IMAGE,document.url};
+  CefResponse html; html.mime="text/html";
+  pdfDocument.OnResourceResponse(nullptr,&frame,&image,&html);
+  drain(); check(view.currentDocumentIsPDF,"subresource MIME cannot replace document type");
+  pdfDocument.OnResourceResponse(nullptr,&frame,&document,&html);
+  drain(); check(!view.currentDocumentIsPDF,"HTML response disables PDF fallback even for a misleading URL");
+  pdfDocument.OnResourceResponse(nullptr,&frame,&document,&pdfResponse);
+  epoch->Advance(); drain();
+  check(!view.currentDocumentIsPDF,"late old-navigation MIME is rejected");
+  TatwoResourceRequestHandler currentPDF(view,@"",human,context());
+  pdfResponse.status=404;
+  currentPDF.OnResourceResponse(nullptr,&frame,&document,&pdfResponse);
+  drain(); check(!view.currentDocumentIsPDF,"HTTP failure does not advertise a successful PDF document");
+  pdfResponse.status=200;
+  currentPDF.OnResourceResponse(nullptr,&frame,&document,&pdfResponse);
+  view.agentControlled=YES; drain();
+  check(!view.currentDocumentIsPDF,"human response cannot publish document MIME after agent takeover");
   human.ad_block=false;
   check(!IsDeniedByLocalHostList(human,@"https://ads.example"),"adblock setting reaches snapshot");
   std::cout << "RESOURCEBLOCK RESULT passed=" << checks << " failed=0 skipped=0\n";

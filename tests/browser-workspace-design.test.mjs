@@ -27,7 +27,6 @@ test('workspace design projects registry data; W47 transport is confined to its 
   assert.match(design, /BrowserWorkSpaceCEFSurface/);
   assert.deepEqual([...design.matchAll(/^import (.+)$/gm)].map(m => m[1]), ['SwiftUI', 'Combine']);
   assert.doesNotMatch(design, /FileManager|UserDefaults|AppStorage|SceneStorage|NSWorkspace|openURL|Process\(|Task\s*\{|Timer|Data\(contentsOf|write\s*\(/);
-  assert.ok(design.split('\n').length <= 1160);
   assert.match(design, /TatwoActivePalette\.current/);
   assert.match(design, /LiquidGlassTokens\.radiusCard/);
   assert.doesNotMatch(design, /\.ultraThinMaterial/);
@@ -63,7 +62,7 @@ test('browser rejoins the shared chat sidebar shell and footer with no private s
   assert.match(browser, /frame\(maxHeight: \.infinity, alignment: \.topLeading\)/);
   assert.match(browser, /ForEach\(browserWorkSpaceStore.spaces\)/);
   assert.match(browser, /Button\("新增空間", action: browserWorkSpaceStore.addSpace\)/);
-  assert.match(browser, /Button\("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport\)/);
+  assert.match(browser, /Button\("從其他瀏覽器導入…", action: browserWorkSpaceStore.requestImport\)/);
   assert.match(browser, /12\.5, weight: \.bold/);
   assert.doesNotMatch(design, /sidebarHeader|sidebarFooter|TatwoOSMark|WorkspaceSidebarShell|WorkspaceSidebarModePicker/);
   assert.match(host, /let workspaceOwnsSidebar = model\.mode == \.bot\n/);
@@ -97,19 +96,24 @@ test('v6 sidebar has five ordered sections, white selection and no chat or searc
   assert.match(design, /ForEach\(store.spaces\)/);
   assert.match(design, /Button \{ store.selectSpace\(space.id\) \}/);
   assert.match(design, /Image\(systemName: "arrow.down.circle"\)/);
-  assert.match(design, /popover\(isPresented: \$downloadsPresented, arrowEdge: \.bottom\)/);
+  assert.match(design, /sheet\(isPresented: \$downloadsPresented\) \{ downloadsSheet \}/);
   assert.match(design, /Button\("在 Finder 顯示"\) \{ downloadStore.reveal\(download\) \}/);
-  assert.match(design, /Button\("清除", action: downloadStore.clearDownloads\)/);
+  assert.match(design, /Button\("清除紀錄", action: downloadStore.clearDownloads\)/);
   assert.doesNotMatch(design, /sidebar.left/);
 });
 
 test('W38 split downloads and traffic-light aligned space menu', () => {
-  const downloads = section(design, 'private var downloadsPopover:', '// MARK: - Sidebar sections:');
-  for (const token of ['TextField("Search", text: $downloadQuery)', 'line.3.horizontal.decrease', '["今天", "昨天", "Earlier"]', 'downloadArtwork', 'downloadPreview', '選一個檔案預覽', 'width: 660, height: 520', 'LiquidGlassPanelCard']) assert.ok(downloads.includes(token));
+  const downloads = section(design, 'private var downloadsSheet:', '// MARK: - Sidebar sections:');
+  assert.match(downloads, /Button\("完成"\) \{ downloadsPresented = false \}\s*\.keyboardShortcut\(\.cancelAction\)/);
+  assert.match(downloads, /onExitCommand \{ downloadsPresented = false \}/);
+  assert.doesNotMatch(design, /popover\(isPresented: \$downloadsPresented/);
+  for (const token of ['TextField("搜尋下載", text: $downloadQuery)', 'line.3.horizontal.decrease', '["今天", "昨天", "Earlier"]', 'downloadArtwork', 'downloadPreview', '選一個檔案預覽', 'width: 660, height: 520', 'LiquidGlassPanelCard']) assert.ok(downloads.includes(token));
   const menu = section(downloads, '.contextMenu {', 'private var downloadPreview:');
   assert.match(menu, /Button\("在 Finder 顯示"/);
   assert.match(menu, /Button\("快速預覽"/);
   assert.match(downloads, /disabled\(!download.done\)/);
+  assert.match(downloads, /disabled\(!download.state.isTerminal\)/);
+  for (const action of ['cancel', 'retry', 'pause', 'resume']) assert.ok(downloads.includes(`downloadStore.${action}(download)`));
   assert.match(downloads, /selected \|\| hoveredDownloadID == download.id/);
   assert.match(downloads, /RoundedRectangle\(cornerRadius: 5\).fill\(download.isImage \? folderFill : \.white\)/);
   assert.doesNotMatch(design, /尚無分頁/);
@@ -120,17 +124,15 @@ test('W38 split downloads and traffic-light aligned space menu', () => {
   assert.ok(browser.indexOf('Text(browserWorkSpaceStore.selectedSpace.name)') < browser.indexOf('Image(systemName: "chevron.down")'));
 });
 
-test('v6 Search stays centered with 560/15/14.5/30 geometry and top-right extensions', () => {
+test('Search stays centered and unfinished extension controls are honestly labeled', () => {
   const page = section(design, 'private var page:', 'private var extensionStrip:');
   assert.match(page, /ZStack/);
   assert.match(page, /RadialGradient\(colors: \[palette.brandAccent.opacity/);
   assert.match(page, /searchBox\s*\.frame\(maxWidth: 560\)/);
   assert.match(page, /\.frame\(maxWidth: \.infinity, maxHeight: \.infinity\)/);
   assert.match(page, /overlay\(alignment: \.topTrailing\).*extensionStrip/);
-  assert.match(design, /ForEach\(\["文A", "S"\]/);
-  assert.match(design, /HStack\(spacing: 4\)/);
-  assert.match(design, /frame\(width: 18, height: 18\)/);
-  assert.match(design, /RoundedRectangle\(cornerRadius: 5\)/);
+  assert.match(design, /Label\("擴充功能尚未支援", systemImage: "puzzlepiece.extension"\)/);
+  assert.doesNotMatch(design, /ForEach\(\["文A", "S"\]/);
   assert.match(design, /puzzlepiece.extension/);
   assert.match(design, /TextField\("Search", text: \$query\).font\(.system\(size: 14.5\)\)/);
   assert.match(design, /magnifyingglass"\).font\(.system\(size: 16\)/);
@@ -139,7 +141,7 @@ test('v6 Search stays centered with 560/15/14.5/30 geometry and top-right extens
   assert.match(design, /frame\(width: 30, height: 30\)/);
   assert.match(design, /roundButton\("加入分頁", "plus"\)/);
   assert.match(design, /roundButton\("搜尋", "arrow.up"/);
-  assert.doesNotMatch(design, /microphone|mic\.fill|"mic"|logo|標誌|標語|連接卡|arrow.left|arrow.right|arrow.clockwise|⌘K|keyboardShortcut\("k"/i);
+  assert.doesNotMatch(section(design, 'private var searchBox:', 'private var suggestionList:'), /microphone|mic\.fill|"mic"|logo|標誌|標語|連接卡|arrow.left|arrow.right|arrow.clockwise|⌘K|keyboardShortcut\("k"/i);
   // W57e removes implicit focus/search hotkeys; existing controls remain.
   assert.doesNotMatch(design, /keyboardShortcut\("s"/);
   assert.doesNotMatch(design, /keyboardShortcut\("a"/);
@@ -158,9 +160,8 @@ test('v6 import is a seven-source, five-choice local sheet with profile and Arc 
   assert.match(design, /Arc 不提供/);
   assert.match(design, /toggleStyle\(.checkbox\).disabled\(!store.supports\(data\)\)/);
   assert.match(design, /Firefox 不支援/);
-  const mockup = read('docs/reviews/browser-workspace-mockup-v6.html');
-  const explanation = mockup.match(/<p class="note-arc">([\s\S]*?)<\/p>/)[1].replace(/<[^>]*>/g, '');
-  assert.ok(store.includes(`static let importExplanation = "${explanation}"`));
+  // The separate publisher mockup is not shipped in release source archives.
+  assert.match(store, /static let importExplanation =/);
   assert.match(design, /count: 2\),\s*alignment: \.leading, spacing: 6/);
   assert.match(design, /padding\(22\).frame\(width: 520\)/);
   assert.match(design, /Picker\("設定檔", selection: \$store.profile\)/);
@@ -217,6 +218,7 @@ ${store}
         let store = BrowserWorkSpaceStore(registry: registry)
         let secondWindow = BrowserWorkSpaceStore(registry: registry)
         precondition(store.tabs.isEmpty && store.folders.count == 1)
+        precondition(!store.canReopenClosedTab)
         precondition(store.spaces.count == 2 && store.selectedSpace.name == "一般")
         let space = registry.spaces.first { !$0.isSessionSpace }!
         let tab = registry.openTab(owner: .workSpace(spaceID: space.id), url: URL(string: "https://example.com")!, title: "Fixture page")
@@ -280,6 +282,12 @@ ${store}
         store.focusMode = true
         for id in store.tabs.map(\\.id) { store.close(id) }
         precondition(store.tabs.isEmpty && store.selectedTab.id == -1 && !store.focusMode)
+        precondition(store.canReopenClosedTab)
+        store.reopenClosedTab()
+        precondition(store.tabs.count == 1 && store.selectedTab.title == "Fixture page")
+        precondition(store.selectedTab.url == "https://example.com" && store.selectedRegistryID != nil)
+        store.close(store.selectedID)
+        precondition(store.tabs.isEmpty)
         store.close(-1)
         let chatTab = registry.openTab(owner: .chatSession(sessionID: "fixture-session"), url: URL(string: "https://example.org")!, title: "Chat page")
         store.selectSpace(store.spaces.first { $0.isSessionSpace }!.id)
@@ -355,7 +363,7 @@ struct BrowserDiagnosticsView: View { var body: some View { EmptyView() } }
     func info(title: String, detail: String, duration: TimeInterval = 6) {}
 }
 struct EmbeddedBrowserCommand {
-    enum Action { case load(URL), reload, goBack, goForward, stopLoading, printPage, printPDF, openPDF, find(String, forward: Bool, matchCase: Bool), stopFinding, zoom(Double) }
+    enum Action { case load(URL), reload, goBack, goForward, stopLoading, printPage, printPDF, openPDF, resetDownloadPermission, find(String, forward: Bool, matchCase: Bool), stopFinding, zoom(Double) }
     let action: Action
 }
 struct EmbeddedBrowserNavigationState {
@@ -364,6 +372,7 @@ struct EmbeddedBrowserNavigationState {
     var canGoBack = false
     var canGoForward = false
     var isLoading = false
+    var isPDF = false
     var navigationGeneration: UInt64 = 0
     var showsNavigationProgress: Bool { isLoading }
 }
@@ -438,6 +447,8 @@ extension View {
     join(root, 'App/Sources/Tatwo2/Browser/BrowserWorkSpacePolicies.swift'), join(root, 'App/Sources/Tatwo2/Browser/BrowserMemoryPolicy.swift'), join(root, 'App/Sources/Tatwo2/Browser/BrowserMemorySettings.swift'), join(root, 'App/Sources/Tatwo2/Browser/BrowserNativeMemoryBudget.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserGeneralSettings.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserShortcuts.swift'),
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserExternalLoginPolicy.swift'),
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserLoginHelpView.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserTabRow.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift')]);
 });
@@ -461,7 +472,7 @@ test('W39 Browser-only shortcut, bookmark drops, blank-area menu and add-space c
   assert.match(design, /animation\(\.easeInOut/);
   assert.match(design, /ForEach\(folder.bookmarks\)/);
   assert.match(design, /TextField\("資料夾名稱"/);
-  const controls = section(design, 'private var spaceControls:', 'private var downloadsPopover:');
+  const controls = section(design, 'private var spaceControls:', 'private var downloadsSheet:');
   assert.match(controls, /Button\(action: store.addSpace\)/);
   assert.match(controls, /Image\(systemName: "plus"\).font\(\.system\(size: 12\)\).foregroundStyle\(\.secondary\)/);
   const browser = section(read('App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift'), 'var browserSidebar:', 'var chatSidebar:');

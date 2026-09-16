@@ -10,7 +10,7 @@ const read = p => readFileSync(join(root,p),'utf8');
 
 test('W57a shortcuts are mounted in human Browser/chat-browser only and gated by local focus', () => {
   const controls = read(b+'BrowserDailyNavigationControls.swift');
-  // W57e replaces W57a's built-in bindings with the user's map; only Cmd-T defaults.
+  // Standard defaults and custom bindings share the same focus-scoped map.
   assert.match(controls, /map\.combos\(for: action\)/);
   assert.match(controls, /keyboardShortcut\(combo\.equivalent, modifiers: combo\.eventModifiers\)/);
   assert.match(controls, /\.disabled\(!focused\)/);

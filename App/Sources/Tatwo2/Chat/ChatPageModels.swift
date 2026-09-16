@@ -2022,15 +2022,13 @@ final class ChatTranscriptProjectionCache {
     private static func estimatedResidentBytes(
         for message: ChatMessage
     ) -> Int {
-        var total =
-            message.id.utf8.count
-            + message.derivedTextUTF8Count
-            + (message.status?.utf8.count ?? 0)
-            + (message.modelID?.utf8.count ?? 0)
-            + (message.runtimeAdapterID?.utf8.count ?? 0)
-            + (message.turnID?.utf8.count ?? 0)
-            + MemoryLayout<PlanQuestionV1>.stride
-                * message.planQuestions.count
+        var total: Int = message.id.utf8.count
+        total += message.derivedTextUTF8Count
+        total += message.status?.utf8.count ?? 0
+        total += message.modelID?.utf8.count ?? 0
+        total += message.runtimeAdapterID?.utf8.count ?? 0
+        total += message.turnID?.utf8.count ?? 0
+        total += MemoryLayout<PlanQuestionV1>.stride * message.planQuestions.count
         for question in message.planQuestions {
             total += question.id.utf8.count
             total += question.question.utf8.count
@@ -2399,23 +2397,22 @@ struct ChatQueuedTicket: Identifiable {
     let dispatchSnapshot: ChatTurnDispatchSnapshot
 
     var residentUTF8Bytes: Int {
-        displayTurn.utf8.count
-            + commandBaseTurn.utf8.count
-            + visibleTurn.utf8.count
-            + preview.utf8.count
-            + dispatchSnapshot.routeID.utf8.count
-            + dispatchSnapshot.canonicalModelID.utf8.count
-            + (dispatchSnapshot.vendorModelID?.utf8.count ?? 0)
-            + (dispatchSnapshot.contractID?.utf8.count ?? 0)
-            + (dispatchSnapshot.contractBindingID?.utf8.count ?? 0)
-            + (dispatchSnapshot.requestedEffort?.rawValue.utf8.count ?? 0)
-            + (dispatchSnapshot.forwardedEffort?.rawValue.utf8.count ?? 0)
-            + dispatchSnapshot.effortOutcome.rawValue.utf8.count
-            + (dispatchSnapshot.blocker?.utf8.count ?? 0)
-            + dispatchSnapshot.computerHostDecision.route.rawValue.utf8.count
-            + attachmentPaths.reduce(into: 0) { bytes, path in
-                bytes += path.utf8.count
-            }
+        var total: Int = displayTurn.utf8.count
+        total += commandBaseTurn.utf8.count
+        total += visibleTurn.utf8.count
+        total += preview.utf8.count
+        total += dispatchSnapshot.routeID.utf8.count
+        total += dispatchSnapshot.canonicalModelID.utf8.count
+        total += dispatchSnapshot.vendorModelID?.utf8.count ?? 0
+        total += dispatchSnapshot.contractID?.utf8.count ?? 0
+        total += dispatchSnapshot.contractBindingID?.utf8.count ?? 0
+        total += dispatchSnapshot.requestedEffort?.rawValue.utf8.count ?? 0
+        total += dispatchSnapshot.forwardedEffort?.rawValue.utf8.count ?? 0
+        total += dispatchSnapshot.effortOutcome.rawValue.utf8.count
+        total += dispatchSnapshot.blocker?.utf8.count ?? 0
+        total += dispatchSnapshot.computerHostDecision.route.rawValue.utf8.count
+        for path in attachmentPaths { total += path.utf8.count }
+        return total
     }
 }
 
