@@ -150,6 +150,9 @@ precondition(BrowserTabSleepPolicy.shouldSleep(lastActiveAt:now.addingTimeInterv
 
 test('W55 change boundaries: policies identical after removing only logging / env override', () => {
   const security = read(app+'Browser/EmbeddedBrowserSecurity.swift')
+    // PR #2 adds PDF state and a human-only permission-reset command, not policy changes.
+    .replace('        case resetDownloadPermission\n', '')
+    .replace('    var isPDF = false\n', '')
     // W57d adds command cases only; the original security-policy digest stays pinned.
     .replace('        case printPage\n        case printPDF\n        case openPDF\n', '')
     .replace('        case stopLoading\n        case find(String, forward: Bool, matchCase: Bool)\n        case stopFinding\n        case zoom(Double)\n', '')

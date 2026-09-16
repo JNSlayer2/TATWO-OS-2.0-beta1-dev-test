@@ -14,7 +14,12 @@ enum ChatSidebarLayoutPolicy {
 
 
 extension ChatPage {
-    var isChatProjectRailPinned: Bool { sidebarPinnedPref || Self.envRailPinned }
+    var isChatProjectRailPinned: Bool {
+        model.mode == .browser ? !browserWorkSpaceStore.focusMode : sidebarPinnedPref || Self.envRailPinned
+    }
+    var isChatProjectRailInteractionActive: Bool {
+        model.mode == .browser && browserWorkSpaceStore.sidebarInteractionActive
+    }
     var cliVisibleProjectIDs: Set<String> {
         Set(cliVisibleProjectIDsRaw.split(separator: ",").map(String.init))
     }
@@ -123,7 +128,7 @@ extension ChatPage {
     }
 
     var browserSidebar: some View {
-        WorkspaceSidebarShell(width: browserWorkSpaceStore.focusMode ? WorkspaceSidebarMetrics.browserFocusWidth : WorkspaceSidebarMetrics.width) {
+        WorkspaceSidebarShell {
             VStack(alignment: .leading, spacing: WorkspaceSidebarMetrics.sectionSpacing) {
                 workspaceModeSection
                     .padding(.top, WorkspaceSidebarMetrics.headerTopInset)
@@ -132,13 +137,9 @@ extension ChatPage {
                             Button(mode.displayName) { model.mode = mode }
                         }
                     }
-                if browserWorkSpaceStore.focusMode {
-                    Spacer(minLength: 0)
-                } else {
-                    BrowserWorkSpaceSidebarList(store: browserWorkSpaceStore)
-                        .frame(maxHeight: .infinity)
-                    workspaceSidebarFooter
-                }
+                BrowserWorkSpaceSidebarList(store: browserWorkSpaceStore)
+                    .frame(maxHeight: .infinity)
+                workspaceSidebarFooter
             }
             .frame(maxHeight: .infinity, alignment: .topLeading)
         }
@@ -154,13 +155,9 @@ extension ChatPage {
         .ignoresSafeArea(.container, edges: [.top, .bottom])
     }
 
-    /// 紅綠燈帶上的一列：空間切換膠囊 ＋ 側欄開關 ＋ 側欄固定。
-    /// 使用者 2026-09-15 指出缺的就是後兩顆（對照 Dia 側欄開關圖示）。
+    /// Space name shares the traffic-light baseline; sidebar control lives in the toolbar.
     var browserSpaceSwitcher: some View {
-        HStack(spacing: WorkspaceSidebarMetrics.sidebarControlGap) {
-            if !browserWorkSpaceStore.focusMode { browserSpaceMenu }
-            BrowserSidebarControls(store: browserWorkSpaceStore)
-        }
+        browserSpaceMenu
     }
 
     private var browserSpaceMenu: some View {
@@ -170,21 +167,18 @@ extension ChatPage {
             }
             Button("新增空間", action: browserWorkSpaceStore.addSpace)
             Divider()
-            Button("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport)
+            Button("從其他瀏覽器導入…", action: browserWorkSpaceStore.requestImport)
         } label: {
             HStack(spacing: WorkspaceSidebarMetrics.spaceSwitcherSpacing) {
                 Text(browserWorkSpaceStore.selectedSpace.name)
                     .font(.system(size: WorkspaceSidebarMetrics.spaceSwitcherFontSize, weight: .bold)).lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: WorkspaceSidebarMetrics.spaceSwitcherChevronSize))
             }
             .padding(.horizontal, WorkspaceSidebarMetrics.spaceSwitcherHorizontalInset)
-            .frame(maxWidth: .infinity)
-            .contentShape(Capsule())
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden)
-        .frame(width: WorkspaceSidebarMetrics.spaceSwitcherMenuWidth, height: WorkspaceSidebarMetrics.spaceSwitcherHeight)
-        .background(LiquidGlassTokens.browserFieldFill, in: Capsule())
+        .frame(width: WorkspaceSidebarMetrics.spaceSwitcherMenuWidth, height: WorkspaceSidebarMetrics.spaceSwitcherHeight, alignment: .leading)
         .accessibilityLabel("切換瀏覽器空間")
         .accessibilityIdentifier("browser.spaceSwitcher")
     }
@@ -387,7 +381,7 @@ extension ChatPage {
     }
 
     var workspaceModeSection: some View {
-        WorkspaceSidebarModePicker(modes: model.mode == .browser && browserWorkSpaceStore.focusMode ? [.browser] : ChatRunMode.visibleChatTabs, selection: model.mode) { mode in
+        WorkspaceSidebarModePicker(modes: ChatRunMode.visibleChatTabs, selection: model.mode) { mode in
             withAnimation(.easeInOut(duration: 0.14)) { model.mode = mode }
         }
     }
@@ -530,10 +524,7 @@ extension ChatPage {
                         .frame(maxHeight: .infinity)
 
                     HStack(alignment: .top, spacing: 0) {
-                        Group {
-                            // 2026-08-23 一致化：cli 也走同一條 hover rail（原持久側欄退役）。
-                            if model.mode == .cli { cliSidebar } else { chatSidebar }
-                        }
+                        sidebar
                             // 頂天落地：rail 玻璃填滿視窗高度，不再只有內容高度（使用者：左列上下沒頂天落地）。
                             .frame(width: width)
                             .frame(maxHeight: .infinity, alignment: .top)
@@ -577,6 +568,7 @@ extension ChatPage {
     }
 
     func updateChatProjectHover(_ hovering: Bool) {
+        chatProjectPointerInside = hovering
         chatProjectHoverGeneration += 1
         let generation = chatProjectHoverGeneration
         if hovering {
@@ -588,10 +580,11 @@ extension ChatPage {
                 }
             }
         } else {
-            guard !isChatProjectRailPinned else { return }
+            guard !isChatProjectRailPinned && !isChatProjectRailInteractionActive else { return }
             chatProjectHoverCloseWorkItem?.cancel()
             let workItem = DispatchWorkItem {
-                guard generation == chatProjectHoverGeneration, !isChatProjectRailPinned else { return }
+                guard generation == chatProjectHoverGeneration, !isChatProjectRailPinned,
+                      !isChatProjectRailInteractionActive else { return }
                 chatProjectHoverCloseWorkItem = nil
                 withAnimation(.easeInOut(duration: 0.22)) {
                     isChatProjectRailHovering = false
@@ -600,6 +593,14 @@ extension ChatPage {
             chatProjectHoverCloseWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + chatProjectRailCloseDelay, execute: workItem)
         }
+    }
+
+    func resetChatProjectHover() {
+        chatProjectHoverGeneration += 1
+        chatProjectHoverCloseWorkItem?.cancel()
+        chatProjectHoverCloseWorkItem = nil
+        isChatProjectRailHovering = false
+        chatProjectPointerInside = false
     }
 
     /// Gen-4 export-only 場景選擇：僅 snapshot 模式讀取（g4-env-contract）。

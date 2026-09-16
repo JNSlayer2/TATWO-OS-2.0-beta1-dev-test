@@ -29,6 +29,7 @@ struct ChatPage: View {
     @State var tabDesignPhilosophyHoverGeneration = 0
     @State var tabDesignPhilosophyCloseWorkItem: DispatchWorkItem?
     @State var isChatProjectRailHovering = false
+    @State var chatProjectPointerInside = false
     /// 2026-08-23 使用者：終端縮小後要有展開鈕才能回去（460 ⇄ 全高）。
     @State var expandedCLITabIDs: Set<UUID> = []
     // 2026-08-23 三分頁一致化：左列常駐改 AppStorage 三頁共用（Dia 收合鈕）；
@@ -196,15 +197,15 @@ struct ChatPage: View {
                     : baseRightPanelLayout
                 let chatCanvasWidth = rightPanelLayout.mainContentWidth
                 // All workspace modes reserve the same shared sidebar width.
-                let sidebarWidth =
-                    model.mode == .browser && browserWorkSpaceStore.focusMode ? WorkspaceSidebarMetrics.browserFocusWidth : ChatSidebarLayoutPolicy.width(for: layoutWidth)
+                let sidebarWidth = ChatSidebarLayoutPolicy.width(for: layoutWidth)
                 let workspaceOwnsSidebar = model.mode == .bot
                 let showSidebar = (isChatProjectRailPinned || model.mode == .browser) && !workspaceOwnsSidebar && !isPanel
                     && (model.mode != .browser || ChatRunMode.browserPreviewEnabled)
+                    && (model.mode != .browser || !browserWorkSpaceStore.focusMode)
                 let showChatProjectHoverRail =
                     rightPanelLayout.showsMainContent
                     && !workspaceOwnsSidebar
-                    && model.mode != .browser
+                    && (model.mode != .browser || ChatRunMode.browserPreviewEnabled)
                     && !isPanel
                     // Gate the hover rail on the full window width, not the
                     // right-panel-reduced canvas: selecting a thread from the
@@ -217,8 +218,8 @@ struct ChatPage: View {
                     layoutWidth: chatCanvasWidth,
                     railPinned: showSidebar,
                     sidebarVisible: showSidebar)
-                let leadingReserve: CGFloat = (isPanel || workspaceOwnsSidebar) ? 0 : layoutPolicy.leadingReserve
-                let trailingReserve: CGFloat = (isPanel || workspaceOwnsSidebar) ? 0 : layoutPolicy.trailingReserve
+                let leadingReserve: CGFloat = (isPanel || workspaceOwnsSidebar || model.mode == .browser) ? 0 : layoutPolicy.leadingReserve
+                let trailingReserve: CGFloat = (isPanel || workspaceOwnsSidebar || model.mode == .browser) ? 0 : layoutPolicy.trailingReserve
                 let sidebarContentGap = model.mode == .browser ? WorkspaceSidebarMetrics.browserContentGap : WorkspaceSidebarMetrics.contentGap
                 let mainAvailableWidth = max(
                     320,
@@ -274,7 +275,7 @@ struct ChatPage: View {
                         // 資訊卡/瀏覽器/檔案：對齊 Codex chrome 頂右單一列（#50/#51）；上移到 band 高度內，與交通燈同水平。
                         // 2026-09-02 使用者：常駐鈕、資訊卡、工具箱三顆一起放在頂右、紅綠燈基準線。
                         .overlay(alignment: .topTrailing) {
-                            if !isPanel {
+                            if !isPanel && model.mode != .browser {
                                 rightPanelControlStrip(showsThreadControls: hasThreadInfo)
                                     .padding(.trailing, 14)
                                     .offset(y: -WindowChromeMetrics.chromeRowLift)
@@ -532,9 +533,16 @@ struct ChatPage: View {
             }
         }
         .onChange(of: model.mode) { _, newMode in
+            resetChatProjectHover()
             if newMode == .cli, model.isCLIRuntimeEnabled {
                 model.ensureNativeTerminal()
             }
+        }
+        .onChange(of: browserWorkSpaceStore.focusMode) { _, _ in
+            resetChatProjectHover()
+        }
+        .onChange(of: browserWorkSpaceStore.sidebarInteractionActive) { _, active in
+            if !active { updateChatProjectHover(chatProjectPointerInside) }
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .tatwoChatSelectMode)
@@ -588,6 +596,7 @@ struct ChatPage: View {
             }
         }
         .onDisappear {
+            resetChatProjectHover()
             if let newChatCommandRegistrationID {
                 TatwoNewChatCommandCenter.shared.unregister(
                     newChatCommandRegistrationID)

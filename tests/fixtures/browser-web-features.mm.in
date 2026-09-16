@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #define CEF_REQUIRE_UI_THREAD() assert(NSThread.isMainThread)
 using CefString = std::string;
 template<class T> using CefRefPtr = T*;
@@ -36,15 +39,31 @@ class CefFileDialogCallback {
   void Cancel() { ++canceled; }
   void Continue(const std::vector<CefString> &paths) { ++continued; selected = paths; }
 };
+class CefDownloadItem {
+ public:
+  uint32_t id=7;
+  bool complete=false, canceled=false, interrupted=false, valid=true;
+  std::string original="https://example.test/document?id=pdf", path;
+  bool IsValid() { return valid; }
+  bool IsComplete() { return complete; }
+  bool IsCanceled() { return canceled; }
+  bool IsInterrupted() { return interrupted; }
+  uint32_t GetId() { return id; }
+  CefString GetOriginalUrl() { return original; }
+  CefString GetFullPath() { return path; }
+};
 class TatwoClient {
  public:
   TatwoCEFBrowserView *owner_;
   CefFileDialogCallback *file_dialog_callback_ = nullptr;
-  uint64_t web_features_serial_ = 0, file_dialog_serial_ = 0;
+  uint64_t web_features_serial_ = 0, file_dialog_serial_ = 0, pdf_download_request_serial_ = 0;
   bool pdf_print_pending_ = false;
   NSString *pdf_download_url_, *pdf_download_path_;
+  uint32_t pdf_download_id_=0;
   void (^pdf_download_completion_)(NSString *) = nil;
   void W57dCancel();
+  void W57dFinishPDFDownload(NSString*);
+  void W57dDownloadUpdate(CefDownloadItem*);
   bool OnFileDialog(CefBrowser *, FileDialogMode, const CefString &, const CefString &,
     const std::vector<CefString> &, const std::vector<CefString> &,
     const std::vector<CefString> &, CefFileDialogCallback *);
@@ -53,6 +72,7 @@ class TatwoClient {
 // INSERT current
 // INSERT cancel
 // INSERT dialog
+// INSERT pdfDownload
 
 int main() { @autoreleasepool {
   const std::string ua = W57dUserAgent();
@@ -134,5 +154,47 @@ int main() { @autoreleasepool {
   view.onFileDialog = nil;
   CefFileDialogCallback missing;
   assert(request(missing) && missing.canceled == 1);
+  // Actual production completion methods handle failures before destination
+  // selection, duplicate terminal events and callback reentrancy exactly once.
+  CefDownloadItem download;
+  int pdfReplies=0;
+  int *replyCount=&pdfReplies;
+  TatwoClient *active=&client;
+  auto beginPDF = [&] {
+    client.pdf_download_url_=FromCefString(download.original);
+    client.pdf_download_completion_=^(NSString *path) { assert(path==nil); ++*replyCount; };
+  };
+  beginPDF();
+  client.W57dDownloadUpdate(&download); // Pending is not a failure.
+  assert(pdfReplies==0 && client.pdf_download_completion_);
+  CefDownloadItem unrelated; unrelated.original="https://example.test/unrelated"; unrelated.interrupted=true;
+  client.W57dDownloadUpdate(&unrelated);
+  assert(pdfReplies==0 && client.pdf_download_completion_);
+  download.interrupted=true;
+  client.W57dDownloadUpdate(&download);
+  client.W57dDownloadUpdate(&download);
+  assert(pdfReplies==1 && !client.pdf_download_completion_ && !client.pdf_download_url_);
+  beginPDF();
+  client.W57dFinishPDFDownload(nil); // Destination reservation failed.
+  client.W57dFinishPDFDownload(nil);
+  assert(pdfReplies==2 && !client.pdf_download_completion_);
+  beginPDF();
+  client.pdf_download_completion_=^(NSString *path) {
+    assert(path==nil); ++*replyCount;
+    // Reentrant action may safely start another job after old state is consumed.
+    active->pdf_download_completion_=^(NSString*) { ++*replyCount; };
+    active->pdf_download_url_=@"https://example.test/retry";
+  };
+  client.W57dFinishPDFDownload(nil);
+  assert(pdfReplies==3 && [client.pdf_download_url_ isEqualToString:@"https://example.test/retry"]);
+  client.W57dFinishPDFDownload(nil);
+  assert(pdfReplies==4);
+  beginPDF(); client.pdf_download_path_=@"/fixture/reserved.pdf"; client.pdf_download_id_=7;
+  unrelated.id=8; unrelated.original=download.original;
+  client.W57dDownloadUpdate(&unrelated);
+  assert(pdfReplies==4 && client.pdf_download_completion_);
+  client.W57dDownloadUpdate(&download);
+  assert(pdfReplies==5 && !client.pdf_download_completion_);
+  puts("W57d PDF failure fixture passed: early failure/destination failure/duplicates/reentrancy/exact item");
   puts("W57d UA and dialog fixture passed: agent/hidden/missing/revoked/duplicate/multiple/folder/save");
 } }

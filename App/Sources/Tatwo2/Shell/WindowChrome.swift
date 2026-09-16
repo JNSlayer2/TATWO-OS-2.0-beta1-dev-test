@@ -11,7 +11,7 @@ enum WindowChromeMetrics {
     static let nativeTrafficLightSpacing: CGFloat = 9
     static let headerHorizontalInset: CGFloat = 10
     /// Chat 頁內的三顆頂列控制（常駐鈕／資訊卡／工具組）從 safe area 抬進
-    /// band，讓 26pt 高的鈕垂直置中於紅綠燈（top 16 + 14/2 = 23）。
+    /// band，讓 26pt 高的鈕垂直置中於紅綠燈。
     static let chromeRowLift: CGFloat = bandHeight - (trafficLightTopInset + nativeTrafficLightDiameter / 2 - 13)
     static let controlSpacing: CGFloat = 8
 
@@ -91,13 +91,12 @@ extension TatwoWorkOSWindow {
             guard let button = standardWindowButton(type),
                   let container = button.superview
             else { continue }
-            button.setFrameOrigin(
-                WindowChromeMetrics.trafficLightOrigin(
-                    index: index,
-                    buttonSize: button.frame.size,
-                    containerHeight: container.bounds.height
-                )
+            let origin = WindowChromeMetrics.trafficLightOrigin(
+                index: index,
+                buttonSize: button.frame.size,
+                containerHeight: container.bounds.height
             )
+            if button.frame.origin != origin { button.setFrameOrigin(origin) }
         }
     }
 }

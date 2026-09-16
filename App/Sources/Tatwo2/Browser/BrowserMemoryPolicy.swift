@@ -35,9 +35,10 @@ enum BrowserMemoryPolicy {
     /// Stable tie-breaks make simultaneous opens deterministic. Every mounted
     /// surface's selected tab is protected, not just the last focused window.
     static func sleepCandidates(tabs: [Tab], selected: Set<UUID>, limit: Int?,
+                                protected: Set<UUID> = [],
                                 pressure: BrowserMemoryPressure = .normal) -> [UUID] {
         let awake = tabs.filter { !$0.isSleeping }
-        let candidates = awake.filter { !selected.contains($0.id) }.sorted {
+        let candidates = awake.filter { !selected.contains($0.id) && !protected.contains($0.id) }.sorted {
             $0.lastActiveAt == $1.lastActiveAt
                 ? $0.id.uuidString < $1.id.uuidString : $0.lastActiveAt < $1.lastActiveAt
         }

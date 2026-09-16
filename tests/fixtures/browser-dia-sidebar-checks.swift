@@ -1,6 +1,23 @@
 @main struct W66SidebarChecks {
     @MainActor static func main() throws {
         let storage = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("registry.json")
+        do {
+            let blankRegistry = BrowserTabRegistry(storageURL: storage.appendingPathExtension("startpage"))
+            let blankStore = BrowserWorkSpaceStore(registry: blankRegistry)
+            precondition(blankStore.showsStartPage, "empty space has centered search")
+            blankStore.addTab()
+            let id = blankStore.selectedRegistryID
+            precondition(id != nil && blankStore.showsStartPage, "new nil-URL tab has centered search")
+            let url = URL(string: "https://example.com/search")!
+            blankStore.navigateFromStartPage(to: url)
+            precondition(blankStore.selectedRegistryID == id && blankRegistry.tabs.count == 1,
+                         "start page navigates the existing tab, not a duplicate")
+            precondition(!blankStore.showsStartPage && blankStore.selectedTab.url == url.absoluteString)
+            blankStore.addTab(url: URL(string: "about:blank"))
+            precondition(blankStore.showsStartPage, "restored about:blank also shows centered search")
+            blankStore.selectSpace(blankStore.spaces.first { $0.isSessionSpace }!.id)
+            precondition(!blankStore.showsStartPage, "session space never becomes a new-tab page")
+        }
         let registry = BrowserTabRegistry(storageURL: storage)
         let store = BrowserWorkSpaceStore(registry: registry)
         let otherWindow = BrowserWorkSpaceStore(registry: registry)
@@ -14,6 +31,12 @@
         store.focusMode = true
         precondition(store.focusMode, "unpinning restores collapse")
         store.focusMode = false
+        for _ in 0..<3 {
+            store.toggleSidebar()
+            precondition(store.focusMode && !store.sidebarPinned, "explicit close fully collapses")
+            store.toggleSidebar()
+            precondition(!store.focusMode && store.sidebarPinned, "explicit open also pins")
+        }
         let space = registry.spaces.first { !$0.isSessionSpace }!
         let owner = BrowserTabOwner.workSpace(spaceID: space.id)
         let folder = store.folders[0].id

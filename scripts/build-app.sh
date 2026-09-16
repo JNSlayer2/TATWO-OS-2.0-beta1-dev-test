@@ -94,6 +94,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>TatwoBrowserWorkspaceEnabled</key><true/>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>內建瀏覽器可能使用藍牙偵測附近裝置或處理通行密鑰登入。你可以拒絕藍牙存取，並繼續一般網頁瀏覽。</string>
+  <key>NSCameraUsageDescription</key><string>只有在你允許網站使用相機時，內建瀏覽器才會要求相機存取，例如視訊通話。</string>
+  <key>NSMicrophoneUsageDescription</key><string>只有在你允許網站使用麥克風時，內建瀏覽器才會要求麥克風存取，例如語音或視訊通話。</string>
+  <key>NSLocalNetworkUsageDescription</key><string>只有在你允許連線時，內建瀏覽器才會存取本機或區域網路網站。</string>
   <key>NSPrincipalClass</key><string>TatwoCEFApplication</string>
   <key>TatwoBrowserEngine</key><string>chromium-cef</string>
 </dict></plist>

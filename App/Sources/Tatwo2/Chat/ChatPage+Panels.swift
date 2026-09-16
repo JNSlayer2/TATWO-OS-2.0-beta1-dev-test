@@ -39,6 +39,7 @@ extension ChatPage {
                 if ChatRunMode.browserPreviewEnabled {
                     BrowserWorkSpaceDesignView(store: browserWorkSpaceStore)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea(.container, edges: .top)
                         .modifier(BrowserWorkSpaceLifecycleModifier(store: browserWorkSpaceStore, registry: model.browserTabRegistry, isWindow: surface == .window))
                 } else {
                     // Fail closed even for a stale selection or mode notification.

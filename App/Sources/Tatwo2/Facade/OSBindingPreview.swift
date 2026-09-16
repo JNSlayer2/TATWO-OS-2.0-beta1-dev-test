@@ -33,8 +33,8 @@ struct OSBindingWriteReport {
     var backups: [String] = []
     var failure: String?
     var text: String {
-        "已寫入：\n" + modified.joined(separator: "\n") + "\n備份：\n" + backups.joined(separator: "\n") +
-        "\n" + (failure.map { "已停止：" + $0 } ?? "讀回 hash 驗證完成")
+        let status = failure.map { "已停止：" + $0 } ?? "讀回 hash 驗證完成"
+        return "已寫入：\n\(modified.joined(separator: "\n"))\n備份：\n\(backups.joined(separator: "\n"))\n\(status)"
     }
 }
 

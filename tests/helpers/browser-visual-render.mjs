@@ -22,6 +22,18 @@ import SwiftUI
             onSubmit: {}, onCommand: { _ in })
     }
 }
+@MainActor struct W54SidebarFixture: View {
+    @ObservedObject var store: BrowserWorkSpaceStore
+    var body: some View {
+        HStack(spacing: 0) {
+            if !store.focusMode { ChatPage(store: store).frame(width: WorkspaceSidebarMetrics.width) }
+            VStack(spacing: 0) {
+                HStack { BrowserSidebarControls(store: store); Spacer() }.frame(height: BrowserOmniboxMetrics.collapsedHeight)
+                Color.clear
+            }
+        }
+    }
+}
 @MainActor struct W54DownloadsFixture: View {
     @State private var downloadQuery = ""
     @State private var downloadsContentHeight = BrowserSidebarMetrics.zero
@@ -68,11 +80,11 @@ import SwiftUI
     @MainActor static func checkSidebar(root: URL, dark: Bool) throws {
         let registry = BrowserTabRegistry()
         let store = BrowserWorkSpaceStore(registry: registry)
-        let host = NSHostingView(rootView: ChatPage(store: store)
-            .frame(width: 250, height: 520, alignment: .topLeading)
+        let host = NSHostingView(rootView: W54SidebarFixture(store: store)
+            .frame(width: 600, height: 520, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, dark ? .dark : .light))
-        let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 250, height: 520),
+        let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 600, height: 520),
             styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -84,7 +96,7 @@ import SwiftUI
             host.layoutSubtreeIfNeeded()
         }
         func click(_ x: CGFloat) {
-            let top = WindowChromeMetrics.trafficLightTopInset + WindowChromeMetrics.nativeTrafficLightDiameter / 2
+            let top = BrowserOmniboxMetrics.collapsedHeight / 2
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 let event = NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: 520 - top),
                     modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
@@ -101,24 +113,17 @@ import SwiftUI
                 .write(to: root.appendingPathComponent("sidebar-header-\(dark ? "dark" : "light")-\(state).png"))
         }
         settle()
-        let origin = WindowChromeMetrics.appControlLeadingX
-        let toggle = origin + WorkspaceSidebarMetrics.spaceSwitcherMenuWidth
-            + WorkspaceSidebarMetrics.sidebarControlGap + WorkspaceSidebarMetrics.sidebarControlSize / 2
-        let pin = toggle + WorkspaceSidebarMetrics.sidebarControlGap + WorkspaceSidebarMetrics.sidebarControlSize
-        precondition(pin + WorkspaceSidebarMetrics.sidebarControlSize / 2 <= WorkspaceSidebarMetrics.width)
+        let buttonCenter = BrowserOmniboxMetrics.collapsedHeight / 2
         try snapshot("expanded")
-        click(toggle)
-        precondition(store.focusMode, "real collapse button must receive the title-band click")
+        click(WorkspaceSidebarMetrics.width + buttonCenter)
+        precondition(store.focusMode && !store.sidebarPinned, "single button collapses fully")
         try snapshot("collapsed")
-        click(origin + WorkspaceSidebarMetrics.sidebarControlSize / 2)
-        precondition(!store.focusMode, "collapsed sidebar must have a clickable expand button")
-        click(pin)
-        precondition(store.sidebarPinned && !store.focusMode, "pin click must pin the sidebar")
-        click(toggle)
-        precondition(!store.focusMode, "disabled collapse button must not collapse pinned sidebar")
-        click(pin)
-        precondition(!store.sidebarPinned, "unpin click must work")
-        print("W66 NATIVE HEADER PASS \(dark ? "dark" : "light"): collapse, expand, pin, disabled collapse, unpin")
+        click(buttonCenter)
+        precondition(!store.focusMode && store.sidebarPinned, "same button opens and pins")
+        try snapshot("reopened")
+        click(WorkspaceSidebarMetrics.width + buttonCenter)
+        precondition(store.focusMode && !store.sidebarPinned, "explicit close also unpins")
+        print("NATIVE SIDEBAR PASS \(dark ? "dark" : "light"): collapse, expand+pin, unpin+collapse")
     }
     @MainActor static func render<V: View>(_ view: V, shot shotName: String, size: NSSize, dark: Bool = false, root: URL) throws {
         let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height, alignment: .top).background(LiquidGlassTokens.browserGroundFill))

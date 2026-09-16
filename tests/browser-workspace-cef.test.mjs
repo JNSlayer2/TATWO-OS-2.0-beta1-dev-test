@@ -77,7 +77,7 @@ test('workspace mounts actual human CEF only after access; keeps one persistent 
 });
 
 test('W57e map is mounted in Browser; no hard-coded W/L/R/T in other branches', () => {
-  const content = design.slice(design.indexOf('private var browserContent:'), design.indexOf('private var extensionStrip:'));
+  const content = design.slice(design.indexOf('var body: some View'), design.indexOf('private var sessionContent:'));
   // W57e mounts the map at the same Browser scope; it no longer hard-codes W/L/R/T.
   assert.match(content, /BrowserDailyNavigationControls\(/);
   assert.doesNotMatch(design, /keyboardShortcut\("[twlr]"/);

@@ -42,6 +42,7 @@ test('W60 actual registry and lease registry: 30 opens, 200 switches, 20 closes,
     backend.indexOf('struct EmbeddedChromiumBrowserView:'));
   assert.ok(hostClose.includes('closingCount -= 1'));
   const output = fixture('registry', `import Foundation
+import AppKit
 ${errors}
 struct TatwoCEFProfileStore {
   func profileURL(for id: UUID) throws -> URL { fatalError("not a maintenance test") }
@@ -72,6 +73,11 @@ ${leases}
  func finish() { let callback = completion; completion = nil; callback?() }
 }
 @MainActor final class HostCloseFixture {
+ struct HumanInputMonitor: @unchecked Sendable {
+   let token: Any
+   @MainActor func remove() { NSEvent.removeMonitor(token) }
+ }
+ var humanInputMonitor: HumanInputMonitor?
  struct Entry { let container: ClosingContainer; var memorySlot: UUID? = nil }
  var entries: [String:Entry] = [:]
  var closingCount = 0
@@ -253,7 +259,8 @@ test('W60 quiet UI and lifetime boundaries stay wired to production', () => {
   assert.match(show, /entry\.container\.isHidden = hidden/);
   assert.doesNotMatch(show, /init\(|closeTab\(|removeFromSuperview/);
   assert.match(backend, /entries\.removeValue\(forKey: tabID\)/);
-  assert.match(backend, /closingBrowser\.closeBrowser \{/);
+  assert.match(backend, /closingBrowser\.closeBrowser\(completion: finish\)/);
+  assert.match(backend, /closingLifetime\.close\(completion: finish\)/);
   assert.match(backend, /private func finishClose[\s\S]*TatwoCEFProfileLeaseRegistry\.shared\.release\(lease\)/);
   assert.match(bridge, /launchMeaning=attempt_not_restart/);
   assert.doesNotMatch(bridge, /restartCount=%llu|phase=message_pump_loading_fallback|constexpr uint64_t interval = \(1000 \/ 30\)/);

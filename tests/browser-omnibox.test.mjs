@@ -13,19 +13,21 @@ const policy = read('Browser/BrowserOmniboxInteraction.swift');
 const glass = read('Browser/BrowserOmniboxGlass.swift');
 const tokens = read('Visual/LiquidGlassTokens.swift');
 const workspace = read('Browser/BrowserWorkSpaceDesignView.swift');
-const content = workspace.split('private var browserContent: some View {')[1].split('private func performBrowserAction')[0];
+const content = workspace.split('private var workspaceToolbar: some View {')[1].split('private func performBrowserAction')[0];
 const value = name => Number(metrics.match(new RegExp(`static let ${name}: CGFloat = ([\\d.]+)`))?.[1]);
 
-test('W67 collapsed and expanded geometry is tokenized and no longer pushes the page down', () => {
-  assert.equal(value('collapsedHeight'), 24);
+test('W67 Dia toolbar reserves layout height so native page cannot overlap controls', () => {
+  assert.equal(value('collapsedHeight'), 32);
+  assert.equal(value('toolbarHeight'), 48);
   assert.ok(value('collapsedHeight') < value('expandedFieldHeight'));
   assert.ok(value('expandedFieldHeight') < value('panelMinimumHeight'));
   assert.ok(value('panelMaximumWidth') <= 560);
   for (const key of ['collapsedHeight', 'expandedFieldHeight', 'panelMinimumHeight', 'panelMaximumWidth']) {
     assert.ok(toolbar.includes(`BrowserOmniboxMetrics.${key}`));
   }
-  assert.match(content, /BrowserWorkSpaceCEFSurface[\s\S]*?\.overlay\(alignment: \.top\)/);
-  assert.match(toolbar, /\.overlay\(alignment: \.top\) \{\s*if isExpanded \{/);
+  assert.match(workspace, /VStack\(spacing: BrowserOmniboxMetrics.zero\) \{\s*workspaceToolbar/);
+  assert.doesNotMatch(content, /BrowserWorkSpaceCEFSurface[\s\S]*?\.overlay\(alignment: \.top\)/);
+  assert.match(toolbar, /\.overlay\(alignment: \.top\) \{\s*if showsAddress && isExpanded \{/);
   assert.match(toolbar, /CGFloat\(choices.count\) \* BrowserOmniboxMetrics.suggestionRowHeight/);
   assert.match(toolbar, /panelMinimumHeight\)\s*\.fixedSize\(horizontal: false, vertical: true\)/);
   for (const source of [toolbar, content, glass]) {
@@ -84,7 +86,8 @@ test('W67 preserves identifier, dynamic binding notifications, open-tab callback
   assert.match(toolbar, /publisher\(for: BrowserShortcutMap.changed\)/);
   assert.match(toolbar, /onChange\(of: expansionRequest.wrappedValue, initial: true\)/);
   for (const parent of [workspace, read('Browser/EmbeddedBrowserView.swift')]) {
-    assert.match(parent, /case \.focusAddressBar: addressExpansionRequested = true/);
+    assert.match(parent, /case \.focusAddressBar: (?:store.searchFocusRequest \+= 1|addressFocusRequest &\+= 1)/);
+    assert.match(parent, /task\(id: (?:store.searchFocusRequest|addressFocusRequest)\)[\s\S]*?addressExpansionRequested = true/);
     assert.match(parent, /expansionRequest: \$addressExpansionRequested/);
   }
   assert.doesNotMatch(toolbar, /Text\("⌘L|keyboardShortcut/);
@@ -94,7 +97,7 @@ test('W67 preserves identifier, dynamic binding notifications, open-tab callback
   assert.match(toolbar, /animation\(reduceMotion \? nil/);
   assert.match(toolbar, /transition\(reduceMotion \? \.identity/);
   assert.match(content, /Menu \{[\s\S]*?accessibilityLabel\("瀏覽器功能"\)/);
-  assert.match(content, /Button\("註解"\)[\s\S]*?\.fixedSize\(\)/);
+  assert.match(content, /accessibilityLabel\("註解"\)\.fixedSize\(\)/);
   assert.match(read('Browser/EmbeddedBrowserView.swift'), /\.zIndex\(BrowserOmniboxMetrics.chromeZIndex\)\s*BrowserNavigationProgress/);
 });
 

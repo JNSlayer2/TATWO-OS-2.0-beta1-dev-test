@@ -107,6 +107,7 @@ struct ChatNativeGoal: Codable, Equatable { var value: String }
 struct TatwoIssueListEntryV1: Codable, Equatable { var body: String }
 enum TatwoPermissionPreset: String, Codable { case fullAccess }
 struct TatwoGitHubRepoBinding: Sendable, Equatable, Hashable { var url: String }
+enum BotLibraryError: Error { case invalid(String) }
 enum ThreadLiveness {
     static func from(status: String?, lastOutputAt: Date?) -> String? { status }
 }

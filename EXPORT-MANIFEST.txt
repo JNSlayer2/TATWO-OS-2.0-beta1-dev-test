@@ -1,6 +1,6 @@
-Source commit: 35f102534d553906214228f9770cc2372294811b
+Source commit: 8782d62568054e7cb9eaa46caa2cc9379254b946
 Source worktree: clean
-Files: 1580
+Files: 1603
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -22,9 +22,12 @@ App/Sources/Tatwo2/Browser/BrowserDailyNavigationControls.swift
 App/Sources/Tatwo2/Browser/BrowserDailyNavigationPolicy.swift
 App/Sources/Tatwo2/Browser/BrowserDefaultBrowserRow.swift
 App/Sources/Tatwo2/Browser/BrowserDownloadStore.swift
+App/Sources/Tatwo2/Browser/BrowserExtensionsView.swift
+App/Sources/Tatwo2/Browser/BrowserExternalLoginPolicy.swift
 App/Sources/Tatwo2/Browser/BrowserExternalURLQueue.swift
 App/Sources/Tatwo2/Browser/BrowserGeneralSettings.swift
 App/Sources/Tatwo2/Browser/BrowserHumanInteraction.swift
+App/Sources/Tatwo2/Browser/BrowserLoginHelpView.swift
 App/Sources/Tatwo2/Browser/BrowserManagementView.swift
 App/Sources/Tatwo2/Browser/BrowserManagementViewModel.swift
 App/Sources/Tatwo2/Browser/BrowserMemoryPolicy.swift
@@ -39,6 +42,7 @@ App/Sources/Tatwo2/Browser/BrowserOmniboxMetrics.swift
 App/Sources/Tatwo2/Browser/BrowserPasswordAssist.swift
 App/Sources/Tatwo2/Browser/BrowserPasswordVault.swift
 App/Sources/Tatwo2/Browser/BrowserPasswordsSettingsView.swift
+App/Sources/Tatwo2/Browser/BrowserPopupFeatures.swift
 App/Sources/Tatwo2/Browser/BrowserSettingsComponents.swift
 App/Sources/Tatwo2/Browser/BrowserSettingsMetrics.swift
 App/Sources/Tatwo2/Browser/BrowserShortcuts.swift
@@ -365,9 +369,11 @@ App/Sources/Tatwo2/Shell/AppShell.swift
 App/Sources/Tatwo2/Shell/ChatPageSettings.swift
 App/Sources/Tatwo2/Shell/ChatPageStyleModifiers.swift
 App/Sources/Tatwo2/Shell/LiquidGlassDashboardSource.swift
+App/Sources/Tatwo2/Shell/ProviderIconResources.swift
 App/Sources/Tatwo2/Shell/SharedComponents.swift
 App/Sources/Tatwo2/Shell/TatwoIslandShell.swift
 App/Sources/Tatwo2/Shell/TatwoM3PrototypeViews.swift
+App/Sources/Tatwo2/Shell/TatwoTerminationCoordinator.swift
 App/Sources/Tatwo2/Shell/TatwoThemeEngine.swift
 App/Sources/Tatwo2/Shell/TatwoWindowGlassBase.swift
 App/Sources/Tatwo2/Shell/WindowChrome.swift
@@ -406,6 +412,7 @@ App/Tests/Tatwo2Tests/ComputerUseSessionTests.swift
 App/Tests/Tatwo2Tests/FeedbackTargetTests.swift
 App/Tests/Tatwo2Tests/GitHubLoginParsingTests.swift
 App/Tests/Tatwo2Tests/NativeStagingIsolationTests.swift
+App/Tests/Tatwo2Tests/ProviderIconResourcesTests.swift
 App/Tests/Tatwo2Tests/PullRequestServiceTests.swift
 App/Tests/Tatwo2Tests/ReleaseVersionCompareTests.swift
 App/Tests/Tatwo2Tests/SpaceNativeRailTests.swift
@@ -422,6 +429,7 @@ Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoBrowserStagingLoopback.h
 Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridge.mm
 Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridgeUnavailable.m
 Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/include/TatwoCEFBridge.h
+Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/include/TatwoDownloadReservation.h
 Apps/TatwoUltraworkMac/Sources/TatwoCEFHelper/main.swift
 Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/AppAuthorityBootstrap.swift
 Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/AppShell.swift
@@ -1389,19 +1397,30 @@ tests/browser-ai-vault.test.mjs
 tests/browser-chat-panel.test.mjs
 tests/browser-daily-nav.test.mjs
 tests/browser-default-browser.test.mjs
+tests/browser-dia-chrome.test.mjs
 tests/browser-dia-sidebar.test.mjs
 tests/browser-diagnostics.test.mjs
+tests/browser-download-permissions-repair.test.mjs
+tests/browser-focus-scope-repair.test.mjs
+tests/browser-hover-sidebar.test.mjs
 tests/browser-import.test.mjs
 tests/browser-loading-state.test.mjs
 tests/browser-mcp-metadata.test.mjs
 tests/browser-memory-policy.test.mjs
+tests/browser-multiple-download-permission.test.mjs
 tests/browser-native-input.test.mjs
+tests/browser-native-lifetime-pump.test.mjs
 tests/browser-native-tabs.test.mjs
 tests/browser-navigation-presentation.test.mjs
 tests/browser-omnibox.test.mjs
 tests/browser-password-fill.test.mjs
 tests/browser-password-vault.test.mjs
+tests/browser-popup-close-drain.test.mjs
+tests/browser-popup-features.test.mjs
+tests/browser-private-network-retry.test.mjs
+tests/browser-repaired-actions.test.mjs
 tests/browser-resource-block.test.mjs
+tests/browser-retained-document-input.test.mjs
 tests/browser-session-space.test.mjs
 tests/browser-settings.test.mjs
 tests/browser-shortcuts.test.mjs
@@ -1411,6 +1430,7 @@ tests/browser-socket-recovery.test.mjs
 tests/browser-startup-pump.test.mjs
 tests/browser-stress.test.mjs
 tests/browser-tab-registry.test.mjs
+tests/browser-termination-repair.test.mjs
 tests/browser-visual-tokens.test.mjs
 tests/browser-web-features.test.mjs
 tests/browser-workspace-cef.test.mjs
@@ -1430,6 +1450,8 @@ tests/fixtures/browser-actor-recovery.mm.in
 tests/fixtures/browser-ai-vault-checks.swift
 tests/fixtures/browser-ai-vault-dependencies.swift
 tests/fixtures/browser-dia-sidebar-checks.swift
+tests/fixtures/browser-download-permissions-checks.swift
+tests/fixtures/browser-download-reservation-checks.cc
 tests/fixtures/browser-import-checks.swift
 tests/fixtures/browser-password-fill-checks.swift
 tests/fixtures/browser-password-vault-checks.swift
@@ -1437,6 +1459,7 @@ tests/fixtures/browser-pump-probe.mm.in
 tests/fixtures/browser-resource-block.mm.in
 tests/fixtures/browser-socket-recovery.swift.in
 tests/fixtures/browser-tab-registry-checks.swift
+tests/fixtures/browser-termination-checks.swift
 tests/fixtures/browser-web-features-checks.swift
 tests/fixtures/browser-web-features.mm.in
 tests/fixtures/browser-workspace-runtime-stubs.swift

@@ -2392,7 +2392,8 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
             "close and runtime shutdown must both stop the fresh generation")
 
         let source = try bridgeSource()
-        // W60 keeps lifecycle calls for close fencing but removes both fixed cadences.
+        // One runtime continuation covers IPC after load end. Documents must
+        // not create independent polling timers or trigger navigation retries.
         XCTAssertFalse(source.contains("phase=message_pump_loading_fallback"))
         XCTAssertFalse(source.contains("ArmLoadingActiveMessagePumpTimer"))
         XCTAssertTrue(source.contains("phase=message_pump_overdue event=recover"))
@@ -2416,8 +2417,8 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
         let fallbackBody = String(
             source[fallback.lowerBound..<closeDriver.lowerBound])
         XCTAssertTrue(fallbackBody.contains("IsActiveMountCallback"))
+        XCTAssertTrue(fallbackBody.contains("ArmCEFMessagePumpContinuation()"))
         XCTAssertFalse(fallbackBody.contains("timerWithTimeInterval"))
-        XCTAssertFalse(fallbackBody.contains("RunCEFMessagePumpWorkOnMainThread()"))
         XCTAssertFalse(fallbackBody.contains("Reload()"))
         XCTAssertFalse(fallbackBody.contains("LoadURL("))
         XCTAssertFalse(fallbackBody.contains("while ("))
@@ -2935,10 +2936,10 @@ final class ChromiumCEFSecurityPolicyTests: XCTestCase {
         let closeRetryBody = String(
             source[closeRetryStart.lowerBound..<closeRetryEnd.lowerBound])
         XCTAssertTrue(closeRetryBody.contains(
-            "pending_create_close_failed_closed"))
-        XCTAssertTrue(closeRetryBody.contains(
+            "pending_create_close_waiting_for_native"))
+        XCTAssertFalse(closeRetryBody.contains(
             "retry_state->client->AbandonPendingCreation()"))
-        XCTAssertTrue(closeRetryBody.contains(
+        XCTAssertFalse(closeRetryBody.contains(
             "CompleteBrowserClose(retry_view, retry_state)"))
 
         XCTAssertTrue(afterCreatedBody.contains(

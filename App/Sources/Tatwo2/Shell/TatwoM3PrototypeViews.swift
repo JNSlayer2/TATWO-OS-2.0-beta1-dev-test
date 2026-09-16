@@ -432,8 +432,7 @@ enum ProviderSVGIconLoader {
     static func image(for providerID: String) -> NSImage? {
         // 從安裝包讀圖示；缺檔時由呼叫端顯示縮寫，不依賴開發機的 build 目錄。
         guard let fileName = fileNames[providerID],
-              let url = TatwoResources.url(forResource: fileName, withExtension: "svg")
-                ?? TatwoResources.url(forResource: fileName, withExtension: "svg", subdirectory: "ProviderIcons"),
+              let url = ProviderIconResources.url(for: fileName),
               let data = try? Data(contentsOf: url),
               let image = NSImage(data: data)
         else {

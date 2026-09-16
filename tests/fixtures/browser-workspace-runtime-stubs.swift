@@ -72,6 +72,8 @@ struct BrowserTab {
     var onTabPopupRequested: ((String, URL) -> Void)?
     var onIdle: (() -> Void)?
     var isIdle: Bool { nativeIDs.isEmpty }
+    var protectedTabIDs: Set<String> = []
+    func preventsAutomaticSleep(tabID: String) -> Bool { protectedTabIDs.contains(tabID) }
     func close() { nativeIDs = [:]; onIdle?() }
     var state: (String, EmbeddedBrowserNavigationState) -> Void
     var pendingState: (String, EmbeddedBrowserNavigationState)?

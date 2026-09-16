@@ -1,5 +1,6 @@
 #import "TatwoCEFBridge.h"
 #import "TatwoBrowserStagingLoopback.h"
+#include "TatwoDownloadReservation.h"
 
 #include <arpa/inet.h>
 #include <crt_externs.h>
@@ -131,7 +132,7 @@ std::atomic_bool g_initialized{false};
 // W60b: supplied by the same Swift policy as the browser admission budget.
 // Zero means no application override; Chromium still enforces its own model.
 std::atomic<int> g_renderer_process_limit{0};
-dispatch_source_t g_message_pump_idle_timer = nil;
+NSTimer *g_message_pump_idle_timer = nil;
 std::atomic_bool g_shutdown{false};
 std::atomic_bool g_shutdown_requested{false};
 std::atomic<uint64_t> g_message_pump_generation{0};
@@ -409,7 +410,9 @@ bool IsPrivateIPv4(NSString *host) {
       (first == 100 && second >= 64 && second <= 127) ||
       (first == 169 && second == 254) ||
       (first == 172 && second >= 16 && second <= 31) ||
-      (first == 192 && second == 0) ||
+      // IETF protocol assignments occupy 192.0.0.0/24, not all of
+      // 192.0.0.0/16 (which also contains public hosts such as iana.org).
+      (first == 192 && second == 0 && third == 0) ||
       (first == 192 && second == 168) ||
       (first == 198 && second >= 18 && second <= 19) ||
       (first == 192 && second == 0 && third == 2) ||
@@ -1144,6 +1147,25 @@ bool IsActorURLAllowed(const BrowserRequestPolicySnapshot &policy, NSString *url
   return ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) && CanonicalHost(url).length > 0;
 }
 
+// Chromium's bundled PDF viewer is a component extension, not a network host.
+// Its assets must not be sent through DNS/private-network consent. This does
+// not permit chrome: navigation, arbitrary extensions, file URLs or agent access.
+bool IsBuiltinPDFViewerURL(NSString *url) {
+  NSURLComponents *parts = SafeURLComponents(url);
+  return parts && !URLHasCredentials(url) && parts.port == nil &&
+      [parts.scheme.lowercaseString isEqualToString:@"chrome-extension"] &&
+      [parts.host.lowercaseString isEqualToString:@"mhjfbmdgcfjbbpaeojofohoefgiehjai"];
+}
+
+bool IsBuiltinPDFResource(bool human, NSString *url, NSString *initiator, bool main_frame) {
+  if (!human || main_frame || URLHasCredentials(url)) return false;
+  if (IsBuiltinPDFViewerURL(url)) return true;
+  NSURLComponents *parts = SafeURLComponents(url);
+  return IsBuiltinPDFViewerURL(initiator) && parts.port == nil &&
+      [parts.scheme.lowercaseString isEqualToString:@"chrome"] &&
+      ([parts.host isEqualToString:@"resources"] || [parts.host isEqualToString:@"strings"]);
+}
+
 bool IsDeniedByLocalHostList(
     const BrowserRequestPolicySnapshot &policy,
     NSString *url_string) {
@@ -1172,6 +1194,9 @@ struct ResourceErrorContext {
   uint64_t generation;
   uint64_t mount_generation;
 };
+
+void RememberPrivateNetworkRetry(TatwoCEFBrowserView *view,
+                                 ResourceErrorContext context, NSString *url);
 
 NSString *ResourceBlockMessage(const BrowserRequestPolicySnapshot &policy,
                                 NSString *url_string) {
@@ -2130,6 +2155,7 @@ void PublishMainFrameLoadEnd(TatwoCEFBrowserView *view,
                              int http_status_code);
 void PublishMainFrameCommit(TatwoCEFBrowserView *view,
                             const CefString &url);
+
 void InvalidateSecurityDocumentEpoch(TatwoCEFBrowserView *view,
                                      NSString *reason);
 bool HasVisibleSecurityError(TatwoCEFBrowserView *view);
@@ -2690,6 +2716,7 @@ bool QueueImmediateMessagePumpWork(
 }
 
 void ScheduleCEFMessagePumpWork(int64_t delay_ms);
+void ArmCEFMessagePumpContinuation();
 
 bool RunCEFMessagePumpWorkOnMainThread() {
   if (!g_initialized.load() || g_shutdown.load() ||
@@ -2731,6 +2758,10 @@ bool RunCEFMessagePumpWorkOnMainThread() {
     // main-queue delivery drains the deduplicated follow-up.
     ScheduleCEFMessagePumpWork(0);
   }
+  // CEF's external-pump example continues work even when the vendor does not
+  // issue another wake (renderer IPC, JS timers and downloads can be pending
+  // after a document's load-end). A document-loading timer cannot cover this.
+  if (result.did_run) ArmCEFMessagePumpContinuation();
   return result.did_run;
 }
 
@@ -2761,7 +2792,7 @@ void W60StartRuntimePumpProbe() {
 }
 #pragma mark - W60 End
 
-#pragma mark - W60 Scheduled pump (no loading or idle cadence)
+#pragma mark - External message pump
 // Main-queue owned, one replaceable vendor deadline. Immediate requests and
 // host kicks are independent; a newer positive delay cannot erase either.
 dispatch_source_t g_w60_vendor_timer = nil;
@@ -2775,13 +2806,33 @@ void W60CancelVendorTimers() {
   g_w60_overdue_timer = nil;
 }
 
+void ArmCEFMessagePumpContinuation() {
+  NSCAssert(NSThread.isMainThread, @"CEF continuation belongs to the main run loop");
+  [g_message_pump_idle_timer invalidate];
+  g_message_pump_idle_timer = nil;
+  if (!g_initialized.load() || g_shutdown.load() || g_shutdown_requested.load()) return;
+  // One one-shot timer for the runtime, matching CEF's external-pump maximum
+  // interval. Each work delivery replaces it; tabs never add their own cadence.
+  // Common modes keep native sheets, menus and tracking from starving CEF.
+  g_message_pump_idle_timer = [NSTimer timerWithTimeInterval:1.0 / 30.0
+      repeats:NO block:^(NSTimer *timer) {
+        if (g_message_pump_idle_timer != timer) return;
+        g_message_pump_idle_timer = nil;
+        RunCEFMessagePumpWorkOnMainThread();
+      }];
+  [[NSRunLoop mainRunLoop] addTimer:g_message_pump_idle_timer forMode:NSRunLoopCommonModes];
+  [[NSRunLoop mainRunLoop] addTimer:g_message_pump_idle_timer forMode:NSModalPanelRunLoopMode];
+}
+
 void StartCEFMessagePumpIdleTimer() {
   W60StartRuntimePumpProbe();
-  // Intentionally no idle timer. OnScheduleMessagePumpWork is authoritative.
+  ArmCEFMessagePumpContinuation();
 }
 
 void StopCEFMessagePumpIdleTimer() {
   NSCAssert(NSThread.isMainThread, @"CEF timer must stop on main thread");
+  [g_message_pump_idle_timer invalidate];
+  g_message_pump_idle_timer = nil;
   W60CancelVendorTimers();
 }
 
@@ -3595,6 +3646,76 @@ class W58AgentLoginRenderer {
   }
 };
 #pragma mark - W58 End
+constexpr const char *kBrowserActivityMessage = "tatwo.browser.activity";
+
+void SendBrowserActivity(CefRefPtr<CefFrame> frame, const CefString &token,
+                         const char *kind, bool dirty, bool playing) {
+  if (!frame || !frame->IsValid()) return;
+  auto message = CefProcessMessage::Create(kBrowserActivityMessage);
+  auto args = message->GetArgumentList();
+  args->SetString(0, token); args->SetString(1, kind);
+  args->SetBool(2, dirty); args->SetBool(3, playing);
+  frame->SendProcessMessage(PID_BROWSER, message);
+}
+
+class TatwoBrowserActivityBinding final : public CefV8Handler {
+ public:
+  TatwoBrowserActivityBinding(CefRefPtr<CefFrame> frame, CefString token)
+      : frame_(frame), token_(token) {}
+  bool Execute(const CefString &, CefRefPtr<CefV8Value>, const CefV8ValueList &args,
+               CefRefPtr<CefV8Value> &, CefString &) override {
+    if (args.size() == 2 && args[0]->IsBool() && args[1]->IsBool())
+      SendBrowserActivity(frame_, token_, "update", args[0]->GetBoolValue(), args[1]->GetBoolValue());
+    return true;
+  }
+ private:
+  CefRefPtr<CefFrame> frame_;
+  CefString token_;
+  IMPLEMENT_REFCOUNTING(TatwoBrowserActivityBinding);
+};
+
+// Only activity booleans cross the process boundary. No input values, URLs,
+// selectors or text are collected. Dirty is conservative until a new document.
+const char kBrowserActivityScript[] = R"JS((function(report) {
+  let dirty = false, playing = false;
+  let lastDirty, lastPlaying;
+  const watchedTracks = new WeakSet();
+  const publish = () => {
+    if (dirty === lastDirty && playing === lastPlaying) return;
+    lastDirty = dirty; lastPlaying = playing; report(dirty, playing);
+  };
+  const edit = event => {
+    const target = event.target;
+    if (target && target.closest && target.closest('input,textarea,select,[contenteditable]')) {
+      dirty = true; publish();
+    }
+  };
+  const media = () => {
+    playing = Array.from(document.querySelectorAll('audio,video')).some(item => {
+      if (!item.paused && !item.ended) return true;
+      // A paused preview can still own a live camera, call or capture stream.
+      const stream = item.srcObject;
+      if (!stream || typeof stream.getTracks !== 'function') return false;
+      return stream.getTracks().some(track => {
+        if (!watchedTracks.has(track)) {
+          watchedTracks.add(track);
+          track.addEventListener('ended', media);
+        }
+        return track.readyState === 'live';
+      });
+    });
+    publish();
+  };
+  document.addEventListener('input', edit, true);
+  document.addEventListener('change', edit, true);
+  for (const name of ['play','playing','pause','ended','emptied','loadstart','loadedmetadata']) document.addEventListener(name, media, true);
+  document.addEventListener('DOMContentLoaded', media, {once:true});
+  // srcObject assignment and stream track changes are not DOM mutations.
+  // Report only changes; the context owns and cancels this timer on release.
+  setInterval(media, 1000);
+  return true;
+}))JS";
+
 class TatwoWebMCPRenderProcessHandler final
     : public CefRenderProcessHandler {
  public:
@@ -3614,6 +3735,23 @@ class TatwoWebMCPRenderProcessHandler final
       CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefFrame> frame,
       CefRefPtr<CefV8Context> context) override {
+    const auto main_world = frame ? frame->GetV8Context() : nullptr;
+    if (browser && frame && context && context->IsValid() && main_world &&
+        main_world->IsSame(context)) {
+      const auto key = std::to_string(browser->GetIdentifier()) + ":" + frame->GetIdentifier().ToString();
+      const CefString token = ToCefString(NSUUID.UUID.UUIDString);
+      CefRefPtr<CefV8Value> factory;
+      CefRefPtr<CefV8Exception> exception;
+      if (context->Eval(kBrowserActivityScript, "tatwo-browser-activity", 1, factory, exception) &&
+          factory && factory->IsFunction()) {
+        auto callback = CefV8Value::CreateFunction("activity", new TatwoBrowserActivityBinding(frame, token));
+        auto installed = factory->ExecuteFunctionWithContext(context, nullptr, {callback});
+        if (installed && installed->IsBool() && installed->GetBoolValue()) {
+          activity_contexts_[key] = {context, token};
+          SendBrowserActivity(frame, token, "ready", false, false);
+        }
+      }
+    }
     if (!browser || !frame || !frame->IsMain() || !context) {
       return;
     }
@@ -3682,6 +3820,14 @@ class TatwoWebMCPRenderProcessHandler final
       CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefFrame> frame,
       CefRefPtr<CefV8Context> context) override {
+    if (browser && frame) {
+      const auto key = std::to_string(browser->GetIdentifier()) + ":" + frame->GetIdentifier().ToString();
+      auto found = activity_contexts_.find(key);
+      if (found != activity_contexts_.end() && found->second.first->IsSame(context)) {
+        SendBrowserActivity(frame, found->second.second, "released", false, false);
+        activity_contexts_.erase(found);
+      }
+    }
 #pragma mark - W57c Release password references with their document
     password_renderer_.Release(browser, context);
 #pragma mark - W57c End
@@ -3942,6 +4088,7 @@ class TatwoWebMCPRenderProcessHandler final
   std::map<std::string, Tool> tools_;
 #pragma mark - W57c Renderer-owned, never process-global credential state
   W57cPasswordRenderer password_renderer_;
+  std::map<std::string, std::pair<CefRefPtr<CefV8Context>, CefString>> activity_contexts_;
 #pragma mark - W57c End
 #pragma mark - W58
   W58AgentLoginRenderer ai_login_renderer_;
@@ -4022,6 +4169,11 @@ class TatwoBrowserProcessApp final : public CefApp,
     }
     // Do not enable process-per-site: it broadens same-site failure/contention
     // sharing with unmeasured benefit here. Never disable site isolation.
+    // Chromium 151 recomputes AX mode from persistent scopes when a hidden tab
+    // is revealed. CEF SetAccessibilityState alone sets a transient mode that
+    // this recomputation replaces. "complete" installs a process scope without
+    // pretending that a screen reader is active; tab DOM/focus are untouched.
+    command_line->AppendSwitchWithValue("force-renderer-accessibility", "complete");
     command_line->AppendSwitch("disable-background-networking");
     command_line->AppendSwitch("disable-breakpad");
     command_line->AppendSwitch("disable-component-update");
@@ -4216,6 +4368,9 @@ size_t PendingResourceDecisionCount() {
              std::memory_order_relaxed);
 }
 
+void PublishDocumentMIME(TatwoCEFBrowserView *view, ResourceErrorContext context,
+                         NSString *url, NSString *mime);
+
 class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
  public:
   TatwoResourceRequestHandler(
@@ -4244,6 +4399,9 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
     CefRefPtr<CefCallback> callback) override {
     NSString *request_url = FromCefString(request->GetURL());
     const bool is_main_frame = IsMainFrameRequest(request);
+    if (IsBuiltinPDFResource(policy_.human, request_url, request_initiator_, is_main_frame)) {
+      return RV_CONTINUE;
+    }
     const bool local_deny =
         IsDeniedByLocalHostList(policy_, request_url);
     if (local_deny) {
@@ -4316,6 +4474,11 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
                 const bool current = IsActiveMountCallback(weak_owner, error_context.mount_generation, @"private_network_decision") &&
                     ActorRequestPolicy(weak_owner).human &&
                     error_context.epoch->IsCurrent(error_context.generation);
+                if (!allowed && current && is_main_frame) {
+                  RememberPrivateNetworkRetry(weak_owner, error_context, request_url);
+                  PublishResourceError(weak_owner, error_context,
+                      @"尚未允許此網站連接本機或區域網路。按重新載入可再次選擇。", false);
+                }
                 CompletePendingResourceDecision(decision_id, allowed && current);
               });
             });
@@ -4333,6 +4496,16 @@ class TatwoResourceRequestHandler final : public CefResourceRequestHandler {
           CompletePendingResourceDecision(decision_id, allow);
         });
     return RV_CONTINUE_ASYNC;
+  }
+
+  bool OnResourceResponse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                          CefRefPtr<CefRequest> request, CefRefPtr<CefResponse> response) override {
+    if (policy_.human && IsMainFrameRequest(request) && response &&
+        response->GetStatus() >= 200 && response->GetStatus() < 300) {
+      PublishDocumentMIME(owner_, error_context_, FromCefString(request->GetURL()),
+                          FromCefString(response->GetMimeType()));
+    }
+    return false; // Observe the response; never restart or mutate its request.
   }
 
   void OnResourceRedirect(CefRefPtr<CefBrowser> browser,
@@ -4424,6 +4597,100 @@ class TatwoClient final : public CefClient,
   }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
+  // CEF reports access state only. Do not subscribe to raw media samples.
+  void OnMediaAccessChange(CefRefPtr<CefBrowser>, bool has_video_access,
+                           bool has_audio_access) override {
+    CEF_REQUIRE_UI_THREAD();
+    media_capture_active_ = has_video_access || has_audio_access;
+  }
+  bool HasActiveMediaCapture() const { return media_capture_active_; }
+
+  struct HumanDownload {
+    NSString *identifier = nil;
+    NSString *filename = nil;
+    NSString *path = nil;
+    NSString *source_url = nil;
+    NSString *terminal_state = nil;
+    NSString *failure_message = nil;
+    dev_t reserved_device = 0;
+    ino_t reserved_inode = 0;
+    int64_t received = 0;
+    int64_t total = -1;
+    int interrupt_reason = 0;
+    CefRefPtr<CefDownloadItemCallback> callback;
+  };
+  NSString *download_session_id_ = NSUUID.UUID.UUIDString;
+  std::map<uint32_t, HumanDownload> human_downloads_;
+  bool HasActiveHumanDownloads() const {
+    for (const auto &pair : human_downloads_)
+      if (!pair.second.terminal_state) return true;
+    return false;
+  }
+
+  HumanDownload &HumanDownloadFor(CefRefPtr<CefDownloadItem> item) {
+    auto &entry = human_downloads_[item->GetId()];
+    if (!entry.identifier) entry.identifier = [NSString stringWithFormat:@"%@-%u", download_session_id_, item->GetId()];
+    if (!entry.filename) entry.filename = FromCefString(item->GetSuggestedFileName()).lastPathComponent;
+    if (!entry.source_url) entry.source_url = FromCefString(item->GetOriginalUrl());
+    return entry;
+  }
+
+  void RemoveEmptyDownloadReservation(HumanDownload &entry) {
+    // Never scan old downloads or remove a user's replacement/partial file.
+    tatwo::RemoveEmptyDownloadReservation(entry.path.fileSystemRepresentation, entry.reserved_device, entry.reserved_inode);
+  }
+
+  void PublishCachedDownloadEvent(HumanDownload &entry, NSString *status) {
+    if (!owner_ || !ActorRequestPolicy(owner_).human || !owner_.onDownloadEvent) return;
+    owner_.onDownloadEvent(@{
+      @"id": entry.identifier ?: @"", @"filename": entry.filename ?: @"download",
+      @"path": entry.path ?: @"",
+      @"sourceURL": entry.source_url ?: @"", @"state": status,
+      @"received": @(entry.received), @"total": @(entry.total),
+      @"error": entry.failure_message ?: @"", @"interruptReason": @(entry.interrupt_reason)
+    });
+  }
+
+  void PublishDownloadEvent(CefRefPtr<CefDownloadItem> item, HumanDownload &entry, NSString *status) {
+    entry.received = item->GetReceivedBytes();
+    entry.total = item->GetTotalBytes();
+    entry.interrupt_reason = (int)item->GetInterruptReason();
+    PublishCachedDownloadEvent(entry, status);
+  }
+
+  void CancelHumanDownloadsForClose() {
+    CEF_REQUIRE_UI_THREAD();
+    for (auto &pair : human_downloads_) {
+      auto &entry = pair.second;
+      if (entry.terminal_state) continue;
+      // Publish and mark terminal before Cancel(), which may invoke callbacks
+      // synchronously. Closing a tab must never strand a progress row forever.
+      entry.terminal_state = @"cancelled";
+      entry.failure_message = @"來源分頁已關閉，下載已取消。請回原網站重新下載。";
+      auto callback = entry.callback;
+      entry.callback = nullptr;
+      PublishCachedDownloadEvent(entry, entry.terminal_state);
+      RemoveEmptyDownloadReservation(entry);
+      if (callback) callback->Cancel();
+    }
+  }
+
+  bool ControlHumanDownload(NSString *identifier, int action) {
+    CEF_REQUIRE_UI_THREAD();
+    if (!ActorRequestPolicy(owner_).human) return false;
+    for (auto &pair : human_downloads_) {
+      auto &entry = pair.second;
+      if (![entry.identifier isEqualToString:identifier] || !entry.callback || entry.terminal_state) continue;
+      auto callback = entry.callback;
+      if (action == 0) callback->Cancel();
+      else if (action == 1) callback->Pause();
+      else callback->Resume();
+      ScheduleImmediateCEFMessagePumpWork(@"download_control");
+      return true;
+    }
+    return false;
+  }
+
 #pragma mark - W57d
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
   bool OnFileDialog(CefRefPtr<CefBrowser> browser, FileDialogMode mode,
@@ -4444,6 +4711,7 @@ class TatwoClient final : public CefClient,
   }
   void W57dCancel();
   void W57dDownloadUpdate(CefRefPtr<CefDownloadItem> item);
+  void W57dFinishPDFDownload(NSString *path);
   CefRefPtr<CefFileDialogCallback> file_dialog_callback_;
   uint64_t file_dialog_serial_ = 0;
   uint64_t web_features_serial_ = 0;
@@ -4451,6 +4719,7 @@ class TatwoClient final : public CefClient,
   NSString *pdf_download_url_;
   NSString *pdf_download_path_;
   uint32_t pdf_download_id_ = 0;
+  uint64_t pdf_download_request_serial_ = 0;
   void (^pdf_download_completion_)(NSString * _Nullable) = nil;
 #pragma mark - W57d End
 
@@ -4460,69 +4729,30 @@ class TatwoClient final : public CefClient,
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
   bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent &event,
                     CefEventHandle os_event, bool *is_keyboard_shortcut) override {
-#pragma mark - W57d
-    // Synthetic agent key events never invoke host menus or native dialogs.
-    if (os_event && ActorRequestPolicy(owner_).human && event.type == KEYEVENT_RAWKEYDOWN) {
-      if (event.windows_key_code == 27 && browser->GetHost()->IsFullscreen()) {
-        [owner_ exitContentFullscreen];
-        return true; // Fullscreen has priority even when a form field has focus.
-      }
-      if ((event.modifiers & EVENTFLAG_COMMAND_DOWN) &&
-          !(event.modifiers & (EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN))) {
-        const bool shift = event.modifiers & EVENTFLAG_SHIFT_DOWN;
-        NSString *kind = nil;
-        if (event.windows_key_code == 80) kind = shift ? @"printPDF" : @"print";
-        else if (!shift) {
-          switch (event.windows_key_code) {
-            case 76: kind = @"focusAddress"; break;
-            case 84: kind = @"newTab"; break;
-            case 87: kind = @"closeTab"; break;
-            case 82: kind = @"reload"; break;
-          }
-        }
-        if (kind && owner_.onDailyShortcut) {
-          if (browser->GetHost()->IsFullscreen()) [owner_ exitContentFullscreen];
-          if (is_keyboard_shortcut) *is_keyboard_shortcut = true;
-          owner_.onDailyShortcut(kind);
-          return true; // Do not send host shortcuts to page JavaScript.
-        }
-      }
+    // Synthetic agent input cannot invoke native menus. Unbound native keys
+    // remain available to AppKit/Chromium instead of being silently consumed.
+    if (!os_event || !ActorRequestPolicy(owner_).human || event.type != KEYEVENT_RAWKEYDOWN) return false;
+    NSEvent *native_event = (__bridge NSEvent *)os_event;
+    // Modifier transitions can be RAWKEYDOWN in CEF while their NSEvent is
+    // flagsChanged. Neither our Swift converter nor NSMenu may read characters
+    // from those events. Let Chromium process them normally.
+    if (native_event.type != NSEventTypeKeyDown) return false;
+    if (event.windows_key_code == 27 && browser->GetHost()->IsFullscreen()) {
+      [owner_ exitContentFullscreen];
+      return true;
     }
-#pragma mark - W57d End
-    if (!ActorRequestPolicy(owner_).human || event.type != KEYEVENT_RAWKEYDOWN) return false;
     if (event.windows_key_code == 27 && event.modifiers == 0 && !event.focus_on_editable_field) {
-      // W57a-fix: the host decides (close the find bar first, else stop loading).
       if (owner_.onDailyShortcut) { owner_.onDailyShortcut(@"escape"); return true; }
       browser->StopLoad(); return true;
     }
-    if (!(event.modifiers & EVENTFLAG_COMMAND_DOWN) ||
-        (event.modifiers & (EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN))) return false;
-    const int key = event.windows_key_code;
-    const bool shift = event.modifiers & EVENTFLAG_SHIFT_DOWN;
-    const bool shortcut = (key == 84 && shift) || key == 187 ||
-        (!shift && (key == 219 || key == 221 || key == 70 || key == 189 || (key >= 48 && key <= 57)));
-#pragma mark - W57d
-    // Keep W57a's browser shortcuts ahead of app-wide menu equivalents.
-    // Other app commands go to AppKit before JS, with no sendEvent recursion.
-    // Unclaimed editing keys and Tab retain Chromium's normal behavior.
-    if (!shortcut && os_event &&
-        [NSApp.mainMenu performKeyEquivalent:(__bridge NSEvent *)os_event]) return true;
-#pragma mark - W57d End
-    if (!shortcut || !os_event) return false;
-    // Native CEF input does not necessarily reach SwiftUI key equivalents. The callback
-    // enters the same focus-scoped actions as the hidden Buttons; no menu recursion.
-    if (!owner_.onDailyShortcut) return false;
-    NSString *kind = nil;
-    if (key == 84) kind = @"reopen";
-    else if (key == 219) kind = @"back";
-    else if (key == 221) kind = @"forward";
-    else if (key == 70) kind = @"find";
-    else if (key == 187) kind = @"zoomIn";
-    else if (key == 189) kind = @"zoomOut";
-    else if (key == 48) kind = @"zoomReset";
-    else kind = [NSString stringWithFormat:@"tab%d", key - 48];
-    owner_.onDailyShortcut(kind);
-    return true;
+    if (owner_.onBrowserKeyEquivalent && owner_.onBrowserKeyEquivalent(native_event)) {
+      if (browser->GetHost()->IsFullscreen()) [owner_ exitContentFullscreen];
+      if (is_keyboard_shortcut) *is_keyboard_shortcut = true;
+      return true;
+    }
+    if ((event.modifiers & EVENTFLAG_COMMAND_DOWN) &&
+        [NSApp.mainMenu performKeyEquivalent:native_event]) return true;
+    return false;
   }
   void OnFindResult(CefRefPtr<CefBrowser> browser, int identifier, int count,
                     const CefRect &selection, int active, bool final_update) override {
@@ -4557,8 +4787,7 @@ class TatwoClient final : public CefClient,
     model->AddSeparator();
     model->AddItem(26513, "列印…");
     model->AddItem(26514, "列印備援：PDF → 系統預覽");
-    NSString *page = FromCefString(browser->GetMainFrame()->GetURL());
-    if ([[NSURL URLWithString:page].path.pathExtension.lowercaseString isEqualToString:@"pdf"])
+    if (owner_.currentDocumentIsPDF)
       model->AddItem(26515, "下載 PDF 並用系統預覽開啟");
 #pragma mark - W57d End
   }
@@ -4567,7 +4796,7 @@ class TatwoClient final : public CefClient,
 #pragma mark - W57d
     if (command >= 26513 && command <= 26515) {
       if (ActorRequestPolicy(owner_).human && owner_.onDailyShortcut)
-        owner_.onDailyShortcut(command == 26513 ? @"print" : command == 26514 ? @"printPDF" : @"openPDF");
+        owner_.onDailyShortcut(command == 26513 ? @"menu:printPage" : command == 26514 ? @"menu:printPDF" : @"menu:openPDF");
       return true;
     }
 #pragma mark - W57d End
@@ -4683,9 +4912,18 @@ class TatwoClient final : public CefClient,
   bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefDownloadItem> item, const CefString &suggested_name,
       CefRefPtr<CefBeforeDownloadCallback> callback) override {
-    if (!ActorRequestPolicy(owner_).human) return true;
+    CEF_REQUIRE_UI_THREAD();
+    if (!item->IsValid() || !ActorRequestPolicy(owner_).human) return true;
+    auto &entry = HumanDownloadFor(item);
+    if (entry.terminal_state) return true;
+    // CEF can revisit its destination callback; reserve once for this item.
+    if (entry.path) { callback->Continue(ToCefString(entry.path), false); return true; }
     NSString *name = FromCefString(suggested_name).lastPathComponent;
     if (!name.length || [name isEqualToString:@"."] || [name isEqualToString:@".."]) name = @"download";
+    const bool requested_pdf = pdf_download_completion_ && !pdf_download_path_ &&
+        [pdf_download_url_ isEqualToString:FromCefString(item->GetOriginalUrl())];
+    if (requested_pdf && ![name.pathExtension.lowercaseString isEqualToString:@"pdf"])
+      name = [name stringByAppendingPathExtension:@"pdf"];
     // Exclusive reservation prevents overwriting existing files or following a
     // pre-existing symlink. CEF may write only this newly reserved destination.
     NSString *root = NSSearchPathForDirectoriesInDomains(NSDownloadsDirectory, NSUserDomainMask, YES).firstObject;
@@ -4696,11 +4934,25 @@ class TatwoClient final : public CefClient,
       path = [root stringByAppendingPathComponent:name];
       fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     }
-    if (fd < 0) return true;
+    if (fd < 0) {
+      entry.filename = name;
+      entry.terminal_state = @"failed";
+      entry.failure_message = @"無法在下載資料夾建立檔案，請檢查可用空間與權限後重試。";
+      PublishDownloadEvent(item, entry, entry.terminal_state);
+      if (requested_pdf) W57dFinishPDFDownload(nil);
+      return true;
+    }
+    struct stat reserved {};
+    if (fstat(fd, &reserved) == 0) {
+      entry.reserved_device = reserved.st_dev;
+      entry.reserved_inode = reserved.st_ino;
+    }
     close(fd);
+    entry.path = path;
+    entry.filename = name;
+    PublishDownloadEvent(item, entry, @"starting");
 #pragma mark - W57d
-    if (pdf_download_completion_ && !pdf_download_path_ &&
-        [pdf_download_url_ isEqualToString:FromCefString(item->GetOriginalUrl())]) {
+    if (requested_pdf) {
       pdf_download_id_ = item->GetId();
       pdf_download_path_ = path;
     }
@@ -4713,10 +4965,37 @@ class TatwoClient final : public CefClient,
       CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefDownloadItem> download_item,
       CefRefPtr<CefDownloadItemCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!download_item->IsValid()) return;
 #pragma mark - W57d
     W57dDownloadUpdate(download_item);
 #pragma mark - W57d End
     if (ActorRequestPolicy(owner_).human) {
+      auto &entry = HumanDownloadFor(download_item);
+      entry.callback = callback;
+      NSString *status = @"downloading";
+      if (entry.terminal_state) status = entry.terminal_state;
+      else if (download_item->IsInterrupted()) {
+        status = @"failed";
+        entry.failure_message = [NSString stringWithFormat:@"下載中斷（錯誤 %d），請重試。", (int)download_item->GetInterruptReason()];
+      } else if (download_item->IsCanceled()) status = @"cancelled";
+      else if (download_item->IsComplete()) status = @"completed";
+      else if (download_item->IsPaused()) status = @"paused";
+      else if (!download_item->IsInProgress()) {
+        // Before destination selection CEF may report a pending item.
+        status = entry.path ? @"failed" : @"starting";
+        if (entry.path) entry.failure_message = @"下載未完成，請重試。";
+      }
+      const bool terminal = [status isEqualToString:@"completed"] || [status isEqualToString:@"failed"] || [status isEqualToString:@"cancelled"];
+      if (terminal) {
+        entry.terminal_state = status;
+        if (![status isEqualToString:@"completed"]) RemoveEmptyDownloadReservation(entry);
+      }
+      PublishDownloadEvent(download_item, entry, status);
+      // An interrupted transfer is a visible failure. Do not silently restart
+      // it and allocate more empty files; the human can explicitly retry.
+      if (download_item->IsInterrupted()) callback->Cancel();
+      if (terminal) entry.callback = nullptr;
       NSString *filename = FromCefString(download_item->GetFullPath()).lastPathComponent;
       if (!filename.length) filename = FromCefString(download_item->GetSuggestedFileName()).lastPathComponent;
       NSString *identifier = [NSString stringWithFormat:@"%d-%u", browser->GetIdentifier(), download_item->GetId()];
@@ -4752,6 +5031,9 @@ class TatwoClient final : public CefClient,
       InvalidateResourceErrors();
     }
     BrowserRequestPolicySnapshot policy = ActorRequestPolicy(owner_);
+    if (policy.human && frame && !frame->IsMain() && IsBuiltinPDFViewerURL(request_url)) {
+      return false;
+    }
     const bool local_deny =
         IsDeniedByLocalHostList(policy, request_url);
     if (URLHasCredentials(request_url) ||
@@ -4928,14 +5210,20 @@ class TatwoClient final : public CefClient,
       if (requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM) [names addObject:@"麥克風"];
       if (requested_permissions & CEF_PERMISSION_TYPE_GEOLOCATION) [names addObject:@"位置"];
       if (requested_permissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) [names addObject:@"通知"];
-      if (requested_permissions & ~(CEF_PERMISSION_TYPE_CAMERA_STREAM | CEF_PERMISSION_TYPE_MIC_STREAM | CEF_PERMISSION_TYPE_GEOLOCATION | CEF_PERMISSION_TYPE_NOTIFICATIONS)) { callback->Continue(CEF_PERMISSION_RESULT_DENY); return true; }
+      if (requested_permissions & CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS) [names addObject:@"下載多個檔案"];
+      if (requested_permissions & ~(CEF_PERMISSION_TYPE_CAMERA_STREAM | CEF_PERMISSION_TYPE_MIC_STREAM | CEF_PERMISSION_TYPE_GEOLOCATION | CEF_PERMISSION_TYPE_NOTIFICATIONS | CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS)) {
+        // Unsupported is not a human decision. Dismiss without permanently
+        // poisoning the site's content setting with a fabricated denial.
+        callback->Continue(CEF_PERMISSION_RESULT_DISMISS);
+        return true;
+      }
       __weak TatwoCEFBrowserView *weak_owner = owner_;
       const uint64_t mount = mount_generation_;
       const uint64_t generation = owner_.navigationGeneration;
       owner_.onPermissionRequested(FromCefString(requesting_origin), [names componentsJoinedByString:@"／"], ^(BOOL decision) {
         TatwoCEFBrowserView *owner = weak_owner;
         const bool allowed = decision && IsPermissionReplyLive(owner, mount, generation);
-        callback->Continue(allowed ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+        callback->Continue(allowed ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DISMISS);
         ScheduleImmediateCEFMessagePumpWork(@"permission_decision");
       });
       return true;
@@ -5165,12 +5453,16 @@ class TatwoClient final : public CefClient,
   NSSize type_click_viewport_ = NSZeroSize;
   bool type_submit_ = false;
   bool close_late_browser_ = false;
+  bool media_capture_active_ = false;
   std::map<std::string, TatwoCEFWebMCPInvocationHandler>
       webmcp_invocations_;
   IMPLEMENT_REFCOUNTING(TatwoClient);
 };
 
 struct BrowserState {
+  struct Activity { std::string token; bool dirty = false; bool playing = false; };
+  std::map<std::string, Activity> activity_frames;
+  bool activity_main_ready = false;
 #pragma mark - W57a
   std::string find_text;
   bool find_match_case = false;
@@ -5185,8 +5477,12 @@ struct BrowserState {
   CefRefPtr<TatwoPrivacyStrictRequestContextHandler> request_context_handler;
   NSString *pending_error;
   NSString *pending_url;
+  NSString *private_network_retry_url;
+  uint64_t private_network_retry_generation = 0;
   TatwoCEFBrowserInputDispatchGate pending_navigation_gate;
   NSString *committed_url;
+  NSString *document_mime_url;
+  bool document_is_pdf = false;
   NSMutableArray *close_handlers;
   NSTimer *loading_active_pump_timer;
   NSString *last_embedding_signature;
@@ -5201,6 +5497,7 @@ struct BrowserState {
   bool creation_pending = false;
   bool close_requested = false;
   bool close_completed = false;
+  bool popup_close_pending = false;
   bool close_retry_scheduled = false;
   bool geometry_layer_ready_logged = false;
   bool request_context_security_ready = false;
@@ -5233,6 +5530,28 @@ struct BrowserState {
   NSWindow *popup_window;
   int popup_id = -1;
 };
+
+void UpdateBrowserActivity(BrowserState *state, const std::string &key,
+                           const std::string &token, const std::string &kind,
+                           bool is_main, bool dirty, bool playing) {
+  if (token.empty()) return;
+  if (kind == "ready") {
+    auto current = state->activity_frames.find(key);
+    if (current != state->activity_frames.end() && current->second.token == token) return;
+    state->activity_frames[key] = {token, false, false};
+    if (is_main) state->activity_main_ready = true;
+    return;
+  }
+  auto found = state->activity_frames.find(key);
+  if (found == state->activity_frames.end() || found->second.token != token) return;
+  if (kind == "released") {
+    state->activity_frames.erase(found);
+    if (is_main) state->activity_main_ready = false;
+  } else if (kind == "update") {
+    found->second.dirty = found->second.dirty || dirty;
+    found->second.playing = playing;
+  }
+}
 
 bool HasActiveBrowserPumpWork(const BrowserState *state) {
   return HasActiveBrowserPumpWork(
@@ -5442,7 +5761,10 @@ BrowserState *CreateBrowserState(TatwoCEFBrowserView *view) {
   state->popup_views = [NSMutableArray array];
   state->phase = TatwoCEFBrowserPhaseCreating;
   if (g_live_browser_views == nil) {
-    g_live_browser_views = [NSHashTable weakObjectsHashTable];
+    // CEF's parent view must outlive accepted asynchronous creation and the
+    // actual OnBeforeClose. Swift lifetime tokens initiate close before losing
+    // their ownership; this registry releases only in CompleteBrowserClose.
+    g_live_browser_views = [NSHashTable hashTableWithOptions:NSPointerFunctionsStrongMemory];
   }
   [g_live_browser_views addObject:view];
   return state;
@@ -5459,20 +5781,13 @@ bool TatwoClient::OnBeforePopup(
   TatwoCEFBrowserView *opener = owner_;
   BrowserState *parent = State(opener);
   NSString *url = FromCefString(target_url);
-  if (ActorRequestPolicy(opener).human) {
-    BrowserRequestPolicySnapshot human_policy = ActorRequestPolicy(opener);
-    if (parent && !parent->close_requested && !URLHasCredentials(url) &&
-        IsActorURLAllowed(human_policy, url) && !IsDeniedByLocalHostList(human_policy, url) &&
-        opener.onPopupRequested) opener.onPopupRequested(url);
-    return true; // Swift owns new tabs; never spawn an unmanaged native window.
-  }
   const bool blank = url.length == 0 || [url isEqualToString:@"about:blank"];
-  BrowserRequestPolicySnapshot policy;
-  policy.host_deny_list = g_host_deny_list;
+  const BrowserRequestPolicySnapshot policy = ActorRequestPolicy(opener);
   if (!parent || !parent->browser || !browser ||
       !parent->browser->IsSame(browser) || parent->close_requested ||
+      parent->popup_views.count >= 8 ||
       !user_gesture || (!blank && (URLHasCredentials(url) ||
-        !IsAllowedURLString(url) || IsDeniedByLocalHostList(policy, url)))) {
+        !IsActorURLAllowed(policy, url) || IsDeniedByLocalHostList(policy, url)))) {
     LogBrowserLifecycle(@"popup_blocked");
     return true;
   }
@@ -5495,7 +5810,12 @@ bool TatwoClient::OnBeforePopup(
   window.title = OriginForURLString(blank ? parent->committed_url : url) ?: @"新視窗";
   state->popup_window = window;
   [parent->popup_views addObject:popup];
-  window.contentView = popup;
+  NSView *popup_container = [[NSView alloc] initWithFrame:bounds];
+  popup_container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  [popup_container addSubview:popup];
+  popup.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  window.contentView = popup_container;
+  if (policy.human && opener.onPopupCreated) opener.onPopupCreated(popup);
   popup.wantsLayer = YES;
   window_info.SetAsChild((__bridge CefWindowHandle)popup,
                         CefRect(0, 0, (int)width, (int)height));
@@ -6431,6 +6751,19 @@ bool TatwoClient::OnProcessMessageReceived(
     CefProcessId source_process,
     CefRefPtr<CefProcessMessage> message) {
   CEF_REQUIRE_UI_THREAD();
+  if (source_process == PID_RENDERER && message && message->GetName() == kBrowserActivityMessage) {
+    TatwoCEFBrowserView *owner = owner_;
+    BrowserState *state = State(owner);
+    if (!browser || !frame || !frame->IsValid() || !state || !state->browser ||
+        !state->browser->IsSame(browser) || state->close_requested) return true;
+    auto args = message->GetArgumentList();
+    if (!args || args->GetSize() != 4 || args->GetType(2) != VTYPE_BOOL || args->GetType(3) != VTYPE_BOOL) return true;
+    const auto key = frame->GetIdentifier().ToString();
+    const auto token = args->GetString(0).ToString();
+    const auto kind = args->GetString(1).ToString();
+    UpdateBrowserActivity(state, key, token, kind, frame->IsMain(), args->GetBool(2), args->GetBool(3));
+    return true;
+  }
   if (source_process != PID_RENDERER || !browser || !frame ||
       !frame->IsMain() || !message ||
       !IsActiveMountCallback(
@@ -6675,6 +7008,8 @@ uint64_t BeginNavigationFrameTelemetry(TatwoCEFBrowserView *view,
     return 0;
   }
   const uint64_t navigation_generation = ++state->navigation_generation;
+  state->document_mime_url = nil;
+  state->document_is_pdf = false;
 #pragma mark - W57d
   W57dInvalidate(view);
 #pragma mark - W57d End
@@ -6743,7 +7078,7 @@ bool IsActiveMountCallback(TatwoCEFBrowserView *view,
   return false;
 }
 
-#pragma mark - W60 Loading lifecycle compatibility (no timer)
+#pragma mark - Loading lifecycle and opt-in bounded macOS recovery
 void StopLoadingActiveMessagePump(TatwoCEFBrowserView *view,
                                   uint64_t expected_generation,
                                   NSString *reason) {
@@ -6758,9 +7093,10 @@ void StopLoadingActiveMessagePump(TatwoCEFBrowserView *view,
 void StartLoadingActiveMessagePump(TatwoCEFBrowserView *view,
                                    uint64_t expected_generation,
                                    NSString *reason) {
-  // Call sites keep their lifecycle boundary, but must never start polling.
-  // Host API kicks and CEF scheduling, not isLoading, drive the message loop.
   if (!IsActiveMountCallback(view, expected_generation, @"loading_active_pump_start")) return;
+  // Runtime continuation now covers startup, loaded pages and background work.
+  // Keep these lifecycle call sites, but never create a timer per document.
+  ArmCEFMessagePumpContinuation();
 }
 #pragma mark - W60 End
 
@@ -6798,18 +7134,11 @@ void ScheduleBrowserCloseRetry(TatwoCEFBrowserView *view,
               @"close_retry_exhausted",
               static_cast<NSInteger>(retry_state->close_retry_attempt));
           if (!retry_state->browser && retry_state->creation_pending) {
-            // CreateBrowser accepted the request, but CEF never returned
-            // OnAfterCreated. There is no native browser to close, so waiting
-            // forever would pin the Swift coordinator and its profile lease.
-            // Complete the host-side close fail-closed after the bounded pump
-            // budget. The client remains retained by CEF and will immediately
-            // close a browser if the delayed callback eventually arrives.
-            retry_state->creation_pending = false;
-            if (retry_state->client) {
-              retry_state->client->AbandonPendingCreation();
-            }
-            LogBrowserLifecycle(@"pending_create_close_failed_closed");
-            CompleteBrowserClose(retry_view, retry_state);
+            // Accepted creation can still use its parent NSView later. Keep
+            // the view/context alive until the real OnAfterCreated/OnBeforeClose
+            // sequence; a watchdog is not native completion. OnAfterCreated
+            // resets this bounded close budget and closes the returned browser.
+            LogBrowserLifecycle(@"pending_create_close_waiting_for_native");
           }
           return;
         }
@@ -7215,6 +7544,21 @@ void MutateStateOnMain(TatwoCEFBrowserView *view,
   }
 }
 
+void PublishDocumentMIME(TatwoCEFBrowserView *view, ResourceErrorContext context,
+                         NSString *url, NSString *mime) {
+  __weak TatwoCEFBrowserView *weak_view = view;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    TatwoCEFBrowserView *current = weak_view;
+    BrowserState *state = current ? State(current) : nullptr;
+    if (!context.epoch || !context.epoch->IsCurrent(context.generation) ||
+        !state || state->mount_generation != context.mount_generation ||
+        state->close_requested || state->close_completed || !ActorRequestPolicy(current).human) return;
+    state->document_mime_url = [url copy];
+    state->document_is_pdf = [mime.lowercaseString isEqualToString:@"application/pdf"];
+    PublishStateNow(current);
+  });
+}
+
 void InvalidateSecurityDocumentEpoch(TatwoCEFBrowserView *view,
                                      NSString *reason) {
   MutateStateOnMain(view, ^(BrowserState *state) {
@@ -7248,6 +7592,27 @@ void PublishVisibleError(TatwoCEFBrowserView *view,
   });
 }
 
+void RememberPrivateNetworkRetry(TatwoCEFBrowserView *view,
+                                 ResourceErrorContext context, NSString *url) {
+  NSCAssert(NSThread.isMainThread, @"Private-network retry belongs to the UI thread");
+  BrowserState *state = State(view);
+  if (!state || !context.epoch || !context.epoch->IsCurrent(context.generation) ||
+      state->mount_generation != context.mount_generation || state->close_requested ||
+      state->close_completed || !ActorRequestPolicy(view).human || URLHasCredentials(url)) return;
+  state->private_network_retry_url = [url copy];
+  state->private_network_retry_generation = state->navigation_generation;
+}
+
+NSString *TakePrivateNetworkRetry(TatwoCEFBrowserView *view) {
+  BrowserState *state = State(view);
+  if (!state) return nil;
+  NSString *url = state->private_network_retry_url;
+  state->private_network_retry_url = nil;
+  return ActorRequestPolicy(view).human && !state->close_requested && !state->close_completed &&
+      state->error_kind == TatwoCEFBrowserErrorKindSecurity &&
+      state->private_network_retry_generation == state->navigation_generation ? url : nil;
+}
+
 void PublishResourceError(TatwoCEFBrowserView *view,
                           ResourceErrorContext context,
                           NSString *message,
@@ -7279,6 +7644,21 @@ void PublishResourceError(TatwoCEFBrowserView *view,
 void UpdateLoadingState(TatwoCEFBrowserView *view, bool is_loading) {
   MutateStateOnMain(view, ^(BrowserState *state) {
     state->is_loading = is_loading;
+    // Attachment responses abort navigation without replacing the current
+    // document or emitting OnLoadEnd. Once CEF confirms it is idle, release
+    // only that human input barrier for the still-committed document. Never
+    // roll back a generation or restore invalidated credentials/site grants.
+    if (!is_loading && state->navigation_in_flight && !state->close_requested && state->browser &&
+        ActorRequestPolicy(view).human && !state->browser->IsLoading() &&
+        state->document_epoch_valid && state->error_kind == TatwoCEFBrowserErrorKindNone &&
+        (state->phase == TatwoCEFBrowserPhaseCommitted || state->phase == TatwoCEFBrowserPhaseFinished)) {
+      auto frame = state->browser->GetMainFrame();
+      if (frame && frame->IsValid() && state->committed_url.length &&
+          [FromCefString(frame->GetURL()) isEqualToString:state->committed_url]) {
+        state->navigation_in_flight = false;
+        AppendCEFEmbeddingTelemetryLine(@"phase=navigation_frame event=existing_document_retained_after_idle");
+      }
+    }
     // Browser-level loading includes late iframes. Main-frame callbacks own
     // document phase; background resources must not make a readable page unusable.
     if (is_loading &&
@@ -7410,11 +7790,33 @@ void PublishCreationTimeoutIfPending(TatwoCEFBrowserView *view,
       });
 }
 
+// The parent owns the profile lease for its entire popup tree, including
+// accepted popups that have not received OnAfterCreated yet.
+bool DeferCloseUntilPopupsDrain(TatwoCEFBrowserView *view, BrowserState *state) {
+  if (state->popup_close_pending) return true;
+  NSArray<TatwoCEFBrowserView *> *popups = [state->popup_views copy];
+  if (popups.count == 0) return false;
+  state->popup_close_pending = true;
+  state->close_requested = true;
+  state->close_generation += 1; // Invalidate this parent's native-close watchdog.
+  __block NSUInteger remaining = popups.count;
+  for (TatwoCEFBrowserView *popup in popups) {
+    [popup closeBrowserWithCompletion:^{
+      if (--remaining != 0 || State(view) != state) return;
+      state->popup_close_pending = false;
+      CompleteBrowserClose(view, state);
+    }];
+  }
+  // Synchronous child completion may already have destroyed state.
+  return true;
+}
+
 void CompleteBrowserClose(TatwoCEFBrowserView *view, BrowserState *state) {
   if (view == nil || state == nullptr || state->close_completed ||
       State(view) != state) {
     return;
   }
+  if (DeferCloseUntilPopupsDrain(view, state)) return;
   StopLoadingActiveMessagePump(
       view, state->mount_generation, @"close_completed");
   state->document_epoch_valid = false;
@@ -7451,9 +7853,6 @@ void CompleteBrowserClose(TatwoCEFBrowserView *view, BrowserState *state) {
   NSWindow *popup_window = state->popup_window;
   BrowserState *opener = State(state->opener);
   if (opener) [opener->popup_views removeObjectIdenticalTo:view];
-  for (TatwoCEFBrowserView *popup in [state->popup_views copy]) {
-    [popup closeBrowser];
-  }
   NSArray *handlers = [state->close_handlers copy];
   view->_cefState = nullptr;
   [g_closing_views removeObject:view];
@@ -7493,6 +7892,9 @@ void TatwoClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     if (state) {
       state->browser = browser;
       state->creation_pending = false;
+      // Windowed CEF supplies the native AX tree only when accessibility is
+      // enabled. This exposes real web roles/text to VoiceOver and macOS tools.
+      browser->GetHost()->SetAccessibilityState(STATE_ENABLED);
       state->pending_error = nil;
       state->phase = TatwoCEFBrowserPhaseLoading;
       state->is_loading = true;
@@ -7618,6 +8020,7 @@ void TatwoClient::W57dCancel() {
   pdf_download_completion_ = nil;
   pdf_download_url_ = nil;
   pdf_download_path_ = nil;
+  ++pdf_download_request_serial_;
   pdf_print_pending_ = false;
   if (file_callback) file_callback->Cancel();
   if (pdf_completion) pdf_completion(nil);
@@ -7690,16 +8093,24 @@ bool W57dIsPDF(NSString *path) {
   return valid;
 }
 
-void TatwoClient::W57dDownloadUpdate(CefRefPtr<CefDownloadItem> item) {
-  if (!pdf_download_completion_ || !pdf_download_path_ || item->GetId() != pdf_download_id_ ||
-      (!item->IsComplete() && !item->IsCanceled() && item->IsInProgress())) return;
+void TatwoClient::W57dFinishPDFDownload(NSString *path) {
   auto completion = pdf_download_completion_;
-  NSString *path = pdf_download_path_;
   pdf_download_completion_ = nil;
   pdf_download_path_ = nil;
   pdf_download_url_ = nil;
+  pdf_download_id_ = 0;
+  ++pdf_download_request_serial_;
+  if (completion) completion(path);
+}
+
+void TatwoClient::W57dDownloadUpdate(CefRefPtr<CefDownloadItem> item) {
+  if (!pdf_download_completion_ || !item || !item->IsValid()) return;
+  const bool matches = pdf_download_path_ ? item->GetId() == pdf_download_id_ :
+      [pdf_download_url_ isEqualToString:FromCefString(item->GetOriginalUrl())];
+  if (!matches || (!item->IsComplete() && !item->IsCanceled() && !item->IsInterrupted())) return;
+  NSString *path = pdf_download_path_;
   const bool current = W57dCurrent(owner_, owner_.navigationGeneration);
-  completion(current && item->IsComplete() &&
+  W57dFinishPDFDownload(current && path && item->IsComplete() &&
       [path isEqualToString:FromCefString(item->GetFullPath())] && W57dIsPDF(path) ? path : nil);
 }
 
@@ -8574,6 +8985,7 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   // W45-fix: a popup inherits its opener's actor and resource policy; without this the
   // snapshot read adBlock/cookie defaults (NO) and skipped the host deny list.
   _browserActor = opener.browserActor;
+  _agentControlled = opener.agentControlled;
   _blocksThirdPartyCookies = opener.blocksThirdPartyCookies;
   _adBlock = opener.adBlock;
   BrowserState *state = CreateBrowserState(self);
@@ -8722,6 +9134,7 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
     state->request_context_handler = nullptr;
     delete state;
     _cefState = nullptr;
+    [g_live_browser_views removeObject:self];
     if (error != nullptr) {
       *error = MakeError(22, @"Chromium request context creation failed");
     }
@@ -8741,6 +9154,26 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   return state && state->request_context &&
       state->request_context_security_ready &&
       !state->request_context_security_blocked && !state->close_requested;
+}
+
+- (BOOL)preventsAutomaticSleep {
+  if (!NSThread.isMainThread) return YES;
+  BrowserState *state = State(self);
+  if (!state || state->close_completed) return NO;
+  if (state->close_requested || state->creation_pending || state->is_loading ||
+      state->phase == TatwoCEFBrowserPhaseCreating || !state->activity_main_ready ||
+      state->popup_views.count > 0 ||
+      (state->client && (state->client->HasActiveHumanDownloads() ||
+                         state->client->HasActiveMediaCapture()))) return YES;
+  for (auto entry = state->activity_frames.begin(); entry != state->activity_frames.end();) {
+    // A detached subframe may no longer be able to send its release message.
+    // Its document is already gone, so do not retain stale edit protection.
+    auto frame = state->browser ? state->browser->GetFrameByIdentifier(entry->first) : nullptr;
+    if (!frame || !frame->IsValid()) { entry = state->activity_frames.erase(entry); continue; }
+    if (entry->second.dirty || entry->second.playing) return YES;
+    ++entry;
+  }
+  return NO;
 }
 
 - (nullable instancetype)initWithFrame:(NSRect)frame
@@ -8791,7 +9224,10 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
 
 - (void)dealloc {
   [[NSNotificationCenter defaultCenter] removeObserver:self];
-  [self closeBrowser];
+  // Starting asynchronous close here creates a new weak reference to a
+  // deallocating object and aborts in objc_initWeak. The explicit ownership
+  // registry keeps this view alive until CompleteBrowserClose cleared state.
+  NSCAssert(_cefState == nullptr, @"Browser must finish native close before deallocation");
 }
 
 - (void)viewDidMoveToWindow {
@@ -8975,6 +9411,12 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
 - (nullable NSString *)currentURLString {
   BrowserState *state = State(self);
   return state == nullptr ? nil : state->committed_url;
+}
+
+- (BOOL)currentDocumentIsPDF {
+  BrowserState *state = State(self);
+  return state && !state->close_requested && !state->close_completed &&
+      state->document_is_pdf && [state->document_mime_url isEqualToString:state->committed_url];
 }
 
 - (uint64_t)navigationGeneration {
@@ -9298,7 +9740,10 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
 #pragma mark - W57a
 - (void)stopLoading {
   auto *state = State(self);
-  if (ActorRequestPolicy(self).human && state && state->browser) state->browser->StopLoad();
+  if (ActorRequestPolicy(self).human && state && state->browser) {
+    state->browser->StopLoad();
+    ScheduleImmediateCEFMessagePumpWork(@"stop_loading");
+  }
 }
 - (void)findText:(NSString *)text forward:(BOOL)forward matchCase:(BOOL)matchCase {
   auto *state = State(self);
@@ -9341,6 +9786,43 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   if (policy.human && state && state->browser && !URLHasCredentials(url) &&
       IsActorURLAllowed(policy, url) && !IsDeniedByLocalHostList(policy, url))
     state->browser->GetHost()->StartDownload(ToCefString(url));
+}
+- (BOOL)cancelDownloadIdentifier:(NSString *)identifier {
+  auto *state = State(self);
+  return state && !state->close_requested && state->client && state->client->ControlHumanDownload(identifier, 0);
+}
+- (BOOL)pauseDownloadIdentifier:(NSString *)identifier {
+  auto *state = State(self);
+  return state && !state->close_requested && state->client && state->client->ControlHumanDownload(identifier, 1);
+}
+- (BOOL)resumeDownloadIdentifier:(NSString *)identifier {
+  auto *state = State(self);
+  return state && !state->close_requested && state->client && state->client->ControlHumanDownload(identifier, 2);
+}
+- (BOOL)retryDownloadURL:(NSString *)url {
+  auto *state = State(self);
+  auto policy = ActorRequestPolicy(self);
+  if (!policy.human || !state || state->close_requested || !state->browser || URLHasCredentials(url) ||
+      !IsActorURLAllowed(policy, url) || IsDeniedByLocalHostList(policy, url)) return NO;
+  state->browser->GetHost()->StartDownload(ToCefString(url));
+  ScheduleImmediateCEFMessagePumpWork(@"download_retry");
+  return YES;
+}
+- (BOOL)resetCurrentDownloadPermission {
+  CEF_REQUIRE_UI_THREAD();
+  auto *state = State(self);
+  const auto policy = ActorRequestPolicy(self);
+  NSString *url = self.currentURLString;
+  NSString *origin = OriginForURLString(url);
+  if (!policy.human || !state || state->close_requested || !state->browser || !origin.length ||
+      URLHasCredentials(url) || !IsActorURLAllowed(policy, url)) return NO;
+  auto context = state->browser->GetHost()->GetRequestContext();
+  if (!context) return NO;
+  context->SetContentSetting(ToCefString(origin), CefString(), CEF_CONTENT_SETTING_TYPE_AUTOMATIC_DOWNLOADS,
+                            CEF_CONTENT_SETTING_VALUE_DEFAULT);
+  ScheduleImmediateCEFMessagePumpWork(@"download_permission_reset");
+  return context->GetContentSetting(ToCefString(origin), CefString(), CEF_CONTENT_SETTING_TYPE_AUTOMATIC_DOWNLOADS) !=
+      CEF_CONTENT_SETTING_VALUE_BLOCK;
 }
 #pragma mark - W57a end
 
@@ -9390,12 +9872,20 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   const auto policy = ActorRequestPolicy(self);
   if (!W57dCurrent(self, self.navigationGeneration) || !state || !state->client ||
       state->client->pdf_download_completion_ ||
-      ![[NSURL URLWithString:url].path.pathExtension.lowercaseString isEqualToString:@"pdf"] ||
+      !self.currentDocumentIsPDF ||
       URLHasCredentials(url) || !IsActorURLAllowed(policy, url) || IsDeniedByLocalHostList(policy, url)) {
     completion(nil); return;
   }
   state->client->pdf_download_url_ = url;
   state->client->pdf_download_completion_ = [completion copy];
+  CefRefPtr<TatwoClient> client = state->client;
+  const uint64_t request_serial = ++client->pdf_download_request_serial_;
+  // Some rejected requests never reach destination selection. Bound that
+  // pending phase, but never time out an active large PDF transfer.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    if (client->pdf_download_request_serial_ == request_serial && !client->pdf_download_path_)
+      client->W57dFinishPDFDownload(nil);
+  });
   state->browser->GetHost()->StartDownload(ToCefString(url));
   ScheduleImmediateCEFMessagePumpWork(@"pdf_download");
 }
@@ -9430,6 +9920,14 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
 - (void)reload {
   BrowserState *state = State(self);
   if (!g_shutdown_requested.load() && state && state->browser) {
+    // A denied navigation has no CEF history entry. Reloading CEF would reload
+    // the previous page (often about:blank), losing the user's retry target.
+    // Re-enter the normal load path so all URL/DNS/permission gates run again.
+    NSString *retry = TakePrivateNetworkRetry(self);
+    if (retry.length > 0) {
+      [self loadURLString:retry];
+      return;
+    }
     state->is_loading = true;
     BeginNavigationFrameTelemetry(self, state, @"reload");
     StartLoadingActiveMessagePump(
@@ -9496,6 +9994,7 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
   StopLoadingActiveMessagePump(
       self, state->mount_generation, @"close_requested");
   state->close_requested = true;
+  if (state->client) state->client->CancelHumanDownloadsForClose();
   state->pending_url = nil;
   state->pending_navigation_gate = nil;
   state->close_generation += 1;

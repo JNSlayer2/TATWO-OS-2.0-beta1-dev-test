@@ -75,3 +75,49 @@ struct Root: View {
   assert.equal(result.status, 0, `${result.signal}\n${result.stderr}`);
   assert.match(result.stdout, /TRAFFIC LIGHTS PASS/);
 });
+
+test('production window realigns native lights after AppKit ordering, content changes and resize', {
+  skip: process.platform !== 'darwin', timeout: 90_000,
+}, () => {
+  const source = readFileSync(join(repo, 'App/Sources/Tatwo2/Shell/AppShell.swift'), 'utf8');
+  const chrome = readFileSync(join(repo, 'App/Sources/Tatwo2/Shell/WindowChrome.swift'), 'utf8');
+  const window = source.slice(source.indexOf('final class TatwoWorkOSWindow: NSWindow'), source.indexOf('    /// Esc 關窗。')) + '}';
+  const metrics = chrome.slice(chrome.indexOf('enum WindowChromeMetrics'), chrome.indexOf('extension TatwoWorkOSWindow'));
+  const layout = chrome.slice(chrome.indexOf('    func layoutTatwoTrafficLights()'), chrome.indexOf('\nstruct TatwoWindowDragRegion'));
+  const root = testScratch('traffic-light-position-');
+  const fixture = join(root, 'main.swift');
+  writeFileSync(fixture, `import AppKit
+import SwiftUI
+${metrics}
+${window}
+extension TatwoWorkOSWindow {
+${layout}
+@main struct Check {
+ @MainActor static func main() {
+  let app = NSApplication.shared; app.setActivationPolicy(.accessory)
+  let w = TatwoWorkOSWindow(contentRect: NSRect(x:100,y:100,width:700,height:400),
+   styleMask:[.titled,.closable,.miniaturizable,.resizable,.fullSizeContentView],backing:.buffered,defer:false)
+  w.isReleasedWhenClosed = false; w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
+  for width: CGFloat in [700, 900, 650] {
+   w.contentView = NSHostingView(rootView: Text("Native window test"))
+   w.setContentSize(NSSize(width:width,height:400)); w.makeKeyAndOrderFront(nil)
+   RunLoop.main.run(until:Date().addingTimeInterval(0.2))
+   w.update()
+   for (index, type) in [NSWindow.ButtonType.closeButton,.miniaturizeButton,.zoomButton].enumerated() {
+    let b = w.standardWindowButton(type)!
+    let frame = b.convert(b.bounds,to:nil)
+    precondition(!b.isHidden)
+    precondition(abs(frame.minX - WindowChromeMetrics.trafficLightLeadingInset - CGFloat(index)*23) < 1)
+    precondition(abs(w.frame.height-frame.maxY-WindowChromeMetrics.trafficLightTopInset) < 1)
+   }
+  }
+  w.close(); print("TRAFFIC LIGHT POSITION PASS")
+ }
+}`);
+  const binary = join(root, 'check');
+  const compile = spawnSync('swiftc', ['-parse-as-library', '-num-threads', '2', fixture, '-o', binary], {encoding:'utf8',timeout:60_000});
+  assert.equal(compile.status, 0, compile.stderr);
+  const run = spawnSync(binary, [], {encoding:'utf8',timeout:15_000});
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /TRAFFIC LIGHT POSITION PASS/);
+});

@@ -40,7 +40,7 @@ test('W66 hover minus closes tabs only and remains keyboard/accessibility reacha
 test('W66 space capsule overlays the outer shell, not the padded mode section, with one height frame', () => {
   const sidebar = read(app + 'Chat/ChatPage+Sidebar.swift');
   const shell = section(sidebar, 'var browserSidebar:', 'var browserSpaceSwitcher:');
-  const mode = section(shell, 'workspaceModeSection', 'if browserWorkSpaceStore.focusMode');
+  const mode = section(shell, 'workspaceModeSection', 'BrowserWorkSpaceSidebarList');
   assert.doesNotMatch(mode, /overlay|browserSpaceSwitcher/);
   assert.match(shell, /frame\(maxHeight: \.infinity, alignment: \.topLeading\)\s*\}\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*\.overlay\(alignment: \.topLeading\)/);
   assert.match(shell, /padding\(\.leading, WindowChromeMetrics.appControlLeadingX\)/);
@@ -85,13 +85,10 @@ test('W66 browser sidebar and canvas abut; work-space close and pin are labeled 
   assert.match(host, /let sidebarContentGap = model.mode == .browser \? WorkspaceSidebarMetrics.browserContentGap : WorkspaceSidebarMetrics.contentGap/);
   assert.match(host, /sidebarWidth \+ sidebarContentGap/);
   assert.match(host, /HStack\(alignment: .top, spacing: showSidebar \? sidebarContentGap : 0\)/);
-  assert.match(controls, /store.focusMode.toggle\(\)/);
-  assert.match(controls, /store.sidebarPinned.toggle\(\)/);
-  for (const id of ['browser.sidebarToggle', 'browser.sidebarPin']) {
-    assert.ok(controls.includes(`.accessibilityIdentifier("${id}")`));
-  }
-  assert.equal([...controls.matchAll(/\.accessibilityLabel\(/g)].length, 2);
-  assert.match(controls, /disabled\(store.sidebarPinned\)/);
+  assert.match(controls, /Button\(action: store.toggleSidebar\)/);
+  assert.ok(controls.includes('.accessibilityIdentifier("browser.sidebarToggle")'));
+  assert.equal([...controls.matchAll(/\.accessibilityLabel\(/g)].length, 1);
+  assert.doesNotMatch(controls, /sidebarPin"|disabled|pin.fill/);
   assert.doesNotMatch(controls, /removeSpace|deleteBookmark|showDesignNotice|store.close|setPinned/);
   assert.doesNotMatch(design, /BrowserWorkspaceTabControls/);
 });
@@ -120,43 +117,33 @@ swiftc -parse-as-library -swift-version 6 -num-threads 2 \\
   assert.match(run.stdout, /W66 sidebar fixture PASS/);
 });
 
-// 使用者 2026-09-15：「缺少 work space 關閉跟固定扭」，附的是 Dia 的側欄開關圖示。
-// W66 原本做成「關閉目前分頁／固定目前分頁」，作用對象錯了；這裡鎖住正確語意。
-test('W66-fix 紅綠燈帶上有側欄收合與固定兩顆鈕，作用於側欄而非分頁', () => {
+// Latest user correction: combine pin and collapse into one Dia-style control.
+test('one sidebar control lives before navigation; the space title has no second control', () => {
   const sidebar = read(app + 'Chat/ChatPage+Sidebar.swift');
-  assert.match(controls, /accessibilityIdentifier\("browser\.sidebarToggle"\)/);
-  assert.match(controls, /accessibilityIdentifier\("browser\.sidebarPin"\)/);
-  // 兩顆鈕必須跟空間切換膠囊同一列（browserSpaceSwitcher 之內）
-  const row = sidebar.slice(sidebar.indexOf('var browserSpaceSwitcher'), sidebar.indexOf('private var browserSpaceMenu'));
+  const row = section(sidebar, 'var browserSpaceSwitcher', 'private var browserSpaceMenu');
   assert.match(row, /browserSpaceMenu/);
-  assert.match(row, /BrowserSidebarControls\(store: browserWorkSpaceStore\)/);
-  // 收合鈕切的是側欄寬度（focusMode），不是關閉分頁
-  assert.match(controls, /focusMode\.toggle\(\)/);
+  assert.doesNotMatch(row, /BrowserSidebarControls/);
+  const toolbar = section(design, 'private var workspaceToolbar:', 'private var browserContent:');
+  assert.ok(toolbar.indexOf('BrowserSidebarControls(store: store)') < toolbar.indexOf('EmbeddedBrowserToolbar('));
+  assert.match(controls, /Button\(action: store.toggleSidebar\)/);
   assert.doesNotMatch(controls, /store\.close\(/);
 });
 
-test('W66-fix 側欄釘住後不可收合，且不會被自動收合', () => {
-  // 釘住時收合鈕停用
-  assert.match(controls, /\.disabled\(store\.sidebarPinned\)/);
-  // 釘住時立刻展開
+test('explicit toggle unpins before collapsing; passive collapse still respects pinning', () => {
+  assert.match(design, /let opening = focusMode\s*sidebarPinned = opening\s*focusMode = !opening/);
   assert.match(design, /sidebarPinned = false \{ didSet \{ if sidebarPinned \{ focusMode = false/);
-  // 分頁清空的自動收合要尊重釘選
   assert.match(design, /tabs\.isEmpty && !sidebarPinned \{ focusMode = false \}/);
 });
 
-test('W66-fix 兩顆鈕的尺寸經 token，不留裸數字', () => {
-  assert.match(controls, /WorkspaceSidebarMetrics\.sidebarControlSize/);
-  assert.match(controls, /WorkspaceSidebarMetrics\.sidebarControlIconSize/);
-  assert.doesNotMatch(controls, /\.frame\(width: \d/);
-  assert.doesNotMatch(controls, /size: \d/);
+test('single control shares navigation hit-size and icon tokens', () => {
+  assert.match(controls, /BrowserOmniboxMetrics\.collapsedHeight/);
+  assert.match(controls, /BrowserOmniboxMetrics\.iconSize/);
+  assert.doesNotMatch(controls, /\.frame\(width: \d|size: \d/);
 });
 
-test('W66 collapsed sidebar keeps its expand control; menu cannot bypass pinning', () => {
-  const sidebar = read(app + 'Chat/ChatPage+Sidebar.swift');
-  const shell = section(sidebar, 'var browserSidebar:', 'var browserSpaceSwitcher:');
-  const overlay = shell.slice(shell.indexOf('.overlay(alignment: .topLeading)'));
-  assert.match(overlay, /browserSpaceSwitcher/);
-  assert.doesNotMatch(overlay, /if .*focusMode/);
-  assert.ok(controls.indexOf('browser.sidebarToggle') < controls.indexOf('if !store.focusMode'));
-  assert.match(design, /Button\(store.focusMode \? "離開專注模式" : "專注模式"\)[^\n]*\n\s*\.disabled\(store.sidebarPinned\)/);
+test('collapsed sidebar restore and menu use the same explicit toggle', () => {
+  const toolbar = section(design, 'private var workspaceToolbar:', 'private var browserContent:');
+  assert.match(toolbar, /BrowserSidebarControls\(store: store\)/);
+  assert.match(toolbar, /Button\(store.focusMode \? "展開側欄" : "收合側欄", action: store.toggleSidebar\)/);
+  assert.doesNotMatch(toolbar, /disabled\(store.sidebarPinned\)/);
 });

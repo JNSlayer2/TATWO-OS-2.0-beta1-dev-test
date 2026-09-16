@@ -111,7 +111,7 @@ enum ChatRunMode: RawRepresentable, CaseIterable, Identifiable, Hashable {
         case .chat: "互動續聊"
         case .cli: "唯讀終端"
         case .bot: "bot 展示"
-        case .browser: "設計稿：未連線"
+        case .browser: "瀏覽網頁與管理分頁"
         case .custom: "自訂 work space"
         }
     }

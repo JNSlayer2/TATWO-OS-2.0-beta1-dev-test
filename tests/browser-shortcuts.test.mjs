@@ -16,7 +16,7 @@ test('W57e only map-derived browser shortcuts, ordered settings and recording UI
   const settings = read('App/Sources/Tatwo2/Shell/ChatPageSettings.swift');
   assert.match(settings, /browserSettingsCard\("Browser work space"\)[\s\S]*?browserSettingsCard\("快捷鍵"\) \{ BrowserShortcutsSettingsView\(\) \}[\s\S]*?browserSettingsCard\("Session 瀏覽器"\)/);
   const ui = read(b+'BrowserShortcutsSettingsView.swift');
-  for (const copy of ['預設只有 ⌘T 新分頁；其餘功能請自行指定','全部還原預設','未設定','設定…','Delete 清除']) assert.ok(ui.includes(copy),copy);
+  for (const copy of ['已提供常用瀏覽器快捷鍵；可自訂或清除個別設定','全部還原預設','未設定','設定…','Delete 清除']) assert.ok(ui.includes(copy),copy);
   assert.match(ui, /BrowserAction\.allCases/);
   assert.match(ui, /map\.validationError\(for: combo, action: action\)/);
   const model = read(b+'BrowserShortcuts.swift');
@@ -25,10 +25,10 @@ test('W57e only map-derived browser shortcuts, ordered settings and recording UI
   assert.match(design, /Button\("搜尋分頁…", action: openTabSearch\)/);
   assert.match(design, /case \.openImport: store\.requestImport\(\)/);
   assert.match(design, /func requestImport\(\) \{[\s\S]*?tatwo\.browser\.openImport/);
-  assert.match(design, /Button\(store\.focusMode \? "離開專注模式" : "專注模式"\) \{ store\.focusMode\.toggle\(\) \}/);
+  assert.match(design, /Button\(store\.focusMode \? "展開側欄" : "收合側欄", action: store.toggleSidebar\)/);
   assert.match(ui, /firstResponder === self/);
   assert.doesNotMatch(ui, /addGlobalMonitor|addLocalMonitor/);
-  assert.match(read(b+'BrowserDailyNavigationControls.swift'), /legacyCombo\(shortcutKind\)/);
+  assert.match(read(b+'BrowserDailyNavigationControls.swift'), /BrowserShortcutInvocation\(message: shortcutKind\)/);
   for (const file of ['BrowserWorkSpaceDesignView.swift','EmbeddedBrowserView.swift']) {
     assert.match(read(b+file), /BrowserAnnotationSheet\(tab: [^)]*\)\.background\(BrowserAnnotationShortcutDismiss\(\)\)/);
   }
@@ -42,7 +42,7 @@ import Foundation
 @main struct Checks {
  static func main() throws {
     let defaults = BrowserShortcutMap.defaults
-    precondition(defaults.bindings.count == 1 && defaults.bindings[.newTab] == BrowserKeyCombo(key: "t", modifiers: ["command"]))
+    precondition(defaults.bindings.count == 16 && defaults.bindings[.newTab] == BrowserKeyCombo(key: "t", modifiers: ["command"]))
     for action in BrowserAction.allCases {
         precondition(action.title.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) })
         precondition(["分頁", "導覽", "檢視", "工具"].contains(action.group))
@@ -54,7 +54,8 @@ import Foundation
     precondition(BrowserKeyCombo(key: "t", modifiers: ["command", "shift"]).display == "⇧⌘T")
     precondition(BrowserKeyCombo(key: "TAB", modifiers: ["control"]).display == "⌃⇥")
     precondition(BrowserAction.closeTab.requiresTab && !BrowserAction.newTab.requiresTab)
-    for key in ["q", "w", "h", "m", ",", "n", "s", "l"] { precondition(BrowserShortcutMap.isReserved(BrowserKeyCombo(key: key, modifiers: ["command"]))) }
+    for key in ["q", "h", "m", ",", "n", "s"] { precondition(BrowserShortcutMap.isReserved(BrowserKeyCombo(key: key, modifiers: ["command"]))) }
+    for key in ["w", "l"] { precondition(!BrowserShortcutMap.isReserved(BrowserKeyCombo(key: key, modifiers: ["command"]))) }
     precondition(BrowserShortcutMap.isReserved(BrowserKeyCombo(key: "a", modifiers: ["shift", "command"])))
     precondition(!BrowserShortcutMap.isReserved(BrowserKeyCombo(key: "f", modifiers: ["command"])))
     var custom = BrowserShortcutMap(bindings: [.tabNumber: BrowserKeyCombo(key:"3",modifiers:["command", "option"])])
@@ -63,7 +64,7 @@ import Foundation
     precondition(custom.validationError(for: BrowserKeyCombo(key:"8",modifiers:["command","option"]),action:.back) == "與『切到第 N 個分頁』相同")
     let single = BrowserShortcutMap(bindings:[.back: BrowserKeyCombo(key:"8",modifiers:["command","option"])])
     precondition(single.validationError(for: BrowserKeyCombo(key:"1",modifiers:["command","option"]),action:.tabNumber) == "與『返回』相同")
-    precondition(single.validationError(for: BrowserKeyCombo(key:"w",modifiers:["command"]),action:.closeTab) == "已被 OS 使用")
+    precondition(single.validationError(for: BrowserKeyCombo(key:"w",modifiers:["command"]),action:.closeTab) == nil)
     precondition(single.validationError(for: BrowserKeyCombo(key:"t",modifiers:[]),action:.newTab) != nil)
     precondition(single.validationError(for: BrowserKeyCombo(key:"t",modifiers:["command"]),action:.tabNumber) != nil)
     precondition(single.validationError(for: BrowserKeyCombo(key:"1",modifiers:["control"]),action:.tabNumber) == nil)
@@ -92,8 +93,8 @@ import Foundation
     do { try BrowserGeneralSettings.saveShortcuts(defaults,to:url); preconditionFailure() } catch {}
     let preserved = try String(contentsOf:url,encoding:.utf8)
     precondition(preserved == "broken")
-    precondition(BrowserShortcutMap.legacyCombo("find") == BrowserKeyCombo(key:"f",modifiers:["command"]))
-    precondition(BrowserShortcutMap.legacyCombo("zoomIn") == nil) // missing Shift identity must fail closed
+    precondition(defaults.invocation(for: BrowserKeyCombo(key:"f",modifiers:["command"]))?.action == .findInPage)
+    precondition(defaults.invocation(for: BrowserKeyCombo(key:"+",modifiers:["command","shift"]))?.action == .zoomIn)
     print("W57e fixtures passed")
  }
 }
@@ -107,7 +108,7 @@ import Foundation
 test('W57e production native recorder handles capture, Esc, Delete and responder isolation', {skip:process.platform!=='darwin',timeout:90000}, () => {
   const dir = mkdtempSync(join(tmpdir(),'w57e-recorder-'));
   const source = join(dir,'Recorder.swift'), binary = join(dir,'recorder');
-  const adapter = 'extension BrowserKeyCombo {' + read(b+'BrowserDailyNavigationControls.swift').split('extension BrowserKeyCombo {')[1];
+  const adapter = 'import Carbon\nextension BrowserKeyCombo {' + read(b+'BrowserDailyNavigationControls.swift').split('extension BrowserKeyCombo {')[1];
   writeFileSync(source, [read(b+'BrowserShortcuts.swift'),read(b+'BrowserGeneralSettings.swift'),read('App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift'),read(b+'BrowserSettingsMetrics.swift'),read(b+'BrowserShortcutsSettingsView.swift'),adapter,String.raw`
 @main struct RecorderChecks {
  @MainActor static func main() {
@@ -129,6 +130,26 @@ test('W57e production native recorder handles capture, Esc, Delete and responder
     capture.keyDown(with:event(117,"\u{7f}")); precondition(recorded.count == 3 && recorded.last! == nil)
     capture.keyDown(with:event(48,"\t",[.control])); precondition(recorded.last! == BrowserKeyCombo(key:"tab",modifiers:["control"]))
     capture.keyDown(with:event(49," ",[.option])); precondition(recorded.last! == BrowserKeyCombo(key:"space",modifiers:["option"]))
+    let zhuyin = event(3, "ㄑ", [.command])
+    precondition(BrowserKeyCombo.invocation(event: zhuyin, shortcuts: .defaults)?.action == .findInPage)
+    for (flags, modifiers): (NSEvent.ModifierFlags, [String]) in [
+        ([.command, .option], ["command", "option"]), ([.command, .control], ["command", "control"])
+    ] {
+        let map = BrowserShortcutMap(bindings: [.findInPage: .init(key: "f", modifiers: modifiers)])
+        precondition(BrowserKeyCombo.invocation(event: event(3, "ㄑ", flags), shortcuts: map)?.action == .findInPage)
+    }
+    let customIME = BrowserShortcutMap(bindings: [.reload: .init(key: "ㄑ", modifiers: ["command"])])
+    precondition(BrowserKeyCombo.invocation(event: zhuyin, shortcuts: customIME,
+        translate: { _, _ in preconditionFailure("custom bindings win") })?.action == .reload)
+    precondition(BrowserKeyCombo.invocation(event: event(3, "ㄑ"), shortcuts: .defaults,
+        translate: { _, _ in preconditionFailure("do not intercept composition") }) == nil)
+    precondition(BrowserKeyCombo.invocation(event: event(3, "f", [.command]), shortcuts: .defaults,
+        translate: { _, _ in preconditionFailure("Latin layout stays intact") })?.action == .findInPage)
+    let nonUS = BrowserKeyCombo.invocation(event: zhuyin, shortcuts: .defaults,
+        translate: { code, flags in precondition(code == 3 && flags == .command); return "r" })
+    precondition(nonUS?.action == .reload)
+    precondition(BrowserKeyCombo.invocation(event: event(17, "ㄔ", [.command, .shift]), shortcuts: .defaults,
+        translate: { _, flags in precondition(flags.contains(.shift)); return "t" })?.action == .reopenClosedTab)
     _ = window.makeFirstResponder(nil)
     precondition(!capture.performKeyEquivalent(with:event(17,"t",[.command])))
     print("W57e native recorder passed")

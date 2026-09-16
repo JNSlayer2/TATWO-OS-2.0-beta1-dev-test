@@ -11,7 +11,7 @@ const read = p => readFileSync(join(root,p),'utf8');
 
 test('W57a shortcuts are mounted in human Browser/chat-browser only and gated by local focus', () => {
   const controls = read(b+'BrowserDailyNavigationControls.swift');
-  // W57e replaces W57a's built-in bindings with the user's map; only Cmd-T defaults.
+  // Standard defaults and custom bindings share the same focus-scoped map.
   assert.match(controls, /map\.combos\(for: action\)/);
   assert.match(controls, /keyboardShortcut\(combo\.equivalent, modifiers: combo\.eventModifiers\)/);
   assert.match(controls, /\.disabled\(!focused\)/);
@@ -19,7 +19,7 @@ test('W57a shortcuts are mounted in human Browser/chat-browser only and gated by
   assert.match(controls, /bounds\.contains/);
   assert.doesNotMatch(controls, /addLocalMonitorForEvents|addGlobalMonitorForEvents/);
   const design = read(b+'BrowserWorkSpaceDesignView.swift');
-  const body = design.slice(design.indexOf('private var browserContent:'),design.indexOf('private var extensionStrip:'));
+  const body = design.slice(design.indexOf('var body: some View'),design.indexOf('private var sessionContent:'));
   assert.match(body, /BrowserDailyNavigationControls\(focused: browserFocused/);
   assert.doesNotMatch(design.replace(body,''), /BrowserDailyNavigationControls\(/);
   const chat = read(b+'EmbeddedBrowserView.swift');

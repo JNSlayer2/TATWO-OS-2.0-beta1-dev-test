@@ -368,6 +368,7 @@ struct EmbeddedBrowserCommand: Equatable {
         case printPage
         case printPDF
         case openPDF
+        case resetDownloadPermission
         case find(String, forward: Bool, matchCase: Bool)
         case stopFinding
         case zoom(Double)
@@ -434,6 +435,7 @@ struct EmbeddedBrowserNavigationState: Equatable {
     let navigationGeneration: UInt64
     let httpStatusCode: Int?
     let structuredError: EmbeddedBrowserNavigationError?
+    var isPDF = false
 
     init(
         urlString: String?,

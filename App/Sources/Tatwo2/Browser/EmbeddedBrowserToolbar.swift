@@ -488,6 +488,7 @@ struct EmbeddedBrowserToolbar: View {
     // FocusState cannot request focus while its TextField is unmounted.
     // Consume an explicit request from the existing browser shortcut action.
     var expansionRequest: Binding<Bool> = .constant(false)
+    var showsAddress = true
     // 提示只能顯示使用者實際綁定的快捷鍵。⌘L 是系統保留鍵且不在 defaults 裡，
     // 寫死「⌘L 編輯」等於向使用者宣告一個按下去沒反應的功能。
     @State private var addressShortcutHint: String? = EmbeddedBrowserToolbar.focusAddressHint()
@@ -528,32 +529,33 @@ struct EmbeddedBrowserToolbar: View {
         HStack(spacing: BrowserOmniboxMetrics.controlGap) {
             control("chevron.left", "上一頁", enabled && state.canGoBack, .goBack)
             control("chevron.right", "下一頁", enabled && state.canGoForward, .goForward)
-            control(state.isLoading ? "xmark" : "arrow.clockwise", state.isLoading ? "停止載入" : "重新載入", enabled, state.isLoading ? .stopLoading : .reload)
-            Button(action: expandEditor) {
-                HStack(spacing: BrowserOmniboxMetrics.controlGap) {
-                    Image(systemName: BrowserOmniboxPresentation.symbol(for: state.urlString))
-                        .font(.system(size: BrowserOmniboxMetrics.iconSize))
-                        .accessibilityHidden(true)
-                    Text(BrowserOmniboxPresentation.domain(for: state.urlString))
-                        .font(.system(size: BrowserOmniboxMetrics.domainFontSize))
-                        .lineLimit(1).truncationMode(.middle)
+            control(state.isLoading ? "xmark" : "arrow.clockwise", state.isLoading ? "停止載入" : "重新載入", enabled && showsAddress, state.isLoading ? .stopLoading : .reload)
+            if showsAddress {
+                Button(action: expandEditor) {
+                    HStack(spacing: BrowserOmniboxMetrics.controlGap) {
+                        Text(BrowserOmniboxPresentation.domain(for: state.urlString))
+                            .font(.system(size: BrowserOmniboxMetrics.domainFontSize))
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: BrowserOmniboxMetrics.collapsedHeight, alignment: .leading)
+                    .padding(.leading, BrowserOmniboxMetrics.horizontalInset)
+                    .contentShape(Rectangle())
                 }
-                .frame(maxWidth: .infinity, minHeight: BrowserOmniboxMetrics.collapsedHeight)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain).disabled(!enabled)
+                .help(editHint)
+                .accessibilityLabel("網址").accessibilityIdentifier("browser.omnibox")
+                .accessibilityHidden(isExpanded)
+            } else {
+                Spacer(minLength: BrowserOmniboxMetrics.zero)
             }
-            .buttonStyle(.plain).disabled(!enabled)
-            .help(editHint)
-            .accessibilityLabel("網址").accessibilityIdentifier("browser.omnibox")
-            .accessibilityHidden(isExpanded)
         }
         .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
         .padding(.horizontal, BrowserOmniboxMetrics.horizontalInset)
         .frame(height: BrowserOmniboxMetrics.collapsedHeight)
-        .modifier(BrowserOmniboxGlass(cornerRadius: BrowserOmniboxMetrics.collapsedRadius))
         .background(NonWindowDraggingView())
         .accessibilityIdentifier("browser-navigation-bar")
         .overlay(alignment: .top) {
-            if isExpanded {
+            if showsAddress && isExpanded {
                 editorPanel
                     .offset(y: BrowserOmniboxMetrics.collapsedHeight + BrowserOmniboxMetrics.panelGap)
                     .transition(reduceMotion ? .identity : .move(edge: .top).combined(with: .opacity))
@@ -566,11 +568,18 @@ struct EmbeddedBrowserToolbar: View {
             expandEditor()
         }
         .onChange(of: addressFieldFocused.wrappedValue) { _, focused in
-            if focused {
+            if focused && showsAddress {
                 isExpanded = BrowserOmniboxPresentation.isExpanded(after: .focusRequested)
             } else if isExpanded {
                 dismissEditor(.focusLost)
             }
+        }
+        .onChange(of: showsAddress) { _, visible in
+            guard !visible else { return }
+            isExpanded = false
+            addressFieldFocused.wrappedValue = false
+            expansionRequest.wrappedValue = false
+            selection = -1
         }
         .onReceive(NotificationCenter.default.publisher(for: BrowserShortcutMap.changed)) { _ in
             addressShortcutHint = EmbeddedBrowserToolbar.focusAddressHint()
@@ -649,7 +658,7 @@ struct EmbeddedBrowserToolbar: View {
     }
 
     private func expandEditor() {
-        guard enabled else { return }
+        guard enabled && showsAddress else { return }
         guard !isExpanded else { addressFieldFocused.wrappedValue = true; return }
         searchSettings = BrowserGeneralSettings.load()
         addressText = state.urlString ?? ""
@@ -658,6 +667,7 @@ struct EmbeddedBrowserToolbar: View {
     }
 
     private func dismissEditor(_ event: BrowserOmniboxPresentation.Event) {
+        guard isExpanded else { return }
         isExpanded = BrowserOmniboxPresentation.isExpanded(after: event)
         addressText = state.urlString ?? ""
         addressFieldFocused.wrappedValue = false

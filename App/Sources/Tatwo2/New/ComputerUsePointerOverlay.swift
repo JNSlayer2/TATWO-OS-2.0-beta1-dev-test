@@ -205,9 +205,13 @@ final class ComputerUsePointerOverlay {
                 guard let self, let panel = self.panel else { timer.invalidate(); return }
                 let raw = min(1, (ProcessInfo.processInfo.systemUptime - began) / duration)
                 let t = CGFloat(1 - pow(1 - raw, 4))
-                let u = 1 - t
-                panel.setFrameOrigin(CGPoint(x: u * u * start.x + 2 * u * t * control.x + t * t * end.x,
-                                             y: u * u * start.y + 2 * u * t * control.y + t * t * end.y))
+                let u: CGFloat = 1 - t
+                let startWeight: CGFloat = u * u
+                let controlWeight: CGFloat = 2 * u * t
+                let endWeight: CGFloat = t * t
+                let x: CGFloat = startWeight * start.x + controlWeight * control.x + endWeight * end.x
+                let y: CGFloat = startWeight * start.y + controlWeight * control.y + endWeight * end.y
+                panel.setFrameOrigin(CGPoint(x: x, y: y))
                 if raw >= 1 {
                     timer.invalidate(); self.motion = nil
                     completion?()

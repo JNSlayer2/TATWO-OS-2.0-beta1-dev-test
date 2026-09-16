@@ -1,12 +1,15 @@
 import AppKit
+import Carbon
 import SwiftUI
 
 /// The probe occupies exactly the browser panel, not the surrounding chat/CLI hosting view.
 /// No application-wide key monitor: SwiftUI owns shortcut registration and teardown.
 struct BrowserDailyFocusScope: NSViewRepresentable {
     @Binding var focused: Bool
+    var acceptsWindowResponder = false
     final class Probe: NSView {
         var update: ((Bool) -> Void)?
+        var acceptsWindowResponder = false
         var windowUpdate: NSObjectProtocol?
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -20,23 +23,37 @@ struct BrowserDailyFocusScope: NSViewRepresentable {
         }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         func check() {
-            guard let window, window.isKeyWindow, var view = window.firstResponder as? NSView else {
+            guard let window, window.isKeyWindow, window.attachedSheet == nil,
+                  !isHiddenOrHasHiddenAncestor else {
                 update?(false); return
             }
+            // In the dedicated Browser workspace, dismissing native chrome
+            // can leave NSWindow as first responder. Keep its shortcuts usable;
+            // embedded chat browsers retain the stricter descendant-only rule.
+            if acceptsWindowResponder, window.firstResponder === window {
+                update?(true); return
+            }
+            guard var view = window.firstResponder as? NSView else { update?(false); return }
             if let editor = view as? NSTextView, editor.isFieldEditor, let control = editor.delegate as? NSView { view = control }
             view = BrowserWebFeatures.focusOwner(for: view)
             // An app-wide hosting/root responder is not evidence that this browser has focus.
-            guard view !== self, !isDescendant(of: view) else { update?(false); return }
+            guard view !== self, !isDescendant(of: view) else {
+                update?(acceptsWindowResponder); return
+            }
             let rect = convert(view.bounds, from: view)
             update?(!isHiddenOrHasHiddenAncestor && bounds.contains(NSPoint(x: rect.midX, y: rect.midY)))
         }
     }
     func makeNSView(context: Context) -> Probe {
         let probe = Probe()
+        probe.acceptsWindowResponder = acceptsWindowResponder
         probe.update = { value in if focused != value { focused = value } }
         return probe
     }
-    func updateNSView(_ view: Probe, context: Context) { view.update = { if focused != $0 { focused = $0 } } }
+    func updateNSView(_ view: Probe, context: Context) {
+        view.acceptsWindowResponder = acceptsWindowResponder
+        view.update = { if focused != $0 { focused = $0 } }
+    }
     static func dismantleNSView(_ view: Probe, coordinator: ()) {
         if let observer = view.windowUpdate { NotificationCenter.default.removeObserver(observer) }
         view.windowUpdate = nil; view.update = nil
@@ -73,20 +90,15 @@ struct BrowserDailyNavigationControls: View {
             map = BrowserGeneralSettings.load().shortcuts
         }
         .onChange(of: shortcutSerial) { _, _ in
-            guard focused else { return }
+            // The native host already requires the selected, visible human page.
+            // SwiftUI's focus probe can lag that AppKit event by one update.
             switch shortcutKind {
             case "escape":
                 // Find bar open → close it first; otherwise Esc stops loading.
                 if findPresented { onCommand(.stopFinding); findPresented = false } else { onCommand(.stopLoading) }
             default:
-                // The legacy bridge reports key kinds, NOT user-configured actions.
-                // It currently consumes unbound keys too; returning them requires a bridge contract change.
-                guard let combo = BrowserShortcutMap.legacyCombo(shortcutKind) else { return }
-                for action in BrowserAction.allCases {
-                    if let index = map.combos(for: action).firstIndex(where: { $0.matches(combo) }) {
-                        perform(action, number: index + 1); return
-                    }
-                }
+                guard let invocation = BrowserShortcutInvocation(message: shortcutKind) else { return }
+                perform(invocation.action, number: invocation.number)
             }
         }
     }
@@ -98,7 +110,7 @@ struct BrowserDailyNavigationControls: View {
         case .reload: onCommand(.reload)
         case .stopLoading: onCommand(.stopLoading)
         case .reopenClosedTab: onReopen()
-        case .findInPage: findPresented = true
+        case .findInPage: onAction(.findInPage); findPresented = true
         case .zoomIn: zoom(1)
         case .zoomOut: zoom(-1)
         case .zoomReset: onCommand(.zoom(0))
@@ -135,6 +147,7 @@ struct BrowserFindBar: View {
     let count: Int
     let activeIndex: Int
     let onCommand: (EmbeddedBrowserCommand.Action) -> Void
+    var focusRequest = 0
     @State private var text = ""
     @FocusState private var focused: Bool
     var body: some View {
@@ -146,7 +159,12 @@ struct BrowserFindBar: View {
             Button { find(false) } label: { Image(systemName: "chevron.up") }.help("上一個")
             Button { find(true) } label: { Image(systemName: "chevron.down") }.help("下一個")
             Button(action: close) { Image(systemName: "xmark") }.help("關閉頁內搜尋")
-        }.buttonStyle(.borderless).padding(8).onAppear { focused = true }
+        }.buttonStyle(.borderless).padding(8).task(id: focusRequest) {
+            // Let the containing browser release address-bar focus and mount
+            // this field before asking AppKit to change the first responder.
+            await Task.yield()
+            focused = true
+        }
     }
     private func find(_ forward: Bool) { onCommand(.find(text, forward: forward, matchCase: false)) }
     private func close() { onCommand(.stopFinding); presented = false }
@@ -159,7 +177,43 @@ struct BrowserAddressSuggestion: Identifiable {
 }
 
 extension BrowserKeyCombo {
+    /// Preserve custom bindings first. IMEs may report a non-Latin character for
+    /// Command keys; translate using the user's ASCII layout, not US key positions.
+    static func invocation(event: NSEvent, shortcuts: BrowserShortcutMap,
+                           translate: (UInt16, NSEvent.ModifierFlags) -> String? = asciiKey) -> BrowserShortcutInvocation? {
+        guard let combo = Self(event: event), !combo.modifiers.isEmpty else { return nil }
+        if let direct = shortcuts.invocation(for: combo) { return direct }
+        guard combo.modifiers.contains("command"), combo.key.unicodeScalars.contains(where: { $0.value > 127 }),
+              let key = translate(event.keyCode, event.modifierFlags) else { return nil }
+        return shortcuts.invocation(for: Self(key: key, modifiers: combo.modifiers))
+    }
+
+    private static func asciiKey(_ keyCode: UInt16, _ flags: NSEvent.ModifierFlags) -> String? {
+        guard let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let property = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+        let data = Unmanaged<CFData>.fromOpaque(property).takeUnretainedValue()
+        guard let bytes = CFDataGetBytePtr(data) else { return nil }
+        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+        var modifiers: UInt32 = 0
+        // Like charactersIgnoringModifiers, do not turn Option-F into a symbol
+        // or Control-F into a control character. Matching keeps all modifiers.
+        for (flag, legacy): (NSEvent.ModifierFlags, Int) in [(.command, cmdKey), (.shift, shiftKey)] {
+            if flags.contains(flag) { modifiers |= UInt32(legacy) }
+        }
+        var dead: UInt32 = 0
+        var length = 0
+        var characters = [UniChar](repeating: 0, count: 8)
+        guard UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDown), modifiers >> 8,
+                             UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                             &dead, characters.count, &length, &characters) == noErr, length == 1 else { return nil }
+        return String(utf16CodeUnits: characters, count: length).lowercased()
+    }
+
     init?(event: NSEvent) {
+        // CEF may report modifier transitions as raw key input. AppKit raises
+        // an Objective-C exception if characters are read from flagsChanged
+        // or other non-key events; Swift cannot catch that exception.
+        guard event.type == .keyDown || event.type == .keyUp else { return nil }
         let key: String
         switch event.keyCode {
         case 53: key = "escape"
@@ -184,8 +238,8 @@ extension BrowserKeyCombo {
         default: KeyEquivalent(key.first ?? " ")
         }
     }
-    var eventModifiers: EventModifiers {
-        modifiers.reduce(into: EventModifiers()) { result, name in
+    var eventModifiers: SwiftUI.EventModifiers {
+        modifiers.reduce(into: SwiftUI.EventModifiers()) { result, name in
             switch name {
             case "command": result.insert(.command)
             case "shift": result.insert(.shift)

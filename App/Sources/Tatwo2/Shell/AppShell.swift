@@ -946,6 +946,7 @@ final class TatwoUltraworkAppDelegate: NSObject, NSApplicationDelegate {
     private var pressureSensorProvider: TatwoMacPressureSensorProviderV1?
     /// 裝置身分解析是延後的；若磁碟在 app 結束後才回應，不要再裝一個新的 runtime。
     private var isTerminating = false
+    private let terminationCoordinator = TatwoTerminationCoordinator()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         InAppUpdater.reconcileOnLaunch()
@@ -1117,18 +1118,13 @@ final class TatwoUltraworkAppDelegate: NSObject, NSApplicationDelegate {
         // 都出不來。這裡只讀 monitor 已在背景發布的 process-local 快照；最多落後
         // 一個 5 秒 poll interval，寧可多顯示一次確認，也不能把主執行緒鎖死。
         let snapshot = TatwoLoopsActivityMonitor.terminationSnapshot()
-        guard TatwoInterruptGate.decision(kind: .appTerminate, snapshot: snapshot)
-            .requiresConfirmation
-        else { return .terminateNow }
-
-        DispatchQueue.main.async {
-            let confirmed = TatwoInterruptConfirmationPresenter.confirm(
-                kind: .appTerminate,
-                snapshot: snapshot,
-                window: NSApp.keyWindow)
-            NSApp.reply(toApplicationShouldTerminate: confirmed)
+        let requiresConfirmation = TatwoInterruptGate.decision(kind: .appTerminate, snapshot: snapshot).requiresConfirmation
+        let visibleWindow = NSApp.mainWindow ?? NSApp.windows.first {
+            $0.isVisible && $0.level == .normal && !($0 is NSPanel)
         }
-        return .terminateLater
+        return terminationCoordinator.request(requiresConfirmation: requiresConfirmation, window: visibleWindow) { approved in
+            sender.reply(toApplicationShouldTerminate: approved)
+        }
     }
 
     private func showDefaultSurfaceForUserOpen() {
@@ -1284,6 +1280,12 @@ extension NSView {
 final class TatwoWorkOSWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func update() {
+        super.update()
+        // AppKit relays out its titlebar after ordering and SwiftUI content changes.
+        layoutTatwoTrafficLights()
+    }
 
     /// Esc 關窗。注意 `close()` **不會**經過 `windowShouldClose(_:)`（那只有 `performClose:` 才走），
     /// 所以這條路徑必須自己過同一道閘，否則 Esc 就成了繞過確認的後門。
@@ -2760,13 +2762,15 @@ private struct TatwoHydratedPanelView: View {
                         retainedWindowContent
                             .overlay(alignment: .top) {
                                 // 只留拖曳區 + 交通燈透明 spacer；右面板開關交給頁內 icon-only strip（#50/#51 對齊 Codex，不再兩層）。
-                                TatwoWindowPageRail(
-                                    isRightPanelOpen: isRightPanelOpen,
-                                    toggleRightPanel: {
-                                        rightPanelPreference = !isRightPanelOpen
-                                    },
-                                    showRightPanelToggle: false
-                                )
+                                if chatModel.mode != .browser {
+                                    TatwoWindowPageRail(
+                                        isRightPanelOpen: isRightPanelOpen,
+                                        toggleRightPanel: {
+                                            rightPanelPreference = !isRightPanelOpen
+                                        },
+                                        showRightPanelToggle: false
+                                    )
+                                }
                             }
                     } else {
                         retainedWindowContent

@@ -29,7 +29,8 @@ test('workspace design projects registry data; W47 transport is confined to its 
   assert.match(design, /BrowserWorkSpaceCEFSurface/);
   assert.deepEqual([...design.matchAll(/^import (.+)$/gm)].map(m => m[1]), ['SwiftUI', 'Combine']);
   assert.doesNotMatch(design, /FileManager|UserDefaults|AppStorage|SceneStorage|NSWorkspace|openURL|Process\(|Task\s*\{|Timer|Data\(contentsOf|write\s*\(/);
-  assert.ok(design.split('\n').length <= 1160);
+  // Persistent toolbar and explicit blank-tab start page retain the bounded single-file view with integrated download actions.
+  assert.ok(design.split('\n').length <= 1300);
   assert.match(design, /TatwoActivePalette\.current/);
   assert.match(design, /LiquidGlassTokens\.radiusCard/);
   assert.doesNotMatch(design, /\.ultraThinMaterial/);
@@ -61,15 +62,14 @@ test('browser rejoins the shared chat sidebar shell and footer with no private s
   for (const token of ['WorkspaceSidebarShell', 'workspaceModeSection', 'workspaceSidebarFooter', 'BrowserWorkSpaceSidebarList(store: browserWorkSpaceStore)']) assert.ok(browser.includes(token));
   assert.match(browser, /workspaceModeSection\s*\.padding\(\.top, WorkspaceSidebarMetrics.headerTopInset\)/);
   assert.match(browser, /overlay\(alignment: \.topLeading\)/);
-  // 這一列現在是「膠囊＋側欄收合＋側欄固定」三件（W66-fix）。膠囊改用扣掉兩顆鈕的
-  // 衍生 token，整列總寬仍受 spaceSwitcherWidth 約束，才不會撐出紅綠燈帶。
-  assert.match(sidebar, /frame\(width: WorkspaceSidebarMetrics.spaceSwitcherMenuWidth, height: WorkspaceSidebarMetrics.spaceSwitcherHeight\)/);
+  // Title-only space menu; the single sidebar control lives in the page toolbar.
+  assert.match(sidebar, /frame\(width: WorkspaceSidebarMetrics.spaceSwitcherMenuWidth, height: WorkspaceSidebarMetrics.spaceSwitcherHeight, alignment: \.leading\)/);
   assert.match(read('App/Sources/Tatwo2/Visual/WorkspaceSidebarMetrics.swift'),
-    /spaceSwitcherMenuWidth: CGFloat =\s*\n?\s*spaceSwitcherWidth - 2 \* \(sidebarControlSize \+ sidebarControlGap\)/);
+    /spaceSwitcherMenuWidth: CGFloat = 124/);
   assert.match(browser, /frame\(maxHeight: \.infinity, alignment: \.topLeading\)/);
   assert.match(browser, /ForEach\(browserWorkSpaceStore.spaces\)/);
   assert.match(browser, /Button\("新增空間", action: browserWorkSpaceStore.addSpace\)/);
-  assert.match(browser, /Button\("從其他瀏覽器導入…", action: browserWorkSpaceStore.openImport\)/);
+  assert.match(browser, /Button\("從其他瀏覽器導入…", action: browserWorkSpaceStore.requestImport\)/);
   assert.match(browser, /WorkspaceSidebarMetrics.spaceSwitcherFontSize, weight: \.bold/);
   assert.doesNotMatch(design, /sidebarHeader|sidebarFooter|TatwoOSMark|WorkspaceSidebarShell|WorkspaceSidebarModePicker/);
   assert.match(host, /let workspaceOwnsSidebar = model\.mode == \.bot\n/);
@@ -79,7 +79,7 @@ test('browser rejoins the shared chat sidebar shell and footer with no private s
   assert.match(browser, /contextMenu[\s\S]*?ForEach\(ChatRunMode.visibleChatTabs\)/);
   const controls = section(panels, "func rightPanelControlStrip", "if showsThreadControls");
   assert.match(controls, /if model.mode != \.browser \{\s*Button/);
-  assert.match(host, /browserWorkSpaceStore.focusMode \? WorkspaceSidebarMetrics.browserFocusWidth/);
+  assert.match(host, /model.mode != \.browser \|\| !browserWorkSpaceStore.focusMode/);
 });
 
 test('v6 sidebar has five ordered sections, white selection and no chat or search pane', () => {
@@ -106,7 +106,7 @@ test('v6 sidebar has five ordered sections, white selection and no chat or searc
   assert.match(design, /Image\(systemName: "arrow.down.circle"\)/);
   assert.match(design, /popover\(isPresented: \$downloadsPresented, arrowEdge: \.bottom\)/);
   assert.match(design, /Button\("在 Finder 顯示"\) \{ downloadStore.reveal\(download\) \}/);
-  assert.match(design, /Button\("清除", action: downloadStore.clearDownloads\)/);
+  assert.match(design, /Button\("清除紀錄", action: downloadStore.clearDownloads\)/);
   assert.doesNotMatch(design, /sidebar.left/);
 });
 
@@ -118,28 +118,30 @@ test('W54 compact downloads retain search, grouping, selection, clear and native
   assert.match(downloads, /Button\("在 Finder 顯示"/);
   assert.match(downloads, /Button\("快速預覽"/);
   assert.match(downloads, /disabled\(!download.done\)/);
+  assert.match(downloads, /disabled\(!download.state.isTerminal\)/);
+  for (const action of ['pause', 'resume', 'cancel', 'retry']) assert.ok(downloads.includes(`downloadStore.${action}(download)`));
   assert.match(downloads, /selected \|\| hoveredDownloadID == download.id/);
-  assert.match(downloads, /if !download.done/);
+  assert.match(downloads, /if !download.state.isTerminal/);
   assert.doesNotMatch(downloads, /downloadPreview|width: 660/);
   assert.doesNotMatch(design, /尚無分頁/);
   assert.match(read('App/Sources/Tatwo2/Browser/BrowserBookmarkRows.swift'), /store.toggleFolder\(folder.id\)/);
   const browser = section(read('App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift'), 'var browserSidebar:', 'var chatSidebar:');
   assert.match(browser, /overlay\(alignment: \.topLeading\)/);
   assert.match(browser, /padding\(\.leading, WindowChromeMetrics.appControlLeadingX\)/);
-  assert.ok(browser.indexOf('Text(browserWorkSpaceStore.selectedSpace.name)') < browser.indexOf('Image(systemName: "chevron.down")'));
+  assert.match(browser, /Text\(browserWorkSpaceStore.selectedSpace.name\)/);
+  assert.doesNotMatch(browser, /chevron.down/);
 });
 
-test('v6 Search stays centered with 560/15/14.5/30 geometry and top-right extensions', () => {
-  const page = section(design, 'private var page:', 'private var extensionStrip:');
+test('Search keeps its centered geometry without fake installed extension icons', () => {
+  const page = section(design, 'private var page:', 'private var searchBox:');
   assert.match(page, /ZStack/);
   assert.match(page, /RadialGradient\(colors: \[palette.brandAccent.opacity/);
   assert.match(page, /searchBox\s*\.frame\(maxWidth: 560\)/);
   assert.match(page, /\.frame\(maxWidth: \.infinity, maxHeight: \.infinity\)/);
-  assert.match(page, /overlay\(alignment: \.topTrailing\).*extensionStrip/);
-  assert.match(design, /ForEach\(\["文A", "S"\]/);
-  assert.match(design, /HStack\(spacing: 4\)/);
-  assert.match(design, /frame\(width: 18, height: 18\)/);
-  assert.match(design, /RoundedRectangle\(cornerRadius: 5\)/);
+  assert.doesNotMatch(page, /extensionStrip/);
+  assert.doesNotMatch(design, /ForEach\(\["文A", "S"\]/);
+  assert.match(design, /Button \{ extensionsPresented = true \} label:/);
+  assert.match(design, /sheet\(isPresented: \$extensionsPresented\)/);
   assert.match(design, /puzzlepiece.extension/);
   assert.match(design, /TextField\("Search", text: \$query\).font\(.system\(size: 14.5\)\)/);
   assert.match(design, /magnifyingglass"\).font\(.system\(size: 16\)/);
@@ -356,6 +358,7 @@ test('swiftc typechecks complete design and real wrapping picker against isolate
   writeFileSync(stubs, `import SwiftUI
 @MainActor enum BrowserWebFeatures { static func focusOwner(for view: NSView) -> NSView { view } }
 struct BrowserDiagnosticsView: View { var body: some View { EmptyView() } }
+struct BrowserLoginHelpView: View { let currentURL: String; var body: some View { EmptyView() } }
 @MainActor enum BrowserHumanInteraction {
     static func title(_ value: String) -> String { value }
     static func oneLine(_ value: String) -> String { value }
@@ -365,7 +368,7 @@ struct BrowserDiagnosticsView: View { var body: some View { EmptyView() } }
     func info(title: String, detail: String, duration: TimeInterval = 6) {}
 }
 struct EmbeddedBrowserCommand {
-    enum Action { case load(URL), reload, goBack, goForward, stopLoading, printPage, printPDF, openPDF, find(String, forward: Bool, matchCase: Bool), stopFinding, zoom(Double) }
+    enum Action { case load(URL), reload, goBack, goForward, stopLoading, printPage, printPDF, openPDF, resetDownloadPermission, find(String, forward: Bool, matchCase: Bool), stopFinding, zoom(Double) }
     let action: Action
 }
 struct EmbeddedBrowserNavigationState {
@@ -374,6 +377,7 @@ struct EmbeddedBrowserNavigationState {
     var canGoBack = false
     var canGoForward = false
     var isLoading = false
+    var isPDF = false
     var navigationGeneration: UInt64 = 0
     var showsNavigationProgress: Bool { isLoading }
 }
@@ -437,6 +441,7 @@ extension View {
     func chatGlassChip(isSelected: Bool = false) -> some View { self }
 }
 `);
+  writeFileSync(stubs, readFileSync(stubs, 'utf8') + '\nextension Notification.Name { static let tatwoChatSelectMode = Notification.Name("fixture.mode") }\n');
   const toolbar = join(dir, 'Toolbar.swift');
   writeFileSync(toolbar, 'import SwiftUI\n' + read('App/Sources/Tatwo2/Browser/EmbeddedBrowserToolbar.swift').split('struct EmbeddedBrowserToolbar: View')[1].replace(/^/, 'struct EmbeddedBrowserToolbar: View'));
   const viewSources = ['-num-threads', '2', writeBrowserVisualTokens(dir, { includeOmnibox: true }), ...registrySources, stubs, toolbar,
@@ -455,6 +460,7 @@ extension View {
     join(root, 'App/Sources/Tatwo2/Browser/BrowserTabRow.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserBookmarkRows.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserSidebarControls.swift'),
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserExtensionsView.swift'),
     join(root, 'App/Sources/Tatwo2/Shell/WorkspaceSpaceControls.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserWorkSpaceDesignView.swift')];
   run('swiftc', ['-typecheck', ...viewSources]);
@@ -469,7 +475,7 @@ extension View {
 
 
 test('W39 Browser-only shortcut, bookmark drops, blank-area menu and add-space control', () => {
-  const page = section(design, 'private var page:', 'private var extensionStrip:');
+  const page = section(design, 'private var page:', 'private var searchBox:');
   assert.match(design, /onAction: performBrowserAction/);
   assert.match(design, /case \.newTab: if store.canAddTab/);
   for (const name of ['ChatPage+Sidebar.swift', 'ChatPage.swift', 'ChatPage+Panels.swift', 'ChatPage+Composer.swift']) {
@@ -493,11 +499,11 @@ test('W39 Browser-only shortcut, bookmark drops, blank-area menu and add-space c
   assert.doesNotMatch(browser, /frame\(maxHeight: \.infinity, alignment: \.center\)/);
 });
 
-test('space name next to the traffic lights is 12.5pt bold, name before chevron', () => {
+test('space name next to the traffic lights is bold text without a chevron', () => {
   const sidebar = readFileSync(new URL('../App/Sources/Tatwo2/Chat/ChatPage+Sidebar.swift', import.meta.url), 'utf8');
   const menu = sidebar.slice(sidebar.indexOf('browserWorkSpaceStore.selectedSpace.name'), sidebar.indexOf('browserWorkSpaceStore.selectedSpace.name') + 400);
   assert.match(menu, /\.font\(\.system\(size: WorkspaceSidebarMetrics.spaceSwitcherFontSize, weight: \.bold\)\)/, '空間名稱 12.5 粗體');
-  assert.ok(menu.indexOf('selectedSpace.name') < menu.indexOf('chevron.down'), '名稱在 chevron 前');
+  assert.doesNotMatch(menu, /chevron.down/);
 });
 
 test('W56-fix: space visibleTabs honours the shipped Info.plist browser flag, not only the env flag', () => {

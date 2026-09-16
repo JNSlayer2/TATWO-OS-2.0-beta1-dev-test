@@ -321,3 +321,7 @@ tests/fixtures/agent-accounts-checks.swift | macos username | W59 synthetic AI a
 reference-core/.github/workflows/ci.yml | macos username | Public reference workflow name, not an operating system account. | ^public-core-check$
 reference-core/package.json | macos username | Public reference package name, not an operating system account. | ^tatwo-os-2-public$
 reference-core/skills/tatwo-ultrawork/SKILL.md | macos username | Public skill identifier, not an operating system account. | ^tatwo-ultrawork$
+App/Tests/Tatwo2Tests/ProviderIconResourcesTests.swift | ssh host alias | Packaged icon resource name in an isolated resource lookup fixture. | ^ProviderIcon-codex$
+tests/browser-repaired-actions.test.mjs | email address | Synthetic credential-bearing example URL rejected by login handoff policy. | ^password\x40example\.com$
+tests/fixtures/browser-download-permissions-checks.swift | personal hostname | Synthetic local hostname verifies consent normalization and deduplication. | ^(?:NAS\.LOCAL\.|nas\.local)$
+tests/fixtures/browser-download-permissions-checks.swift | email address | Synthetic credential-bearing example URL verifies history redaction. | ^secret-password\x40example\.test$

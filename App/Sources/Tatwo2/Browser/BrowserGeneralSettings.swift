@@ -70,7 +70,7 @@ struct BrowserGeneralSettings: Codable, Equatable, Sendable {
     /// so a missing key must not throw the whole file back to defaults.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        shortcuts = (try? container.decodeIfPresent(BrowserShortcutMap.self, forKey: .shortcuts)) ?? .defaults
+        shortcuts = ((try? container.decodeIfPresent(BrowserShortcutMap.self, forKey: .shortcuts)) ?? .defaults).upgradedFromLegacy
         shortcutsEdited = false
         zoomByHost = try container.decodeIfPresent([String: Double].self, forKey: .zoomByHost) ?? [:]
         defaultSpaceID = try container.decodeIfPresent(UUID.self, forKey: .defaultSpaceID)

@@ -5,7 +5,6 @@ enum WorkspaceSidebarMetrics {
     // 2026-09-11 使用者：整體試用舊版 Bot 分頁的比例（Gen-4 側欄 250pt）。
     // 註：2026-08-26 曾回饋 250pt 讓三分頁與搜尋列過窄，這是試用版。
     static let width: CGFloat = 250
-    static let browserFocusWidth: CGFloat = 132
     // LiquidGlassPanelCard supplies the common 18pt outer inset.
     // 2026-09-11 使用者：Chat/CLI/Bot 分頁條整體再調高（新模板同規格）；搜尋等下方內容跟著上移。
     static let headerTopInset: CGFloat = 22
@@ -13,18 +12,11 @@ enum WorkspaceSidebarMetrics {
     static let browserContentGap: CGFloat = 0
     static let contentGap: CGFloat = 12
     static let spaceSwitcherHeight: CGFloat = 22
-    static let spaceSwitcherWidth: CGFloat = 132
-    static let spaceSwitcherFontSize: CGFloat = 12.5
-    static let spaceSwitcherChevronSize: CGFloat = 10
+    static let spaceSwitcherFontSize: CGFloat = 13
     static let spaceSwitcherSpacing: CGFloat = 6
-    static let spaceSwitcherHorizontalInset: CGFloat = 8
-    // 側欄開關與固定鈕：與空間切換器同一條紅綠燈帶，跟在膠囊右側。
-    static let sidebarControlSize: CGFloat = 22
-    static let sidebarControlIconSize: CGFloat = 12
-    static let sidebarControlGap: CGFloat = 4
-    /// 膠囊自己的寬度：整列總寬扣掉兩顆鈕與間隙，整列才不會撐出紅綠燈帶。
-    static let spaceSwitcherMenuWidth: CGFloat =
-        spaceSwitcherWidth - 2 * (sidebarControlSize + sidebarControlGap)
+    static let spaceSwitcherHorizontalInset: CGFloat = 0
+    /// Text-only menu between traffic lights and the page toolbar.
+    static let spaceSwitcherMenuWidth: CGFloat = 124
 }
 
 /// Bot's approved 6pt dots / 8pt gaps. Browser uses the same centered cells;

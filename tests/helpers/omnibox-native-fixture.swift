@@ -39,6 +39,7 @@ enum LiquidGlassTokens { static let shapeStyle = RoundedCornerStyle.continuous }
 @MainActor final class W67Probe: ObservableObject {
     @Published var address = "https://example.com/a/long/path?fixture=1"
     @Published var focusSerial = 0
+    @Published var showsAddress = true
     var pageClicks = 0, annotationClicks = 0, submissions = 0
     var submitted = "", selectedTab = ""
 }
@@ -78,7 +79,8 @@ struct W67Fixture: View {
                 onSubmit: { probe.submitted = probe.address; probe.submissions += 1; focused = false },
                 onCommand: { _ in },
                 openTabs: [.init(id: "fixture-tab", title: "Example tab", url: "https://example.com")],
-                onSelectTab: { probe.selectedTab = $0 }, expansionRequest: $addressExpansionRequested)
+                onSelectTab: { probe.selectedTab = $0 }, expansionRequest: $addressExpansionRequested,
+                showsAddress: probe.showsAddress)
             Menu { Button("Fixture action") {} } label: {
                 Image(systemName: "ellipsis.circle")
                     .frame(minWidth: BrowserOmniboxMetrics.collapsedHeight, minHeight: BrowserOmniboxMetrics.collapsedHeight)
@@ -97,7 +99,7 @@ struct W67Fixture: View {
             if chatContext {
                 VStack(spacing: 0) { header; W67Page(probe: probe) }
             } else {
-                W67Page(probe: probe).overlay(alignment: .top) { header }
+                VStack(spacing: 0) { header; W67Page(probe: probe) }
             }
         }.onChange(of: probe.focusSerial) { _, _ in addressExpansionRequested = true }
     }
@@ -237,6 +239,24 @@ final class W67Window: NSWindow {
                         "\(tag) primary search click submits before focus dismissal")
                     click(width - 20, 12)
                     check(probe.annotationClicks == 1, "\(tag) annotation remains clickable")
+                    click(width / 2, 12)
+                    check(editable(host) != nil, "\(tag) address opens before returning to start page")
+                    probe.showsAddress = false
+                    settle()
+                    probe.address = "中央搜尋草稿"
+                    settle()
+                    check(editable(host) == nil, "\(tag) start page unmounts the address editor")
+                    click(width / 2, 12)
+                    click(90, 12)
+                    probe.focusSerial += 1
+                    settle()
+                    check(editable(host) == nil && probe.address == "中央搜尋草稿",
+                        "\(tag) hidden address rejects clicks and focus requests without clearing central draft")
+                    try snapshot("start-page-no-address")
+                    probe.showsAddress = true
+                    settle()
+                    click(width / 2, 12)
+                    check(editable(host) != nil, "\(tag) address usable again after leaving start page")
                     window.close(); settle()
                 }
             }

@@ -206,8 +206,8 @@ test('W53b shared surface owns the complete state card and annotation entrypoint
   assert.match(surface, /BrowserSurfaceText.diagnostic/);
   const sheet = read(browser + 'BrowserAnnotationSheet.swift');
   for (const token of ['EmbeddedBrowserAnnotationStore.shared', 'store.annotations(forURL:', 'profileKey: profileKey', 'store.remove(annotation)']) assert.ok(sheet.includes(token));
-  assert.match(read(browser + 'EmbeddedBrowserView.swift'), /Button\("註解"\)/);
-  assert.match(read(browser + 'BrowserWorkSpaceDesignView.swift'), /contextMenu \{ Button\("註解…"\)/);
+  assert.match(read(browser + 'EmbeddedBrowserView.swift'), /accessibilityLabel\("註解"\)/);
+  assert.match(read(browser + 'BrowserWorkSpaceDesignView.swift'), /contextMenu \{[\s\S]*?Button\("註解…"\)/);
 });
 
 test('W53b workspace/session row variants keep exact baseline values and no inner workspace selection fill', () => {

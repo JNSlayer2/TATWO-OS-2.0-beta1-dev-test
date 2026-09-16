@@ -20,8 +20,14 @@ final class BrowserWorkSpaceStore: ObservableObject {
     @Published private(set) var spaces: [Space] = []
     @Published private(set) var selectedSpaceID = 0
     @Published var focusMode = false { didSet { if sidebarPinned && focusMode { focusMode = false } } }
-    /// 側欄被釘住時，收合鈕停用：使用者明確表示要它一直開著。
+    /// 固定時不接受被動收合；單一開關可明確解除固定並收合。
     @Published var sidebarPinned = false { didSet { if sidebarPinned { focusMode = false } } }
+    @Published var sidebarInteractionActive = false
+    func toggleSidebar() {
+        let opening = focusMode
+        sidebarPinned = opening
+        focusMode = !opening
+    }
     @Published var searchFocusRequest = 0
     @Published private(set) var downloads = [
         Download(id: 0, name: "工作筆記.pdf", size: "2.4 MB", time: "今天 10:30"),
@@ -295,6 +301,12 @@ final class BrowserWorkSpaceStore: ObservableObject {
         registry.touch(uuid)
     }
     var selectedRegistryID: UUID? { canAddTab ? tabIDs[selectedID] : nil }
+    var showsStartPage: Bool { canAddTab && (selectedRegistryID == nil || selectedTab.url == "about:blank" || selectedTab.url.isEmpty) }
+    func navigateFromStartPage(to url: URL) {
+        guard showsStartPage else { return }
+        if let id = selectedRegistryID { registry.update(id, url: url, title: url.host ?? url.absoluteString, favicon: nil) }
+        else { addTab(url: url) }
+    }
     var currentSpaceUUID: UUID? { canAddTab ? spaceIDs[selectedSpaceID] : nil }
     func addTab(url: URL? = nil) {
         guard canAddTab, let spaceID = spaceIDs[selectedSpaceID] else { return }
@@ -318,6 +330,10 @@ final class BrowserWorkSpaceStore: ObservableObject {
               let tab = registry.reopenClosedTab(owner: .workSpace(spaceID: spaceID)) else { return }
         currentFolderID = tab.folderID
         select(tabKey(tab.id))
+    }
+    var canReopenClosedTab: Bool {
+        guard let spaceID = currentSpaceUUID else { return false }
+        return registry.recentlyClosed.contains { $0.owner == .workSpace(spaceID: spaceID) }
     }
     func selectTabNumber(_ number: Int) {
         guard let index = BrowserDailyNavigation.tabIndex(number: number, count: tabs.count) else { return }
@@ -371,8 +387,11 @@ struct BrowserWorkSpaceDesignView: View {
     @FocusState private var addressFocused: Bool
     @State private var addressExpansionRequested = false
     @State private var diagnosticsPresented = false
+    @State private var loginHelpPresented = false
     @State private var browserFocused = false
+    @State private var extensionsPresented = false
     @State private var findPresented = false
+    @State private var findFocusRequest = 0
     @State private var shortcutMap = BrowserGeneralSettings.load().shortcuts
     @State private var query = ""
     @State private var command: EmbeddedBrowserCommand?
@@ -391,10 +410,14 @@ struct BrowserWorkSpaceDesignView: View {
     private var shadowColor: Color { LiquidGlassTokens.browserShadowColor }
 
     var body: some View {
-        Group {
-            if EmbeddedBrowserEnginePolicy.current != .chromiumCEF { BrowserEngineUnavailablePlaceholder() }
-            else if store.selectedSpace.isSessionSpace { sessionContent }
-            else { browserContent }
+        VStack(spacing: BrowserOmniboxMetrics.zero) {
+            workspaceToolbar
+                .zIndex(BrowserOmniboxMetrics.chromeZIndex)
+            Group {
+                if EmbeddedBrowserEnginePolicy.current != .chromiumCEF { BrowserEngineUnavailablePlaceholder() }
+                else if store.selectedSpace.isSessionSpace { sessionContent }
+                else { browserContent }
+            }
         }
             .background(palette.canvasBase)
             .background {
@@ -412,16 +435,44 @@ struct BrowserWorkSpaceDesignView: View {
             }
             .overlay { if tabSearchPresented { tabSearchOverlay } }
             .sheet(isPresented: $diagnosticsPresented) { BrowserDiagnosticsView() }
+            .sheet(isPresented: $extensionsPresented) { BrowserExtensionsView() }
+            .sheet(isPresented: $loginHelpPresented) { BrowserLoginHelpView(currentURL: store.selectedTab.url) }
             .sheet(item: $store.annotationTab) { BrowserAnnotationSheet(tab: $0).background(BrowserAnnotationShortcutDismiss()) }
             .sheet(isPresented: $store.importPresented) { importSheet }
             .onChange(of: store.selectedSpaceID) { _, _ in
-                tabSearchPresented = false; focusedField = nil; restoreAddress()
+                tabSearchPresented = false; findPresented = false
+                focusedField = nil; addressFocused = false; restoreAddress()
             }
-            .onChange(of: store.selectedID) { _, _ in command = nil; restoreAddress() }
-            .onChange(of: store.selectedTab.url) { _, _ in if focusedField != .search { restoreAddress() } }
+            .onChange(of: store.selectedID) { _, _ in
+                command = nil; findPresented = false; addressFocused = false; restoreAddress()
+                focusedField = store.showsStartPage ? .search : nil
+            }
+            .onChange(of: store.selectedTab.url) { _, _ in if focusedField != .search && !addressFocused { restoreAddress() } }
             .onAppear { restoreAddress() }
-            .onChange(of: store.searchFocusRequest) { _, _ in focusedField = .search }
+            .task(id: store.searchFocusRequest) {
+                guard store.searchFocusRequest > 0 else { return }
+                let requestedTab = store.selectedRegistryID
+                let previousFindRequest = findFocusRequest
+                addressFocused = false; focusedField = nil
+                await Task.yield()
+                guard !Task.isCancelled, previousFindRequest == findFocusRequest,
+                      requestedTab == store.selectedRegistryID else { return }
+                if store.showsStartPage { focusedField = .search }
+                else { addressExpansionRequested = true }
+            }
+            .onChange(of: findPresented) { _, visible in
+                if visible { addressFocused = false; focusedField = nil }
+            }
             .onExitCommand { tabSearchPresented = false; focusedField = nil; restoreAddress() }
+            .background(BrowserDailyFocusScope(focused: $browserFocused, acceptsWindowResponder: true))
+            .background {
+                BrowserDailyNavigationControls(focused: browserFocused && !store.bookmarkEditorActive && store.annotationTab == nil && !store.importPresented && !tabSearchPresented && !diagnosticsPresented && !extensionsPresented && !loginHelpPresented,
+                    shortcutSerial: runtime.shortcutSerial, shortcutKind: runtime.shortcutKind,
+                    hasTab: store.selectedRegistryID != nil, editingAddress: addressFocused || focusedField != nil,
+                    url: runtime.navigationState.urlString, findPresented: $findPresented,
+                    onCommand: send, onReopen: store.reopenClosedTab, onTabNumber: store.selectTabNumber,
+                    onAction: performBrowserAction)
+            }
     }
 
     private var sessionContent: some View {
@@ -475,7 +526,6 @@ struct BrowserWorkSpaceDesignView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
-        .overlay(alignment: .topTrailing) { extensionStrip.padding(.top, BrowserSidebarMetrics.settingsCardHorizontalPadding).padding(.trailing, BrowserSidebarMetrics.workspaceFaviconSize) }
         .overlay(alignment: .bottom) {
             if !store.notice.isEmpty { Text(store.notice).font(.caption).foregroundStyle(.secondary).padding(BrowserSidebarMetrics.laneRowSpacing) }
         }
@@ -503,80 +553,105 @@ struct BrowserWorkSpaceDesignView: View {
     }
 
     private func restoreAddress() {
-        query = store.selectedRegistryID == nil ? "" : store.selectedTab.url
+        query = store.showsStartPage ? "" : store.selectedTab.url
+    }
+
+    private var workspaceToolbar: some View {
+        VStack(spacing: BrowserOmniboxMetrics.zero) {
+            HStack(spacing: BrowserOmniboxMetrics.controlGap) {
+                if store.focusMode {
+                    Color.clear.frame(width: WindowChromeMetrics.trafficLightSafeWidth)
+                }
+                BrowserSidebarControls(store: store)
+                EmbeddedBrowserToolbar(addressText: $query, addressFieldFocused: $addressFocused,
+                    state: runtime.navigationTabID == store.selectedRegistryID ? runtime.navigationState : .blank,
+                    enabled: store.canAddTab, onSubmit: submitSearch, onCommand: send,
+                    openTabs: store.tabs.map { BrowserAddressSuggestion(id: String($0.id), title: $0.title, url: $0.url) },
+                    onSelectTab: { if let id = Int($0) { store.select(id) } }, expansionRequest: $addressExpansionRequested,
+                    showsAddress: !store.showsStartPage)
+                Menu {
+                    Button("在網頁中尋找…") { performBrowserAction(.findInPage) }
+                    Button("列印…") { send(.printPage) }
+                    Button("存成 PDF 並用系統預覽開啟") { send(.printPDF) }
+                    if runtime.navigationTabID == store.selectedRegistryID && runtime.navigationState.isPDF {
+                        Button("下載 PDF 並用系統預覽開啟") { send(.openPDF) }
+                    }
+                    Button("登入協助…") { loginHelpPresented = true }
+                    Button("重設此網站的多檔下載權限") { send(.resetDownloadPermission) }
+                    Divider()
+                    Button("搜尋分頁…", action: openTabSearch)
+                    Button(store.focusMode ? "展開側欄" : "收合側欄", action: store.toggleSidebar)
+                    Divider()
+                    Button("關閉目前分頁") { store.close(store.selectedID) }
+                    Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
+                    Button("復原刪除的書籤", action: store.undoBookmarkDeletion).disabled(store.lastRemovedBookmark == nil)
+                    Button("診斷…") { diagnosticsPresented = true }
+                    Button("新增 space", action: store.addSpace)
+                    Button("從其他瀏覽器導入…", action: store.requestImport)
+                    Divider()
+                    Button("擴充功能…") { extensionsPresented = true }
+                    Menu("工作區") {
+                        ForEach(ChatRunMode.visibleChatTabs) { mode in
+                            Button(mode.displayName) {
+                                NotificationCenter.default.post(name: .tatwoChatSelectMode, object: mode.rawValue)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .frame(width: BrowserOmniboxMetrics.collapsedHeight, height: BrowserOmniboxMetrics.collapsedHeight)
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("瀏覽器功能")
+                Button { extensionsPresented = true } label: {
+                    Image(systemName: "puzzlepiece.extension")
+                        .frame(width: BrowserOmniboxMetrics.collapsedHeight, height: BrowserOmniboxMetrics.collapsedHeight)
+                }.buttonStyle(.plain).accessibilityLabel("管理擴充功能")
+                Button { store.showAnnotations(store.selectedID) } label: {
+                    Image(systemName: "note.text")
+                        .frame(width: BrowserOmniboxMetrics.collapsedHeight, height: BrowserOmniboxMetrics.collapsedHeight)
+                }
+                .buttonStyle(.plain).disabled(store.selectedRegistryID == nil)
+                .help("註解").accessibilityLabel("註解").fixedSize()
+            }
+            .font(.system(size: BrowserOmniboxMetrics.iconSize))
+            .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
+            .padding(.horizontal, BrowserOmniboxMetrics.horizontalInset)
+            .frame(height: BrowserOmniboxMetrics.toolbarHeight)
+            .background(palette.canvasBase)
+            .background(NonWindowDraggingView())
+            .zIndex(BrowserOmniboxMetrics.chromeZIndex)
+            BrowserNavigationProgress(tabID: store.selectedRegistryID,
+                state: runtime.navigationTabID == store.selectedRegistryID ? runtime.navigationState : .blank)
+            if findPresented {
+                BrowserFindBar(presented: $findPresented, count: runtime.findCount, activeIndex: runtime.findIndex,
+                               onCommand: send, focusRequest: findFocusRequest)
+                    .id(store.selectedRegistryID)
+            }
+        }
     }
 
     private var browserContent: some View {
         Group {
-            if let tabID = store.selectedRegistryID, let spaceID = store.currentSpaceUUID {
-                // Keep the page full-height: chrome floats at its top edge.
+            if store.showsStartPage { page }
+            else if let tabID = store.selectedRegistryID, let spaceID = store.currentSpaceUUID {
                 BrowserWorkSpaceCEFSurface(tabID: tabID, spaceID: spaceID, command: commandTabID == tabID ? command : nil,
                     onPopup: { store.openPopup(spaceID: $0, url: $1) })
-                .overlay(alignment: .top) {
-                    VStack(spacing: BrowserOmniboxMetrics.zero) {
-                        HStack(alignment: .top, spacing: BrowserOmniboxMetrics.controlGap) {
-                            EmbeddedBrowserToolbar(addressText: $query, addressFieldFocused: $addressFocused,
-                                state: runtime.navigationTabID == tabID ? runtime.navigationState : .blank,
-                                enabled: true, onSubmit: submitSearch, onCommand: send,
-                                openTabs: store.tabs.map { BrowserAddressSuggestion(id: String($0.id), title: $0.title, url: $0.url) },
-                                onSelectTab: { if let id = Int($0) { store.select(id) } }, expansionRequest: $addressExpansionRequested)
-                            Menu {
-                                Button("搜尋分頁…", action: openTabSearch)
-                                Button(store.focusMode ? "離開專注模式" : "專注模式") { store.focusMode.toggle() }
-                                    .disabled(store.sidebarPinned)
-                                Divider()
-                                Button("重新開啟關閉的分頁", action: store.reopenClosedTab)
-                                Button("復原刪除的書籤", action: store.undoBookmarkDeletion).disabled(store.lastRemovedBookmark == nil)
-                                Button("診斷…") { diagnosticsPresented = true }
-                                Button("新增 space", action: store.addSpace)
-                                Button("從其他瀏覽器導入…", action: store.requestImport)
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
-                                    .frame(minWidth: BrowserOmniboxMetrics.collapsedHeight, minHeight: BrowserOmniboxMetrics.collapsedHeight)
-                            }
-                            .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("瀏覽器功能")
-                            .modifier(BrowserOmniboxGlass(cornerRadius: BrowserOmniboxMetrics.collapsedRadius))
-                            Button("註解") { store.showAnnotations(store.selectedID) }
-                                .buttonStyle(.plain)
-                                .frame(minWidth: BrowserOmniboxMetrics.collapsedHeight, minHeight: BrowserOmniboxMetrics.collapsedHeight)
-                                .padding(.horizontal, BrowserOmniboxMetrics.horizontalInset)
-                                .fixedSize()
-                                .modifier(BrowserOmniboxGlass(cornerRadius: BrowserOmniboxMetrics.collapsedRadius))
-                        }
-                        .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
-                        .zIndex(BrowserOmniboxMetrics.chromeZIndex)
-                        BrowserNavigationProgress(tabID: tabID,
-                            state: runtime.navigationTabID == tabID ? runtime.navigationState : .blank)
-                        if findPresented {
-                            BrowserFindBar(presented: $findPresented, count: runtime.findCount, activeIndex: runtime.findIndex, onCommand: send)
-                                .id(tabID)
-                        }
-                    }
-                }
             } else { page }
         }
         .overlay(alignment: .bottom) {
             if let settingsError { Text(settingsError).font(.caption).padding(BrowserSidebarMetrics.rowHorizontalPadding).background(.regularMaterial) }
         }
-        .background {
-            BrowserDailyNavigationControls(focused: browserFocused && !store.bookmarkEditorActive && store.annotationTab == nil && !store.importPresented && !tabSearchPresented && !diagnosticsPresented,
-                shortcutSerial: runtime.shortcutSerial, shortcutKind: runtime.shortcutKind,
-                hasTab: store.selectedRegistryID != nil, editingAddress: addressFocused || focusedField != nil,
-                url: runtime.navigationState.urlString, findPresented: $findPresented,
-                onCommand: send, onReopen: store.reopenClosedTab, onTabNumber: store.selectTabNumber,
-                onAction: performBrowserAction)
-        }
-        .background(BrowserDailyFocusScope(focused: $browserFocused))
-        .onChange(of: focusedField) { _, value in if value == .search && !addressFocused { addressExpansionRequested = true } }
-        .onChange(of: addressFocused) { _, value in focusedField = value ? .search : nil }
-        .onChange(of: store.selectedID) { _, _ in findPresented = false }
     }
 
     private func performBrowserAction(_ action: BrowserAction) {
         switch action {
-        case .newTab: if store.canAddTab { store.addTab(); focusedField = .search }
+        case .newTab: if store.canAddTab { store.addTab(); store.searchFocusRequest += 1 }
         case .closeTab: store.close(store.selectedID)
-        case .focusAddressBar: addressExpansionRequested = true
+        case .focusAddressBar: store.searchFocusRequest += 1
+        case .findInPage:
+            addressFocused = false; focusedField = nil
+            findFocusRequest &+= 1; findPresented = true
         case .nextTab, .previousTab:
             let tabs = store.tabs
             guard !tabs.isEmpty, let index = tabs.firstIndex(where: { $0.id == store.selectedID }) else { return }
@@ -591,32 +666,17 @@ struct BrowserWorkSpaceDesignView: View {
         }
     }
 
-    private var extensionStrip: some View {
-        HStack(spacing: BrowserSidebarMetrics.controlGap) {
-            ForEach(["文A", "S"], id: \.self) { name in
-                Button(action: store.showDesignNotice) {
-                    Text(name).font(.system(size: BrowserSidebarMetrics.extensionFontSize, weight: .bold)).foregroundStyle(fieldFill)
-                        .frame(width: BrowserSidebarMetrics.rowIconWidth, height: BrowserSidebarMetrics.rowIconWidth)
-                        .background(name == "S" ? folderFill : palette.brandAccent,
-                                    in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.spaceDotSize))
-                }.accessibilityLabel("擴充插件 \(name)")
-            }
-            Button(action: store.showDesignNotice) {
-                Image(systemName: "puzzlepiece.extension").frame(width: BrowserSidebarMetrics.rowIconWidth, height: BrowserSidebarMetrics.rowIconWidth)
-            }.accessibilityLabel("管理擴充插件")
-        }.buttonStyle(.plain).foregroundStyle(.secondary)
-    }
-
     private var searchBox: some View {
         VStack(spacing: BrowserSidebarMetrics.zero) {
             HStack(spacing: BrowserSidebarMetrics.downloadsPadding) {
                 Image(systemName: "magnifyingglass").font(.system(size: BrowserSidebarMetrics.searchIconSize)).foregroundStyle(.secondary)
                 TextField("Search", text: $query).font(.system(size: BrowserSidebarMetrics.searchFontSize))
                     .textFieldStyle(.plain).focused($focusedField, equals: .search)
+                    .accessibilityIdentifier("browser.startSearch")
                     .onSubmit(submitSearch).contextMenu { searchEngineMenu }
             }.padding(.horizontal, BrowserSidebarMetrics.childGap).padding(.top, BrowserSidebarMetrics.childGap).padding(.bottom, BrowserSidebarMetrics.laneRowSpacing)
             HStack {
-                roundButton("加入分頁", "plus") { store.addTab(); focusedField = .search }.disabled(!store.canAddTab)
+                roundButton("加入分頁", "plus") { store.addTab(); store.searchFocusRequest += 1 }.disabled(!store.canAddTab)
                 Spacer()
                 roundButton("搜尋", "arrow.up", action: submitSearch)
                     .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -662,8 +722,8 @@ struct BrowserWorkSpaceDesignView: View {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         settings = BrowserSettings.load()
         guard let url = BrowserOmniboxResolver.resolve(query, engine: settings.searchEngine) else { return }
-        if store.selectedRegistryID == nil { store.addTab(url: url) }
-        else { send(.load(url)) }
+        if store.showsStartPage { store.navigateFromStartPage(to: url) }
+        send(.load(url))
         addressFocused = false
         focusedField = nil
     }
@@ -780,6 +840,7 @@ struct BrowserWorkSpaceSidebarList: View {
     @State private var folderName = ""
     @State private var pinsExpanded = true
     @State private var downloadQuery = ""
+    @State private var downloadStatusFilter = "全部"
     @State private var selectedDownloadID: String?
     @State private var hoveredDownloadID: String?
     @State private var downloadsPresented = false
@@ -809,7 +870,7 @@ struct BrowserWorkSpaceSidebarList: View {
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .contextMenu {
-                    Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canAddTab)
+                    Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
                     Button("復原刪除的書籤", action: store.undoBookmarkDeletion).disabled(store.lastRemovedBookmark == nil)
                     Button("新增分頁") { store.addTab(); store.searchFocusRequest += 1 }.disabled(!store.canAddTab)
                     Button("新增書籤（目前分頁）", action: store.bookmarkCurrentTab)
@@ -825,6 +886,10 @@ struct BrowserWorkSpaceSidebarList: View {
         }
         .frame(maxHeight: .infinity)
         .sheet(isPresented: $diagnosticsPresented) { BrowserDiagnosticsView() }
+        .onChange(of: downloadsPresented || diagnosticsPresented || editingFolderID != nil) { _, active in
+            store.sidebarInteractionActive = active
+        }
+        .onDisappear { store.sidebarInteractionActive = false }
     }
 
     // MARK: - Session space (registry-only, no creation or drop targets)
@@ -926,8 +991,9 @@ struct BrowserWorkSpaceSidebarList: View {
                         .frame(width: WorkspaceSpaceControlMetrics.cellWidth, height: WorkspaceSpaceControlMetrics.cellHeight).contentShape(Rectangle())
                 }.accessibilityLabel("新增空間").accessibilityIdentifier("browser.space.add")
             }
-            Color.clear.frame(width: BrowserSidebarMetrics.footerControlSize).accessibilityHidden(true)
+            Color.clear.frame(width: BrowserSidebarMetrics.footerControlSize, height: WorkspaceSpaceControlMetrics.cellHeight).accessibilityHidden(true)
         }
+        .frame(height: WorkspaceSpaceControlMetrics.cellHeight)
         .buttonStyle(.plain).foregroundStyle(.secondary).padding(.horizontal, BrowserSidebarMetrics.dividerHorizontalInset)
     }
 
@@ -936,22 +1002,32 @@ struct BrowserWorkSpaceSidebarList: View {
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(LiquidGlassTokens.browserMutedInk)
                 TextField("Search", text: $downloadQuery).textFieldStyle(.plain)
-                Button(action: store.showDesignNotice) {
+                Menu {
+                    ForEach(["全部", "進行中", "已完成", "未完成"], id: \.self) { filter in
+                        Button(filter) { downloadStatusFilter = filter }
+                    }
+                } label: {
                     Image(systemName: "line.3.horizontal.decrease")
                         .frame(width: BrowserSidebarMetrics.footerControlSize, height: BrowserSidebarMetrics.footerControlSize)
-                }.accessibilityLabel("篩選下載")
+                }.menuStyle(.borderlessButton).menuIndicator(.hidden)
+                    .accessibilityLabel("篩選下載：\(downloadStatusFilter)")
             }
             HStack {
                 Text("下載").font(.system(size: BrowserSidebarMetrics.downloadTitleFontSize, weight: .semibold))
                 Spacer()
-                Button("清除", action: downloadStore.clearDownloads).disabled(downloadStore.downloads.isEmpty)
+                Button("清除紀錄", action: downloadStore.clearDownloads)
+                    .disabled(!downloadStore.downloads.contains { $0.state.isTerminal })
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: BrowserSidebarMetrics.downloadsSpacing) {
                     if downloadStore.downloads.isEmpty { Text("尚無下載").foregroundStyle(LiquidGlassTokens.browserMutedInk) }
                     ForEach(["今天", "昨天", "Earlier"], id: \.self) { section in
                         let files = downloadStore.downloads.filter {
-                            $0.section == section && (downloadQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(downloadQuery))
+                            $0.section == section && (downloadQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(downloadQuery)) &&
+                            (downloadStatusFilter == "全部" ||
+                             (downloadStatusFilter == "進行中" && !$0.state.isTerminal) ||
+                             (downloadStatusFilter == "已完成" && $0.done) ||
+                             (downloadStatusFilter == "未完成" && ($0.state == .failed || $0.state == .cancelled)))
                         }
                         if !files.isEmpty {
                             Text(section).font(.system(size: BrowserSidebarMetrics.downloadMetaFontSize)).foregroundStyle(LiquidGlassTokens.browserMutedInk)
@@ -990,11 +1066,11 @@ struct BrowserWorkSpaceSidebarList: View {
                         .frame(width: BrowserSidebarMetrics.footerControlSize, height: BrowserSidebarMetrics.footerControlSize)
                 }
                 .accessibilityLabel("隱藏下載紀錄 \(download.name)")
-                .disabled(!download.done)
+                .disabled(!download.state.isTerminal)
                 .opacity(trashVisible ? BrowserSidebarMetrics.visibleOpacity : BrowserSidebarMetrics.hiddenOpacity)
                 .allowsHitTesting(trashVisible)
             }
-            if !download.done {
+            if !download.state.isTerminal {
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: BrowserSidebarMetrics.downloadProgressRadius).fill(LiquidGlassTokens.browserChipFill)
@@ -1007,12 +1083,20 @@ struct BrowserWorkSpaceSidebarList: View {
                 .frame(height: BrowserSidebarMetrics.downloadProgressHeight)
                 .accessibilityLabel("下載進度")
                 .accessibilityValue(download.time)
-            } else {
-                HStack(spacing: BrowserSidebarMetrics.downloadActionSpacing) {
+            }
+            if let failure = download.failure {
+                Text(failure).font(.caption).foregroundStyle(LiquidGlassTokens.browserMutedInk)
+            }
+            HStack(spacing: BrowserSidebarMetrics.downloadActionSpacing) {
+                if downloadStore.canPause(download) { Button("暫停") { downloadStore.pause(download) } }
+                if downloadStore.canResume(download) { Button("繼續下載") { downloadStore.resume(download) } }
+                if downloadStore.canCancel(download) { Button("取消下載") { downloadStore.cancel(download) } }
+                if downloadStore.canRetry(download) { Button("重試下載") { downloadStore.retry(download) } }
+                if download.done {
                     Button("快速預覽") { downloadStore.preview(download) }
                     Button("在 Finder 顯示") { downloadStore.reveal(download) }
-                }.font(.system(size: BrowserSidebarMetrics.downloadActionFontSize))
-            }
+                }
+            }.font(.system(size: BrowserSidebarMetrics.downloadActionFontSize))
         }
         .padding(BrowserSidebarMetrics.downloadRowPadding)
         .background(selected ? palette.surfaceBorder : .clear, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.downloadRowCornerRadius))
@@ -1020,6 +1104,10 @@ struct BrowserWorkSpaceSidebarList: View {
         .contextMenu {
             Button("在 Finder 顯示") { downloadStore.reveal(download) }.disabled(!download.done)
             Button("快速預覽") { downloadStore.preview(download) }.disabled(!download.done)
+            Button("暫停") { downloadStore.pause(download) }.disabled(!downloadStore.canPause(download))
+            Button("繼續下載") { downloadStore.resume(download) }.disabled(!downloadStore.canResume(download))
+            Button("取消下載") { downloadStore.cancel(download) }.disabled(!downloadStore.canCancel(download))
+            Button("重試下載") { downloadStore.retry(download) }.disabled(!downloadStore.canRetry(download))
         }
     }
 
@@ -1130,7 +1218,11 @@ struct BrowserWorkSpaceSidebarList: View {
         .foregroundStyle(tab.sleeping ? .tertiary : .primary)
         .background(selected ? fieldFill : .clear, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing))
         .shadow(color: shadowColor.opacity(selected ? BrowserSidebarMetrics.selectedRowShadowOpacity : BrowserSidebarMetrics.hiddenOpacity), radius: BrowserSidebarMetrics.controlGap, x: BrowserSidebarMetrics.zero, y: BrowserSidebarMetrics.childGap)
-        .contextMenu { Button("註解…") { store.showAnnotations(tab.id) } }
+        .contextMenu {
+            Button("關閉分頁") { store.close(tab.id) }
+            Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
+            Button("註解…") { store.showAnnotations(tab.id) }
+        }
         .onHover { hoveredTab = $0 ? tab.id : nil }
         .onDrag { NSItemProvider(object: "tatwo-browser-tab:\(tab.id)" as NSString) }
     }

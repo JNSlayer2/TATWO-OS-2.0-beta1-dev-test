@@ -15,6 +15,8 @@ const root = testScratch('loading-state.');
 const program = path.join(root, 'probe');
 fs.writeFileSync(path.join(root, 'probe.mm'), `
 #import <Foundation/Foundation.h>
+#include <memory>
+#include <string>
 using TatwoCEFBrowserView = NSObject;
 enum {
   TatwoCEFBrowserPhaseBlank, TatwoCEFBrowserPhaseCreating,
@@ -22,7 +24,23 @@ enum {
   TatwoCEFBrowserPhaseFinished, TatwoCEFBrowserPhaseBlockedBySecurity,
   TatwoCEFBrowserPhaseNavigationFailed, TatwoCEFBrowserPhaseRendererFailed
 };
-struct BrowserState { bool is_loading; int phase; uint64_t mount_generation; };
+enum { TatwoCEFBrowserErrorKindNone };
+struct Frame { bool IsValid() { return true; } std::string GetURL() { return "https://example.org"; } };
+struct Browser {
+  bool IsLoading() { return false; }
+  std::shared_ptr<Frame> GetMainFrame() { return std::make_shared<Frame>(); }
+};
+struct BrowserState {
+  bool is_loading; int phase; uint64_t mount_generation;
+  bool navigation_in_flight = false, close_requested = false, document_epoch_valid = false;
+  int error_kind = TatwoCEFBrowserErrorKindNone;
+  std::shared_ptr<Browser> browser;
+  NSString *committed_url = nil;
+};
+struct Policy { bool human = false; };
+Policy ActorRequestPolicy(NSObject *) { return {}; }
+NSString *FromCefString(const std::string &s) { return [NSString stringWithUTF8String:s.c_str()]; }
+void AppendCEFEmbeddingTelemetryLine(NSString *) {}
 BrowserState current;
 int starts = 0, stops = 0;
 void MutateStateOnMain(NSObject *, void (^mutate)(BrowserState *)) { mutate(&current); }

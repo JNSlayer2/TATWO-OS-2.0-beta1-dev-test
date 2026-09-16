@@ -14,7 +14,7 @@ struct BrowserShortcutsSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: BrowserSidebarMetrics.settingsRowSpacing) {
             HStack(alignment: .top) {
-                Text("預設只有 ⌘T 新分頁；其餘功能請自行指定").foregroundStyle(.secondary)
+                Text("已提供常用瀏覽器快捷鍵；可自訂或清除個別設定").foregroundStyle(.secondary)
                 Spacer()
                 Button("全部還原預設") { recording = nil; save(.defaults) }
             }

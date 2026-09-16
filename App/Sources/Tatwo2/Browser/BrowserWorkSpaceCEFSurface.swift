@@ -25,6 +25,8 @@ final class BrowserWorkSpaceRuntime: ObservableObject {
     private(set) static var memoryPressure = BrowserMemoryPressure.normal
     static var memoryPressureText: String { memorySource == nil ? "尚未監看" : memoryPressure.title }
     private static var enforcingMemory = false
+    private(set) static var protectedMemoryTabCount = 0
+    private static var lastProtectionNotice = Date.distantPast
 
     private static func startMemoryMonitoring() {
         guard memorySource == nil else { return }
@@ -59,7 +61,12 @@ final class BrowserWorkSpaceRuntime: ObservableObject {
     static func handleMemoryPressure(_ pressure: BrowserMemoryPressure) {
         memoryPressure = pressure
         let count = enforceMemoryPolicy()
-        if pressure == .critical, count > 0 {
+        if pressure == .critical, protectedMemoryTabCount > 0,
+           Date().timeIntervalSince(lastProtectionNotice) > 15 {
+            lastProtectionNotice = Date()
+            IslandNotice.shared.info(title: "記憶體吃緊，已保留進行中的分頁",
+                detail: "有編輯、播放或下載中的內容；請先儲存，再手動關閉不需要的分頁。", duration: 10)
+        } else if pressure == .critical, count > 0 {
             IslandNotice.shared.info(title: "記憶體吃緊，已釋放 \(count) 個分頁",
                                      detail: "點回分頁即可重新載入", duration: 6)
         }
@@ -75,13 +82,22 @@ final class BrowserWorkSpaceRuntime: ObservableObject {
         // One app-wide allowance across chat profiles and work spaces, not
         // four per session. Only mounted surfaces own protected selections.
         let selected = Set(runtimes.compactMap(\.selectedID))
+        let protected = Set(runtimes.flatMap { runtime in
+            (runtime.host?.protectedTabIDs ?? []).compactMap(UUID.init(uuidString:))
+        })
+        protectedMemoryTabCount = protected.count
+        // Protecting all old tabs must not prevent admission of the new
+        // selected tab. Closing native slots still remain counted until CEF
+        // completes; only the floor for live protected selections is raised.
+        BrowserNativeMemoryBudget.shared.configure(limit: memorySettings.limit(),
+            protectedMinimum: selected.union(protected).count)
         var tabs: [UUID: BrowserTab] = [:]
         for runtime in runtimes {
             for tab in runtime.workTabs { tabs[tab.id] = tab }
         }
         let victims = BrowserMemoryPolicy.sleepCandidates(tabs: tabs.values.map {
             .init(id: $0.id, lastActiveAt: $0.lastActiveAt, isSleeping: $0.isSleeping)
-        }, selected: selected, limit: memorySettings.limit(), pressure: memoryPressure)
+        }, selected: selected, limit: memorySettings.limit(), protected: protected, pressure: memoryPressure)
         for id in victims {
             for runtime in runtimes where runtime.workTabs.contains(where: { $0.id == id }) {
                 runtime.sleepTab(id)
@@ -273,7 +289,8 @@ final class BrowserWorkSpaceRuntime: ObservableObject {
     }
 
     private func sleepTab(_ id: UUID) {
-        guard id != selectedID, let tab = workTabs.first(where: { $0.id == id }), !tab.isSleeping else { return }
+        guard id != selectedID, let tab = workTabs.first(where: { $0.id == id }), !tab.isSleeping,
+              host?.preventsAutomaticSleep(tabID: id.uuidString) != true else { return }
         host?.flushTabState(tab.id.uuidString)
         registry.markSleeping(tab.id, true)
     }

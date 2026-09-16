@@ -38,14 +38,18 @@ if (mode === '--log') {
   const current = fs.readFileSync(path.join(root, bridge), 'utf8');
   function measure(source, name, checks = false) {
     let a = source.indexOf('#pragma mark - W60 Scheduled pump');
+    if (a < 0) a = source.indexOf('#pragma mark - External message pump');
     if (a < 0) a = source.indexOf('void StartCEFMessagePumpIdleTimer()');
     const b = source.indexOf('void QueueImmediateCEFMessagePumpWorkOnMainQueue()', a);
     if (a < 0 || b <= a) throw new Error('Missing production scheduler');
     const file = path.join(work, `${name}.mm`), binary = path.join(work, name);
     // The optional live-runtime probe is not part of this scheduler fixture.
     const scheduler = source.slice(a,b).replace('W60StartRuntimePumpProbe();', '');
-    fs.writeFileSync(file, template.replace('// INSERT scheduler', scheduler));
-    run('xcrun', ['clang++', '-std=c++20', '-fobjc-arc', '-fblocks', '-framework','Foundation', file, '-o', binary]);
+    const currentTemplate = source.includes('#pragma mark - External message pump')
+      ? template.replace('dispatch_source_t g_message_pump_idle_timer', 'NSTimer *g_message_pump_idle_timer')
+      : template;
+    fs.writeFileSync(file, currentTemplate.replace('// INSERT scheduler', scheduler));
+    run('xcrun', ['clang++', '-std=c++20', '-fobjc-arc', '-fblocks', '-framework','AppKit', file, '-o', binary]);
     const output = run(binary, [checks ? 'checks' : 'probe']).trim();
     return checks ? output : JSON.parse(output);
   }

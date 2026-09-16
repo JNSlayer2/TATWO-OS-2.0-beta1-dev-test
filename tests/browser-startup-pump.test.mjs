@@ -7,14 +7,14 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
-test('legacy loading predicate remains bounded but W60 never arms a loading timer', { timeout: 90_000 }, t => {
+test('loading recovery stops for idle, closed, blocked and stale browser lifecycles', { timeout: 90_000 }, t => {
   if (process.platform !== 'darwin') return t.skip('requires macOS C++ compiler');
   const bridge = fs.readFileSync(path.join(repo,
     'Apps/TatwoUltraworkMac/Sources/TatwoCEFBridge/TatwoCEFBridge.mm'), 'utf8');
   const start = bridge.indexOf('bool HasActiveBrowserPumpWork(bool');
   const end = bridge.indexOf('std::atomic<uint64_t> g_message_pump_schedule_count');
   assert.ok(start >= 0 && end > start);
-  // W60 removes the timer itself, not its lifecycle/close guard contract.
+  // Recovery retains the existing lifecycle and close guards.
   assert.doesNotMatch(bridge, /ArmLoadingActiveMessagePumpTimer|phase=message_pump_loading_fallback/);
   assert.match(bridge, /phase=message_pump_overdue/);
   const scratch = testScratch('startup-pump.');

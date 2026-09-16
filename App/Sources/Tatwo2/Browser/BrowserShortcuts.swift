@@ -63,9 +63,36 @@ struct BrowserKeyCombo: Codable, Equatable, Sendable {
 
 struct BrowserShortcutMap: Codable, Equatable, Sendable {
     var bindings: [BrowserAction: BrowserKeyCombo]
-    static let defaults = Self(bindings: [.newTab: BrowserKeyCombo(key: "t", modifiers: ["command"])])
+    // A missing version identifies the old release. Persisting a version also
+    // distinguishes an intentional Cmd-T-only custom map from that old default.
+    var schemaVersion: Int? = 1
+    static let defaults = Self(bindings: [
+        .newTab: .init(key: "t", modifiers: ["command"]),
+        .closeTab: .init(key: "w", modifiers: ["command"]),
+        .reopenClosedTab: .init(key: "t", modifiers: ["command", "shift"]),
+        .back: .init(key: "[", modifiers: ["command"]),
+        .forward: .init(key: "]", modifiers: ["command"]),
+        .reload: .init(key: "r", modifiers: ["command"]),
+        .findInPage: .init(key: "f", modifiers: ["command"]),
+        .focusAddressBar: .init(key: "l", modifiers: ["command"]),
+        .zoomIn: .init(key: "=", modifiers: ["command"]),
+        .zoomOut: .init(key: "-", modifiers: ["command"]),
+        .zoomReset: .init(key: "0", modifiers: ["command"]),
+        .nextTab: .init(key: "tab", modifiers: ["control"]),
+        .previousTab: .init(key: "tab", modifiers: ["control", "shift"]),
+        .tabNumber: .init(key: "1", modifiers: ["command"]),
+        .printPage: .init(key: "p", modifiers: ["command"]),
+        .printPDF: .init(key: "p", modifiers: ["command", "shift"])
+    ])
+    var upgradedFromLegacy: Self {
+        if schemaVersion == nil,
+           bindings == [.newTab: BrowserKeyCombo(key: "t", modifiers: ["command"])] { return .defaults }
+        var current = self
+        current.schemaVersion = 1
+        return current
+    }
     static let changed = Notification.Name("tatwo.browser.shortcutsChanged")
-    static let reserved: [BrowserKeyCombo] = ["q", "w", "h", "m", ",", "n", "s", "l", "z", "x", "c", "v", "a"]
+    static let reserved: [BrowserKeyCombo] = ["q", "h", "m", ",", "n", "s", "z", "x", "c", "v", "a"]
         .map { BrowserKeyCombo(key: $0, modifiers: ["command"]) }
         + [BrowserKeyCombo(key: "a", modifiers: ["command", "shift"]),
            BrowserKeyCombo(key: "z", modifiers: ["command", "shift"]),
@@ -76,7 +103,20 @@ struct BrowserShortcutMap: Codable, Equatable, Sendable {
     static func isReserved(_ combo: BrowserKeyCombo) -> Bool { reserved.contains { $0.matches(combo) } }
     func combos(for action: BrowserAction) -> [BrowserKeyCombo] {
         guard let combo = bindings[action] else { return [] }
+        // Both keyboard layouts for Cmd-+ also invoke the conventional Cmd-= binding.
+        if action == .zoomIn, combo.matches(.init(key: "=", modifiers: ["command"])) {
+            return [combo, .init(key: "=", modifiers: ["command", "shift"]),
+                    .init(key: "+", modifiers: ["command", "shift"])]
+        }
         return action == .tabNumber ? (1...9).map { BrowserKeyCombo(key: String($0), modifiers: combo.modifiers) } : [combo]
+    }
+    func invocation(for combo: BrowserKeyCombo) -> BrowserShortcutInvocation? {
+        for action in BrowserAction.allCases {
+            if let index = combos(for: action).firstIndex(where: { $0.matches(combo) }) {
+                return BrowserShortcutInvocation(action: action, number: action == .tabNumber ? index + 1 : 1)
+            }
+        }
+        return nil
     }
     func validationError(for combo: BrowserKeyCombo, action: BrowserAction) -> String? {
         guard !combo.normalized.modifiers.isEmpty else { return "請至少加上一個修飾鍵" }
@@ -100,29 +140,21 @@ struct BrowserShortcutMap: Codable, Equatable, Sendable {
     }
 }
 
-// W57a callback keys. No default action is inferred from these names.
-extension BrowserShortcutMap {
-    static func legacyCombo(_ kind: String) -> BrowserKeyCombo? {
-        let key: String
-        switch kind {
-        case "reopen": return BrowserKeyCombo(key: "t", modifiers: ["command", "shift"])
-        case "back": key = "["
-        case "forward": key = "]"
-        case "find": key = "f"
-        case "print": key = "p"
-        case "focusAddress": key = "l"
-        case "newTab": key = "t"
-        case "closeTab": key = "w"
-        case "reload": key = "r"
-        case "printPDF": return BrowserKeyCombo(key: "p", modifiers: ["command", "shift"])
-        // The bridge collapses Cmd-= and Cmd-Shift-=; never execute the wrong binding.
-        case "zoomIn": return nil
-        case "zoomOut": key = "-"
-        case "zoomReset": key = "0"
-        default:
-            guard kind.hasPrefix("tab"), let n = Int(kind.dropFirst(3)), (1...9).contains(n) else { return nil }
-            key = String(n)
-        }
-        return BrowserKeyCombo(key: key, modifiers: ["command"])
+/// Only events claimed synchronously by the native shortcut callback reach this route.
+struct BrowserShortcutInvocation: Equatable {
+    let action: BrowserAction
+    let number: Int
+    var message: String { "binding:\(action.rawValue):\(number)" }
+    init(action: BrowserAction, number: Int = 1) { self.action = action; self.number = number }
+    init?(message: String) {
+        let parts = message.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "binding", let action = BrowserAction(rawValue: String(parts[1])),
+              let number = Int(parts[2]), (1...9).contains(number), action == .tabNumber || number == 1 else { return nil }
+        self.init(action: action, number: number)
     }
+}
+
+/// Context-menu actions never depend on a keyboard binding or first-responder change.
+enum BrowserNativeMenuAction: String {
+    case printPage = "menu:printPage", printPDF = "menu:printPDF", openPDF = "menu:openPDF"
 }
