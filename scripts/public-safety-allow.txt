@@ -325,3 +325,4 @@ App/Tests/Tatwo2Tests/ProviderIconResourcesTests.swift | ssh host alias | Packag
 tests/browser-repaired-actions.test.mjs | email address | Synthetic credential-bearing example URL rejected by login handoff policy. | ^password\x40example\.com$
 tests/fixtures/browser-download-permissions-checks.swift | personal hostname | Synthetic local hostname verifies consent normalization and deduplication. | ^(?:NAS\.LOCAL\.|nas\.local)$
 tests/fixtures/browser-download-permissions-checks.swift | email address | Synthetic credential-bearing example URL verifies history redaction. | ^secret-password\x40example\.test$
+tests/published-release-cache.test.py | macos username | Synthetic release asset basenames in metadata fixtures, not operating system accounts. | ^(?:TATWO-OS\.zip|not-requested\.zip)$
