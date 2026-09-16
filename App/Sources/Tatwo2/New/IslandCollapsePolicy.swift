@@ -2,7 +2,7 @@ import Foundation
 
 /// Island 收合決策；時間由呼叫端注入，不讀時鐘、不啟動計時器。
 struct IslandCollapsePolicy {
-    static let delay: TimeInterval = 3
+    static let delay: TimeInterval = 0
 
     enum Event {
         case hoverEntered

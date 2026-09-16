@@ -103,7 +103,7 @@ final class TatwoIslandShellState: ObservableObject {
     private var pointerIsInside = false
     private var pendingCollapse: DispatchWorkItem?
     private var collapsePolicy = IslandCollapsePolicy()
-    /// 同意卡優先於游標；解除 hold 後恢復 hover 與三秒收回。
+    /// 同意卡優先於游標；解除 hold 時若游標在外，立即收回。
     private var isHeldOpen = false
 
     // 驗證用：TATWO_ISLAND_PIN_EXPANDED=1 讓島常駐展開（截圖對照迴圈）
@@ -168,18 +168,24 @@ final class TatwoIslandShellState: ObservableObject {
         pendingCollapse?.cancel()
         collapsePolicy = IslandCollapsePolicy()
         collapsePolicy.handle(.hoverExited(at: ProcessInfo.processInfo.systemUptime))
-        scheduleCollapse()
+        // Navigation previews remain readable; a real hover exit still closes immediately.
+        scheduleCollapse(after: 3)
     }
 
     private func scheduleCollapse(after delay: TimeInterval? = nil) {
         guard isExpanded, !Self.pinExpandedForVerification else { return }
+        let delay = delay ?? collapseDelay
+        if delay <= 0 {
+            handleCollapseEvent(.tick(now: ProcessInfo.processInfo.systemUptime))
+            return
+        }
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, !self.pointerIsInside else { return }
             self.pendingCollapse = nil
             self.handleCollapseEvent(.tick(now: ProcessInfo.processInfo.systemUptime))
         }
         pendingCollapse = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + (delay ?? collapseDelay), execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func setExpanded(_ isExpanded: Bool) {

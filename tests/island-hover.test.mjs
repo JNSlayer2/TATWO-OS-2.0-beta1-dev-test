@@ -9,7 +9,7 @@ import { testScratch } from './helpers/test-scratch.mjs';
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const read = file => readFileSync(join(repo, 'App/Sources/Tatwo2', file), 'utf8');
 
-test('native Island click then hover exit collapses while consent still holds open', {
+test('native Island hover exit collapses synchronously with no click or grace period', {
   skip: process.platform !== 'darwin', timeout: 120_000,
 }, () => {
   const root = testScratch('island-hover-');
@@ -32,33 +32,30 @@ ${state}
   }
   @MainActor static func main() {
     let state = TatwoIslandShellState()
+    for _ in 0..<3 {
+      state.setPointerInside(true)
+      precondition(state.isExpanded, "hover alone expands")
+      state.setPointerInside(false)
+      precondition(!state.isExpanded && state.expansionProgress == 0,
+        "hover exit must start collapse synchronously, with no click, sleep or queued timer")
+    }
     state.setPointerInside(true)
     state.handleCollapseEvent(.itemTapped)
     state.setPointerInside(false)
-    pause(3.15)
-    precondition(!state.isExpanded, "clicking Island must not prevent auto-collapse on exit")
-    state.setPointerInside(true) // A fresh hover visit, not the old clicked interaction.
-    state.setPointerInside(false)
-    pause(3.15)
-    precondition(!state.isExpanded, "old click latch must not block a later hover exit")
+    precondition(!state.isExpanded, "a click cannot add an exit delay")
     state.setPointerInside(true)
-    state.setPointerInside(false)
-    pause(0.1)
-    state.setPointerInside(true)
-    pause(3.15)
-    precondition(state.isExpanded, "returning within the grace period cancels collapse")
+    pause(0.05)
+    precondition(state.isExpanded, "re-entry stays expanded without a stale timer")
     state.holdOpen(true)
     state.setPointerInside(false)
-    pause(3.15)
     precondition(state.isExpanded, "consent must not auto-dismiss")
     state.holdOpen(false)
-    pause(3.15)
-    precondition(!state.isExpanded, "release outside resumes auto-collapse")
-    let early = TatwoIslandShellState(collapseDelay: 0.01)
-    early.setPointerInside(true)
-    early.setPointerInside(false)
-    pause(3.2)
-    precondition(!early.isExpanded, "early deadline wake must reschedule rather than strand the Island")
+    precondition(!state.isExpanded, "release outside collapses immediately")
+    state.expandForNavigation()
+    precondition(state.isExpanded, "programmatic navigation remains visible until its preview deadline")
+    state.setPointerInside(true)
+    state.setPointerInside(false)
+    precondition(!state.isExpanded, "pointer exit cancels even a programmatic preview immediately")
     print("ISLAND HOVER PASS")
   }
 }`);

@@ -45,7 +45,7 @@ struct IslandNoticeContent: View {
         for _ in 0..<3 {
             leave(); enter()
             precondition(state.isExpanded, "native hover alone expands without any click")
-            leave(); pump(3.4)
+            leave()
             precondition(!state.isExpanded, "native hover exit alone collapses without any click")
         }
         enter()
@@ -57,7 +57,7 @@ struct IslandNoticeContent: View {
                 windowNumber: panel.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
             app.sendEvent(event)
         }
-        leave(); pump(3.4)
+        leave()
         precondition(!state.isExpanded, "native click then exit collapses")
         // Suppress tracking callbacks to reproduce a lost mouseExited on rebuild.
         func suppressTracking(_ view: NSView) {
@@ -66,13 +66,15 @@ struct IslandNoticeContent: View {
         }
         state.setPointerInside(true)
         suppressTracking(panel.contentView!)
-        pump(3.6)
+        pump(0.3)
         precondition(!state.isExpanded, "controller repairs stale pointer without mouseExited")
-        state.expandForNavigation(); pump(3.4)
+        state.expandForNavigation()
+        precondition(state.isExpanded, "programmatic preview is not an immediate no-op")
+        pump(3.4)
         precondition(!state.isExpanded, "programmatic open outside self-collapses")
-        state.holdOpen(true); pump(3.4)
+        state.holdOpen(true); pump(0.3)
         precondition(state.isExpanded, "consent hold survives pointer reconciliation")
-        state.holdOpen(false); pump(3.4)
+        state.holdOpen(false)
         precondition(!state.isExpanded, "release outside self-collapses")
         panel.orderOut(nil); controller = nil
         print("ISLAND CONTROLLER PASS: real click/exit, lost exit, navigation, consent")
