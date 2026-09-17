@@ -1,17 +1,26 @@
-// 照搬自 Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/UltraworkRoleConfiguration.swift；改動 2 行（原因：移除舊 Core import，改接同名 Facade 假資料）
 import Foundation
 
 struct UltraworkRoleConfiguration: Codable, Equatable {
     var primaryModelID: String
     var auxiliaryModelIDs: [String]
 
+    /// 與憲法 §4 一致，改表先改憲法。模型 ID 沿用路由命名；
+    /// gpt-6-astra = GPT-6，grok-build = Grok 4.6。審查使用與主導不同家的 GPT-6。
+    static let constitutionSection4 = (
+        lead: "fable-5.1",
+        loops: "gpt-6-astra",
+        refinement: "opus-5",
+        mechanic: "grok-build",
+        reviewer: "gpt-6-astra"
+    )
+
     static let defaultValue = UltraworkRoleConfiguration(
-        primaryModelID: "gpt-5.5",
+        primaryModelID: constitutionSection4.lead,
         auxiliaryModelIDs: [
-            "sonnet-5",
-            "grok-build",
-            "haiku-4-5",
-            "fable-5",
+            constitutionSection4.loops,
+            constitutionSection4.refinement,
+            constitutionSection4.mechanic,
+            constitutionSection4.reviewer,
         ])
 
     static func auxiliaryCount(for level: ChatCollaborationLevel) -> Int {

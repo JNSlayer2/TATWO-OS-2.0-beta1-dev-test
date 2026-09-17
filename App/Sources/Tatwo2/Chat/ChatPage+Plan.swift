@@ -38,6 +38,7 @@ enum ChatPlanArtifactTranscriptProjection {
     static func title(for artifact: TatwoPlanArtifactV1?) -> String {
         switch artifact?.kind {
         case "feedback": "回報問題"
+        case "distill": "蒸餾"
         case "pr": "PR 計畫"
         default: "Plan"
         }
@@ -403,6 +404,7 @@ struct PlanTranscriptInspectorView: View {
     let onExecute: () -> Void
     var onStart: () -> Void = {}
     var onFeedbackSubmitted: (UUID) -> Void = { _ in }
+    var onDistillSubmission: (UUID, DistillSubmission) -> Bool = { _, _ in false }
     var onPRSubmit: () -> Void = {}
     var onPRDiscuss: () -> Void = {}
 
@@ -440,6 +442,10 @@ struct PlanTranscriptInspectorView: View {
                                                     isLocked: $feedbackLocked, onSubmitted: onFeedbackSubmitted)
                                     .id(artifact.planID)
                                     .padding(12)
+                            } else if artifact.kind == "distill" {
+                                DistillPlanActions(artifact: artifact, isDisabled: isEditing || isWriting,
+                                                   onSubmission: onDistillSubmission)
+                                    .id(artifact.planID).padding(12)
                             } else if artifact.kind == "pr" {
                                 PRPlanActions(artifact: artifact, isDisabled: isEditing || isWriting,
                                               onConfirm: onExecute, onSubmit: onPRSubmit, onReturnToDiscussion: onPRDiscuss)
@@ -580,7 +586,7 @@ struct PlanTranscriptInspectorView: View {
             .buttonStyle(.plain)
             .planSummaryActionStyle()
             .help(isEditing ? "Finish editing plan" : "Edit plan")
-            .disabled(isWriting || feedbackLocked || (artifact?.kind == "pr" && artifact?.state != .discussing))
+            .disabled(isWriting || feedbackLocked || artifact?.distillSubmission != nil || (artifact?.kind == "pr" && artifact?.state != .discussing))
             .accessibilityLabel(
                 isEditing ? "Finish editing plan" : "Edit plan")
 

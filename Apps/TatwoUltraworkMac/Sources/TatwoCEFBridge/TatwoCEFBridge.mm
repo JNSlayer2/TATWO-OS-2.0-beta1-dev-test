@@ -3666,6 +3666,18 @@ class TatwoBrowserActivityBinding final : public CefV8Handler {
                CefRefPtr<CefV8Value> &, CefString &) override {
     if (args.size() == 2 && args[0]->IsBool() && args[1]->IsBool())
       SendBrowserActivity(frame_, token_, "update", args[0]->GetBoolValue(), args[1]->GetBoolValue());
+    // The same private injected callback carries only the codec signal and host.
+    if (args.size() == 1 && args[0]->IsObject() && frame_ && frame_->IsValid()) {
+      auto kind = args[0]->GetValue("kind");
+      auto host = args[0]->GetValue("host");
+      if (kind && kind->IsString() && kind->GetStringValue() == "tatwo.media.codec_unsupported" &&
+          host && host->IsString()) {
+        auto message = CefProcessMessage::Create("tatwo.media.codec_unsupported");
+        auto out = message->GetArgumentList();
+        out->SetString(0, token_); out->SetString(1, host->GetStringValue()); out->SetBool(2, true);
+        frame_->SendProcessMessage(PID_BROWSER, message);
+      }
+    }
     return true;
   }
  private:
@@ -3674,10 +3686,11 @@ class TatwoBrowserActivityBinding final : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(TatwoBrowserActivityBinding);
 };
 
-// Only activity booleans cross the process boundary. No input values, URLs,
-// selectors or text are collected. Dirty is conservative until a new document.
+// Only activity booleans and the codec signal's host cross the process boundary.
+// No input values, full URLs, selectors or text. Dirty lasts until a new document.
 const char kBrowserActivityScript[] = R"JS((function(report) {
   let dirty = false, playing = false;
+  let codecReported = false;
   let lastDirty, lastPlaying;
   const watchedTracks = new WeakSet();
   const publish = () => {
@@ -3690,8 +3703,19 @@ const char kBrowserActivityScript[] = R"JS((function(report) {
       dirty = true; publish();
     }
   };
-  const media = () => {
-    playing = Array.from(document.querySelectorAll('audio,video')).some(item => {
+  const media = event => {
+    const elements = Array.from(document.querySelectorAll('audio,video'));
+    if (!codecReported) {
+      const unsupportedError = event && event.type === 'error' &&
+        event.target && event.target.tagName === 'VIDEO' &&
+        event.target.error && event.target.error.code === 4;
+      if (unsupportedError || (elements.some(item => item.tagName === 'VIDEO') &&
+          document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"') === '')) {
+        codecReported = true;
+        report({kind: 'tatwo.media.codec_unsupported', host: location.host});
+      }
+    }
+    playing = elements.some(item => {
       if (!item.paused && !item.ended) return true;
       // A paused preview can still own a live camera, call or capture stream.
       const stream = item.srcObject;
@@ -3708,7 +3732,7 @@ const char kBrowserActivityScript[] = R"JS((function(report) {
   };
   document.addEventListener('input', edit, true);
   document.addEventListener('change', edit, true);
-  for (const name of ['play','playing','pause','ended','emptied','loadstart','loadedmetadata']) document.addEventListener(name, media, true);
+  for (const name of ['play','playing','pause','ended','emptied','loadstart','loadedmetadata','error']) document.addEventListener(name, media, true);
   document.addEventListener('DOMContentLoaded', media, {once:true});
   // srcObject assignment and stream track changes are not DOM mutations.
   // Report only changes; the context owns and cancels this timer on release.
@@ -6751,6 +6775,38 @@ bool TatwoClient::OnProcessMessageReceived(
     CefProcessId source_process,
     CefRefPtr<CefProcessMessage> message) {
   CEF_REQUIRE_UI_THREAD();
+  if (source_process == PID_RENDERER && message &&
+      message->GetName() == "tatwo.media.codec_unsupported") {
+    TatwoCEFBrowserView *owner = owner_;
+    BrowserState *state = State(owner);
+    if (!browser || !frame || !frame->IsValid() || !state || !state->browser ||
+        !state->browser->IsSame(browser) || state->close_requested ||
+        !IsActiveMountCallback(owner, mount_generation_, @"media_codec") ||
+        !ActorRequestPolicy(owner).human || owner.agentControlled ||
+        !owner.window || owner.isHiddenOrHasHiddenAncestor || !owner.onDailyShortcut) return true;
+    auto args = message->GetArgumentList();
+    if (!args || args->GetSize() != 3 || args->GetType(0) != VTYPE_STRING ||
+        args->GetType(1) != VTYPE_STRING || args->GetType(2) != VTYPE_BOOL ||
+        !args->GetBool(2)) return true;
+    const auto activity = state->activity_frames.find(frame->GetIdentifier().ToString());
+    if (activity == state->activity_frames.end() ||
+        activity->second.token != args->GetString(0).ToString()) return true;
+    CefURLParts parts;
+    if (!CefParseURL(frame->GetURL(), parts)) return true;
+    const auto scheme = CefString(&parts.scheme).ToString();
+    if (scheme != "https" && scheme != "http") return true;
+    auto host = CefString(&parts.host).ToString();
+    const auto port = CefString(&parts.port).ToString();
+    if (!port.empty()) host += ":" + port;
+    if (host.empty() || host != args->GetString(1).ToString()) return true;
+    // Reuse the native string-message callback already routed to the selected
+    // human workspace tab. Never forward a renderer URL or page content.
+    NSData *payload = [NSJSONSerialization dataWithJSONObject:@{
+      @"kind": @"tatwo.media.codec_unsupported", @"host": FromCefString(args->GetString(1))
+    } options:0 error:nil];
+    if (payload) owner.onDailyShortcut([[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding]);
+    return true;
+  }
   if (source_process == PID_RENDERER && message && message->GetName() == kBrowserActivityMessage) {
     TatwoCEFBrowserView *owner = owner_;
     BrowserState *state = State(owner);

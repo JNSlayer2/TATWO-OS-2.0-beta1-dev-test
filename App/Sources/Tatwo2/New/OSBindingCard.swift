@@ -18,6 +18,9 @@ struct OSBindingCard: View {
             }
 
             OSUpstreamUpdateView(update: .shared)
+            ManagedRulesRemovalView()
+            Text("OS 外 Grok：未支援（尚未確認 CLI 全域指令檔位置，不建檔）。OS 內 Grok 使用 --rules。")
+                .font(.footnote).foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 Image(systemName: "externaldrive")
@@ -43,7 +46,7 @@ struct OSBindingCard: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if let error = preview.error { Text(error).foregroundStyle(.red) }
-                        if preview.seed { Text("入口尚無 os-upstream.md：確認後種入內建一頁規則與 os.md v3，原憲法保留為 os.1.0.md。") }
+                        ForEach(preview.notices, id: \.self) { Text($0) }
                         ForEach(preview.items) { item in
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("\(item.id) · \(item.state.rawValue)").font(.caption.bold())
@@ -61,6 +64,8 @@ struct OSBindingCard: View {
                     binding.confirm(environment: model.osBindingEnvironment) { model.refreshUpstreamBindings() }
                 }
                 .disabled(binding.busy || preview.error != nil || preview.paths.isEmpty || !model.isLive)
+                Button("保留已手改區塊") { binding.keep(environment: model.osBindingEnvironment) }
+                    .disabled(binding.busy || !preview.items.contains { $0.state == .edited })
             }
             if !binding.report.isEmpty {
                 ScrollView { Text(binding.report).font(.caption.monospaced()).textSelection(.enabled) }
@@ -116,7 +121,7 @@ struct OSBindingCard: View {
         guard let preview = binding.preview else { return model.upstreamBindings }
         return preview.items.map { item in
             .init(target: item.target,
-                  state: item.state == .unreadable ? .unreachable : item.state == .bound ? .bound : item.state == .stale ? .stale : .unbound,
+                  state: item.state == .unreadable ? .unreachable : item.state == .bound ? .bound : (item.state == .stale || item.state == .edited) ? .stale : .unbound,
                   detail: item.error ?? item.state.rawValue)
         }
     }

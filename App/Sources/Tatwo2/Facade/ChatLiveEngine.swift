@@ -328,25 +328,10 @@ final class ChatLiveEngine: LiveEngineAPI {
         messages transferredMessages: [RemoteThreadTransferMessage],
         files: [RemoteThreadTransferFile]
     ) throws -> UUID {
-        let requestedProjectName = projectName?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let projectID: UUID
-        if let requestedProjectName,
-           !requestedProjectName.isEmpty,
-           let matched = doc.projects.first(where: {
-               $0.name.caseInsensitiveCompare(requestedProjectName) == .orderedSame
-           }) {
-            projectID = matched.id
-        } else if let general = doc.projects.first(where: {
-            $0.name.caseInsensitiveCompare("一般") == .orderedSame
-        }) {
-            projectID = general.id
-        } else {
-            projectID = newProject(name: "一般", workdir: NSHomeDirectory())
-        }
-        guard let project = projectRecord(projectID) else {
-            throw RemoteHostLinkError.invalidResponse
-        }
+        // File transfers require a unique explicit project. Never route files to home
+        // or the first duplicate name. Baseline preflight uses the same resolver.
+        let project = try transferProject(named: projectName, requiresFiles: !files.isEmpty)
+        let projectID = project.id
 
         try RemoteThreadTransfer.write(files, to: project.workdir)
         let rows = transferredMessages.map(\.chatMessage)
@@ -361,6 +346,17 @@ final class ChatLiveEngine: LiveEngineAPI {
         doc.selectedThreadID = thread.id
         persist()
         return thread.id
+    }
+
+    func transferProject(named name: String?, requiresFiles: Bool) throws -> LiveProjectRecord {
+        let name = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let matches = doc.projects.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        if !name.isEmpty, matches.count == 1 { return matches[0] }
+        if requiresFiles { throw RemoteThreadTransfer.TransferError.conflicts(["project mapping missing or ambiguous"]) }
+        if let general = doc.projects.first(where: { $0.name == "一般" }) { return general }
+        let id = newProject(name: "一般", workdir: NSHomeDirectory())
+        guard let project = projectRecord(id) else { throw RemoteHostLinkError.invalidResponse }
+        return project
     }
 
     func select(_ threadID: UUID) { doc.selectedThreadID = threadID; persist() }

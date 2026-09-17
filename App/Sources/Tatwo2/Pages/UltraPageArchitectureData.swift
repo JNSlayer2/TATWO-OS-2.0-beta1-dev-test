@@ -2,12 +2,11 @@
 import Foundation
 import SwiftUI
 
-/// UltraPage 架構手冊的 build-time manifest 投影。
+/// UltraPage 手冊的公開憲法安裝範本投影，不是生效規則來源。
 ///
-/// os.md（外接卷）只在 scripts/tatwo-osmd-manifest.mjs 執行時被讀取；App runtime
-/// 只讀 SwiftPM 內嵌的 TatwoOsManifestV1，不假設外接卷存在。
+/// 只讀 SwiftPM 內嵌的公開 os.md；不探測入口或外接卷，也不回退到 1.0 manifest。
 enum UltraManualData {
-    /// 維持舊測試/呼叫端的契約名稱，但現在完全由 bundled manifest 衍生。
+    /// 維持呼叫端名稱，但章節完全由公開範本衍生。
     static var osmdDerivedChapterIDs: [String] {
         bundledManifest?.sections
             .filter { $0.id != "meta-rule" }
@@ -18,7 +17,7 @@ enum UltraManualData {
         UltraArchitectureManifestLoader.loadBundledManifest().manifest
     }
 
-    /// UltraPage 的唯一章節資料來源：SwiftPM bundled os-manifest JSON。
+    /// UltraPage 的章節資料來自 SwiftPM bundled os.md 公開範本。
     static var manifestChapters: [UltraManualChapter] {
         guard let manifest = bundledManifest else { return [] }
         return manifest.sections.enumerated().map { index, section in

@@ -21,6 +21,19 @@ extension ChatLiveEngine {
     ## 風險與問題
     使用者說「開始」之前都維持此模式。
     """
+    static let distillDiscussionRules = """
+    你在 TATWO 蒸餾草稿模式。依這段對話快速整理架構、決策與經驗，不做跨設備同步。
+    回覆最後附一個 ```tatwo-plan 圍欄，正文固定含：
+    ## 這段做了什麼
+    ## 架構現況
+    ## 決策與理由
+    ## 教訓
+    ## 下一步
+    各段要有內容；沒有已知資料就明說，不捏造。可依使用者要求多次改寫完整草稿。
+    只討論整理，不改檔、不執行指令、不呼叫任何寫入工具。使用者說「開始」或「送出」
+    也不能替他寫入；只有 App 畫布的「送出」按鈕有權提交。
+    不加入 Timeline/History 特殊段落。標題和 slug 由 App 從草稿產生，使用者可另改。
+    """
 
     private func planURL(_ threadID: UUID) -> URL {
         store.url.deletingLastPathComponent().appendingPathComponent("plans", isDirectory: true)
@@ -50,6 +63,9 @@ extension ChatLiveEngine {
     /// Appends to the existing engine-only outgoing text, never the user row.
     func planContext(_ plan: TatwoPlanArtifactV1?, userText: String) -> String? {
         guard let plan else { return nil }
+        if plan.kind == "distill" {
+            return Self.distillDiscussionRules + "\n目前畫布：\n" + plan.editableText()
+        }
         if plan.kind == "feedback" {
             return Self.feedbackDiscussionRules + "\n目前畫布：\n" + plan.editableText()
         }
@@ -71,6 +87,14 @@ extension ChatLiveEngine {
     func updatePlanFromReply(_ threadID: UUID, reply: ChatMessage) {
         do {
             guard var plan = try loadPlanArtifact(threadID), plan.state == .discussing else { return }
+            if plan.kind == "distill" {
+                guard plan.distillSubmission == nil,
+                      let draft = DistillCanvas.draft(from: reply.text) else { return }
+                plan.applyEditedText(draft)
+                plan.sourceAssistantMessageID = reply.id
+                try savePlanArtifact(plan)
+                return
+            }
             let parsed = plan.kind == "feedback"
                 ? TatwoPlanArtifactV1.parseSections(fromReply: reply.text, fenceName: "tatwo-issue")
                 : TatwoPlanArtifactV1.parseSections(fromReply: reply.text)

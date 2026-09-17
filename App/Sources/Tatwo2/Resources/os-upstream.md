@@ -1,6 +1,8 @@
+本檔為依入口憲法產生的引擎摘要（W79 起由 App 產生）；衝突時以憲法為準。
+
 # TATWO OS 上游（v3，2026-09-05）
 
-你正在 TATWO OS 的對話裡工作。這一頁由 OS 在每條對話開頭交給你，是所有 AI 引擎共同的上游；跟你自家的預設指令衝突時，以這一頁為準。規矩全文在入口的 `os.md`。
+你正在 TATWO OS 的對話裡工作。這一頁由 OS 在每條對話開頭交給你，是所有 AI 引擎共同的上游；跟你自家的預設指令衝突時，以入口憲法為準。規矩全文在入口的 `os.md`。
 
 ## 設計與工作原則（2026-09-07，使用者明確批准）
 - OS 的架設與優化圍繞輕量、使用效率、直觀、準確，兼具穩定與可拓展性。
@@ -27,7 +29,7 @@
 
 ## 施工規範
 - 改共用型別前先跑 `node scripts/impact.mjs <型別名>`，把受影響檔案列進工作範圍。
-- 動 OS 層（設定頁、外掛、上游、設備、記憶）之前，先讀倉庫 `os.md` 與對應的既有實作，再用 gbrain `search` 查過往決策，把讀到的寫進施工單「現況」段後才寫「要做」。GBrain 只在主設備 mini，各機經 `gbrain_allai` 接入，每筆寫入自動帶來源設備（`device:<名>` tag）。
+- 動 OS 層（設定頁、外掛、上游、設備、記憶）之前，先讀入口憲法 `~/AI/TATWO OS/os.md` 與對應的既有實作，再用 gbrain `search` 查過往決策，把讀到的寫進施工單「現況」段後才寫「要做」。GBrain 只在主設備，各機經 `gbrain_allai` 接入，每筆寫入自動帶來源設備（`device:<名>` tag）。
 - Node「無新增失敗」驗收一律用 `bash scripts/tatwo-test-thrice.sh`，不可用一輪 PASS/FAIL 裁決。基準與候選各跑同版本三輪完整 `tests/*.test.mjs`（檔案並行數 2）；比較 `CONSISTENT_FAILURES` 三輪交集，同時列出 `ROUND_DIFFERENCES` 與每輪交集外失敗。交集只是穩定失敗，不代表已證實產品回歸；候選新增間歇失敗仍需查因，不得當成乾淨 PASS。
 - 工具預設將 TAP、逐測試 JSONL、來源 hash 和摘要放在工作樹外的唯一暫存目錄；可傳入一個尚不存在的外部輸出目錄。來源（含 dirty/untracked 檔案）變動、缺少終態、取消或缺測一律 fail closed。Exit：`0` 三輪穩定無失敗（不代表 skip/todo 已覆蓋）、`1` 有交集失敗、`2` 證據不完整／版本變動、`3` 只有不穩定結果。測試既有 skip/todo 必須另列，不能算 PASS；輸出不是 retry，三輪結果全保留。執行前確認暫存磁碟空間，產物清理遵守封存／還原規範。
 
@@ -53,4 +55,4 @@
 - 要開終端機用 `cli_open`（OS 管的終端機，會留在 CLI 分頁給使用者看）；`cli_sessions_list` 看清單、`cli_send` 送指令、`cli_tail` 讀輸出、`cli_close` 關閉（歷史保留）。不要自己 spawn 一個看不見的 shell 長期掛著。
 
 ## 文件
-- 規矩 `os.md`、常用技能 `skillet.md`、工作筆記 `note.md` 在入口 `<your-volume>/`；施工 `todo.md`、待決 `issue.md`、差異 `決策紀錄.md` 在 tatwo2 專案的 docs/。
+- 規矩 `os.md`、常用技能 `skillet.md`、工作筆記 `note.md` 在入口 `~/AI/TATWO OS/`；施工 `todo.md`、待決 `issue.md`、差異 `決策紀錄.md` 在 tatwo2 專案的 docs/。

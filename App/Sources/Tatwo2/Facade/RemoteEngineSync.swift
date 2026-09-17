@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum RemoteEngineSyncError: Error, CustomStringConvertible {
     case enginesMissing(String)
@@ -88,13 +89,13 @@ struct RemoteEngineSync {
     private static let stampURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         .appendingPathComponent("tatwo2-remote-engine-last-sync.json")
 
-    /// 同一設備成功同步後 24 小時內不再 rsync；回傳 session 內 handle（production：固定 ~/.tatwo2/engines；fixture：capture-only）。
+    /// 同一設備＋目的地的 Engines 內容雜湊相同才跳過 rsync；回傳 session 內 handle（production：固定 ~/.tatwo2/engines；fixture：capture-only）。
     @discardableResult
     static func ensureEnginesOnDevice(_ ref: RemoteDeviceRef, kind: ClaudeSidecar.Kind) throws -> RemoteEngineHandle {
         lock.lock()
         defer { lock.unlock() }
 
-        // 測試模式偵測＋驗證必須在 24 小時快取 fast-return 之前：fixture 永遠不能回傳生產 sidecar 路徑，也不能被快取繞過。
+        // 測試模式偵測＋驗證必須在內容快取 fast-return 之前：fixture 永遠不能回傳生產 sidecar 路徑，也不能被快取繞過。
         let environment = ProcessInfo.processInfo.environment
         #if DEBUG
         if let fixture = try RemoteSyncFixture.validate(environment: environment) {
@@ -120,29 +121,77 @@ struct RemoteEngineSync {
 
         let production = RemoteEngineHandle.production(device: ref, kind: kind)
         var stamps = loadStamps()
-        if let last = stamps[ref.id], Date().timeIntervalSince(last) < 24 * 60 * 60 {
-            return production
-        }
-
         let localEngines = enginesDirectory()
-        guard FileManager.default.fileExists(atPath: localEngines.path) else {
-            throw RemoteEngineSyncError.enginesMissing(localEngines.path)
+        let key = "\(ref.id)|\(ref.sshTarget)|\(ref.sshPort)|engines-v2"
+        stamps[key] = try deployIfNeeded(source: localEngines, previousHash: stamps[key]) {
+            for command in plannedCommands(ref: ref, localEngines: localEngines, destination: .production) {
+                try run(executable: command[0], arguments: Array(command.dropFirst()))
+            }
         }
 
-        for command in plannedCommands(ref: ref, localEngines: localEngines, destination: .production) {
-            try run(executable: command[0], arguments: Array(command.dropFirst()))
-        }
-
-        stamps[ref.id] = Date()
         saveStamps(stamps)
         return production
+    }
+
+    /// Shared by production and synthetic fixtures. Failed/in-flight changed sources
+    /// never earn a success stamp. No timestamp can bypass the content check.
+    static func deployIfNeeded(source: URL, previousHash: String?, deploy: () throws -> Void) throws -> String {
+        let hash = try contentHash(source)
+        guard hash != previousHash else { return hash }
+        try deploy()
+        guard try contentHash(source) == hash else {
+            throw RemoteEngineSyncError.commandFailed("Engines changed during deployment; retry required")
+        }
+        return hash
+    }
+
+    /// Hash only Engines: sorted relative paths, kinds, modes and streaming SHA256.
+    /// Symlinks hash their link text (rsync -a preserves links, not referent contents).
+    static func contentHash(_ source: URL) throws -> String {
+        let fm = FileManager.default
+        let root = source.standardizedFileURL.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw RemoteEngineSyncError.enginesMissing("Engines")
+        }
+        var walkError: Error?
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: nil,
+            errorHandler: { _, error in walkError = error; return false }) else {
+            throw RemoteEngineSyncError.enginesMissing("Engines")
+        }
+        let urls = walker.compactMap { $0 as? URL }.sorted { $0.path < $1.path }
+        if let walkError { throw walkError }
+        var tree = SHA256()
+        for url in urls {
+            let relative = String(url.path.dropFirst(root.path.count + 1))
+            let attrs = try fm.attributesOfItem(atPath: url.path)
+            let type = attrs[.type] as? FileAttributeType
+            let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+            var fileHash = SHA256()
+            let kind: String
+            switch type {
+            case .typeRegular:
+                kind = "file"
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty { fileHash.update(data: chunk) }
+            case .typeSymbolicLink:
+                kind = "link"
+                fileHash.update(data: Data(try fm.destinationOfSymbolicLink(atPath: url.path).utf8))
+            case .typeDirectory: kind = "directory"
+            default: throw RemoteEngineSyncError.commandFailed("unsupported Engines entry")
+            }
+            let hash = fileHash.finalize().map { String(format: "%02x", $0) }.joined()
+            tree.update(data: Data("\(relative.utf8.count):\(relative)\0\(kind)\0\(mode)\0\(hash)\n".utf8))
+        }
+        return tree.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// 純函式：只算 argv，不執行。目的地必須是 ValidatedRemoteDestination（不接受 raw 字串）。
     static func plannedCommands(ref: RemoteDeviceRef, localEngines: URL, destination: ValidatedRemoteDestination) -> [[String]] {
         let expandHome = destination.origin == .production
         let mkdir = ["/usr/bin/ssh"] + sshPrefix(ref) + ["/bin/mkdir", "-p", remoteShellQuote(destination.remoteDirectory, expandHome: expandHome)]
-        var rsyncArguments = ["/usr/bin/rsync", "-az", "--delete"]
+        var rsyncArguments = ["/usr/bin/rsync", "-az", "--checksum", "--delete"]
         if ref.sshPort != 22 {
             rsyncArguments += ["-e", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -p \(ref.sshPort)"]
         }
@@ -184,11 +233,11 @@ struct RemoteEngineSync {
     static var debugRunCount = 0
     /// 測試要求時的 stamps 走純記憶體，不碰共享的 NSTemporaryDirectory()/tatwo2-remote-engine-last-sync.json
     /// （2026-09-06 13:13 事故：debugRecordStamp 曾寫進真共享 cache，該紀錄保留不清）。
-    static var debugMemoryStamps: [String: Date] = [:]
+    static var debugMemoryStamps: [String: String] = [:]
     private static var debugStampsIsolated: Bool { RemoteSyncFixture.isRequested(environment: ProcessInfo.processInfo.environment) }
     static func debugRecordStamp(_ deviceID: String) {
         precondition(debugStampsIsolated, "debugRecordStamp 只能在測試要求模式下用（純記憶體）")
-        debugMemoryStamps[deviceID] = Date()
+        debugMemoryStamps[deviceID] = "legacy-time-only-stamp"
     }
     #endif
     private static func run(executable: String, arguments: [String]) throws {
@@ -215,22 +264,20 @@ struct RemoteEngineSync {
         }
     }
 
-    private static func loadStamps() -> [String: Date] {
+    private static func loadStamps() -> [String: String] {
         #if DEBUG
         if debugStampsIsolated { return debugMemoryStamps }
         #endif
         guard let data = try? Data(contentsOf: stampURL) else { return [:] }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([String: Date].self, from: data)) ?? [:]
+        return (try? decoder.decode([String: String].self, from: data)) ?? [:]
     }
 
-    private static func saveStamps(_ stamps: [String: Date]) {
+    private static func saveStamps(_ stamps: [String: String]) {
         #if DEBUG
         if debugStampsIsolated { debugMemoryStamps = stamps; return }
         #endif
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(stamps) else { return }
         try? data.write(to: stampURL, options: .atomic)

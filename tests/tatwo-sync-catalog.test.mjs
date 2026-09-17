@@ -27,10 +27,10 @@ const discoveryPath = path.join(
 
 test("versioned sync catalog validates", () => {
   const result = loadAndValidateSyncCatalog(catalogPath);
-  assert.equal(result.catalogRevision, "2026-07-29.1");
+  assert.equal(result.catalogRevision, "2026-09-17.w78");
   assert.ok(result.entryCount >= 43);
   assert.equal(result.entryCount, result.persistentSurfaceCount);
-  assert.equal(result.systemPullItemCount, 4);
+  assert.equal(result.systemPullItemCount, 0);
   assert.ok(result.deferredSystemPullItemCount > 0);
 });
 
@@ -102,14 +102,25 @@ test("every transferable feature has an explicit active or deferred system-pull 
   );
 });
 
-test("active system-pull set is the catalog source of truth and includes Skillet", () => {
+test("W78 dispatch replaces legacy system-pull for constitution, Skillet and global notes", () => {
   const document = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
-  assert.deepEqual(document.systemPullItemIDs, [
+  // W78 retired the 1.0 adapters: engineering documents travel via git,
+  // entrance sources via RemoteHostLink. Do not reactivate the old paths.
+  assert.deepEqual(document.systemPullItemIDs, []);
+  assert.equal(document.dispatchTransport, "RemoteHostLink");
+  assert.deepEqual(document.dispatchItemIDs, [
     "os.constitution",
-    "os.issue",
-    "os.todo",
     "skills.skillet",
+    "memory.global-notes",
   ]);
+  for (const id of [...document.dispatchItemIDs, "os.issue", "os.todo"]) {
+    assert.ok(document.deferredSystemPullItemIDs.includes(id), id);
+  }
+  for (const id of document.dispatchItemIDs) {
+    const entry = document.entries.find(entry => entry.id === id);
+    assert.equal(entry.scope, "shared", id);
+    assert.equal(entry.transportAdapter, "RemoteHostLink", id);
+  }
 });
 
 test("production durable writer discovery matches the reviewed source snapshot", () => {

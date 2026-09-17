@@ -21,7 +21,7 @@ struct BrowserProcessHealth: Sendable {
     // Site isolation, navigation and sleeping all legitimately launch helpers.
     static let restartCountText = "未知（未建立 PID 重啟關聯）"
     static let countExplanation = "啟動數按角色累計，不是重啟數；終止回呼可能包含同程序的多個分頁"
-    static let codecLimitation = "編解碼器：CEF minimal 不含 H.264／AAC，部分影片無法播放"
+    static let codecLimitation = "編解碼器：CEF minimal 不含 H.264／AAC，部分影片無法播放。常見：X／Twitter、部分新聞站影片"
     static let touchIDLimitation = "WebAuthn Touch ID：需 keychain-access-group entitlement，目前不可用"
 
     init(_ snapshot: [String: Any] = [:]) {

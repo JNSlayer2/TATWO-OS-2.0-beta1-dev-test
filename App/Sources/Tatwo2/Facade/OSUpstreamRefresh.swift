@@ -3,6 +3,19 @@ import CryptoKit
 import Darwin
 
 enum OSUpstreamRefresh {
+    static var generatedContent: ((String, Date) throws -> Data)?
+    private static func source(runtime: URL, bundled: URL?, now: Date = Date()) throws -> Data {
+        if let generatedContent, bundled == bundledURL {
+            return try generatedContent(runtime.path, now)
+        }
+        guard let bundled else { throw CocoaError(.fileNoSuchFile) }
+        return try Data(contentsOf: bundled)
+    }
+    /// What launch would install for this runtime path: the constitution-generated
+    /// upstream in production, or the bundled file in fixtures. Read-only.
+    static func expectedContent(runtimePath: String, bundled: URL?, now: Date = Date()) throws -> Data {
+        try source(runtime: URL(fileURLWithPath: runtimePath), bundled: bundled, now: now)
+    }
     struct PendingUpdate: Equatable, Identifiable {
         let runtimeHash: String
         let bundledHash: String
@@ -37,13 +50,13 @@ enum OSUpstreamRefresh {
         bundled: URL? = OSUpstreamRefresh.bundledURL,
         now: Date = Date()
     ) -> Outcome {
-        guard let bundled else { return .failed("bundle_missing") }
+        guard bundled != nil || generatedContent != nil else { return .failed("bundle_missing") }
         let fm = FileManager.default
         let runtime = URL(fileURLWithPath: runtimePath)
         let directory = runtime.deletingLastPathComponent()
         let marker = directory.appendingPathComponent("os-upstream.installed.sha256")
         do {
-            let content = try Data(contentsOf: bundled)
+            let content = try source(runtime: runtime, bundled: bundled, now: now)
             let digest = sha256(content)
             if !fm.fileExists(atPath: runtime.path) {
                 guard (try? fm.destinationOfSymbolicLink(atPath: runtime.path)) == nil else {
@@ -69,7 +82,7 @@ enum OSUpstreamRefresh {
             // Only one exact last-installed hash grants automatic replacement.
             // Missing/empty/malformed/legacy multi-hash markers all fail closed.
             guard markerText == current else {
-                try Data("App 內建 OS 上游宣告內容不同；已保留自訂檔案，請到設定 › OS 檢視差異。\n".utf8)
+                try Data("OS 上游已手改；已保留自訂檔案，請到設定 › OS 檢視差異。\n".utf8)
                     .write(to: noticeURL(in: directory), options: .atomic)
                 return .keptUserEdited
             }
@@ -85,12 +98,19 @@ enum OSUpstreamRefresh {
         runtimePath: String = OSUpstream.overridePath,
         bundled: URL? = OSUpstreamRefresh.bundledURL
     ) throws -> PendingUpdate? {
-        guard let bundled else { throw CocoaError(.fileNoSuchFile) }
         let runtime = URL(fileURLWithPath: runtimePath)
         let pending = try difference(runtime: runtime, bundled: bundled)
         guard let pending,
               keptChoice(in: runtime.deletingLastPathComponent()) != pending.id else { return nil }
         return pending
+    }
+
+    /// Kept content stays yellow and can be reviewed again without discarding the keep decision.
+    static func reviewDifference(
+        runtimePath: String = OSUpstream.overridePath,
+        bundled: URL? = OSUpstreamRefresh.bundledURL
+    ) throws -> PendingUpdate? {
+        try difference(runtime: URL(fileURLWithPath: runtimePath), bundled: bundled)
     }
 
     /// The user approved precisely the contents displayed by the diff.
@@ -103,8 +123,7 @@ enum OSUpstreamRefresh {
     ) throws -> Outcome {
         let runtime = URL(fileURLWithPath: runtimePath)
         try validate(reviewed, runtime: runtime, bundled: bundled)
-        guard let bundled else { throw ReviewError.contentChanged }
-        let content = try Data(contentsOf: bundled)
+        let content = try source(runtime: runtime, bundled: bundled)
         guard sha256(content) == reviewed.bundledHash else { throw ReviewError.contentChanged }
         return try replace(content, current: reviewed.runtimeHash, runtime: runtime, now: now)
     }
@@ -117,13 +136,17 @@ enum OSUpstreamRefresh {
         let runtime = URL(fileURLWithPath: runtimePath)
         try validate(reviewed, runtime: runtime, bundled: bundled)
         let directory = runtime.deletingLastPathComponent()
+        if generatedContent != nil, bundled == bundledURL {
+            try Data(reviewed.bundledText.utf8).write(
+                to: directory.appendingPathComponent("os-upstream.kept-generated.md"), options: .atomic)
+        }
         try Data((reviewed.id + "\n").utf8).write(to: choiceURL(in: directory), options: .atomic)
         try clearNotice(in: directory)
         // Do not update the installed marker: this remains the user's custom file.
     }
 
-    private static func difference(runtime: URL, bundled: URL) throws -> PendingUpdate? {
-        let current = try Data(contentsOf: runtime), content = try Data(contentsOf: bundled)
+    private static func difference(runtime: URL, bundled: URL?) throws -> PendingUpdate? {
+        let current = try Data(contentsOf: runtime), content = try source(runtime: runtime, bundled: bundled)
         guard current != content else { return nil }
         guard let runtimeText = String(data: current, encoding: .utf8),
               let bundledText = String(data: content, encoding: .utf8) else { throw ReviewError.invalidUTF8 }
@@ -132,9 +155,17 @@ enum OSUpstreamRefresh {
     }
 
     private static func validate(_ reviewed: PendingUpdate, runtime: URL, bundled: URL?) throws {
-        guard let bundled, try difference(runtime: runtime, bundled: bundled) == reviewed else {
+        guard try difference(runtime: runtime, bundled: bundled) == reviewed else {
             throw ReviewError.contentChanged
         }
+    }
+
+    static func isUserEdited(runtimePath: String = OSUpstream.overridePath) -> Bool {
+        let runtime = URL(fileURLWithPath: runtimePath)
+        guard let bytes = try? Data(contentsOf: runtime) else { return false }
+        let marker = runtime.deletingLastPathComponent().appendingPathComponent("os-upstream.installed.sha256")
+        let installed = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return installed != sha256(bytes)
     }
 
     private static func replace(_ content: Data, current: String, runtime: URL, now: Date) throws -> Outcome {

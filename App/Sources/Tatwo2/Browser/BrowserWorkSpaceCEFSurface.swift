@@ -175,6 +175,18 @@ final class BrowserWorkSpaceRuntime: ObservableObject {
         }
         host.onDailyShortcut = { [weak self] id, kind in
             guard let self, id == self.selectedID?.uuidString else { return }
+#if canImport(TatwoCEFBridge)
+            if BrowserMediaFallback.isCodecMessage(kind) {
+                guard let uuid = UUID(uuidString: id), let host = self.host else { return }
+                BrowserMediaFallback.dispatch(message: kind, tabID: uuid, host: host,
+                    registry: self.registry, isSelected: { [weak self, weak host] in
+                        guard let self, let host else { return false }
+                        return self.host === host && self.selectedID == uuid &&
+                            self.workTabs.contains { $0.id == uuid && !$0.isSleeping && !$0.usesAgentContext }
+                    })
+                return
+            }
+#endif
             self.shortcutKind = kind
             self.shortcutSerial &+= 1
         }

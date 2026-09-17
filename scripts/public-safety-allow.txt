@@ -326,3 +326,12 @@ tests/browser-repaired-actions.test.mjs | email address | Synthetic credential-b
 tests/fixtures/browser-download-permissions-checks.swift | personal hostname | Synthetic local hostname verifies consent normalization and deduplication. | ^(?:NAS\.LOCAL\.|nas\.local)$
 tests/fixtures/browser-download-permissions-checks.swift | email address | Synthetic credential-bearing example URL verifies history redaction. | ^secret-password\x40example\.test$
 tests/published-release-cache.test.py | macos username | Synthetic release asset basenames in metadata fixtures, not operating system accounts. | ^(?:TATWO-OS\.zip|not-requested\.zip)$
+tests/w72-version-push.test.mjs | email address | Synthetic git author for W72 version-push dirty-tree fixture. | ^fixture\x40example\.invalid$
+tests/w74-entry-documents.test.mjs | email address | Synthetic git author for W74 single-file commit fixture. | ^fixture\x40example\.invalid$
+tests/w76-device-identity.test.mjs | macos username | Synthetic device display names and fixture SSH users in W76 identity/pairing fixtures, not operating system accounts. | ^(?:A|B|Host|Client|legacy|primary|secondary|unrelated|fixture)$
+App/Sources/Tatwo2/Pages/DeviceSyncLeafViews.swift | personal hostname | Swift property access to a row flag meaning this device, not a hostname. | ^row\.local$
+tests/w77-device-status.test.mjs | email address | Synthetic git author for W77 read-only code status fixture. | ^fixture\x40example\.invalid$
+tests/w77-device-status.test.mjs | macos username | Synthetic SSH user and display name in W77 device status fixture. | ^(?:fixture|synthetic)$
+App/Sources/Tatwo2/Facade/DistillCanvas.swift | macos username | Application MCP client identifier, not a personal operating-system account. | ^(?:tatwo\x2ddistill)$
+tests/w81-distill.test.mjs | macos username | Synthetic device label and public MCP method identifier, not personal accounts. | ^(?:fixture\x2ddevice|get_page)$
+tests/w80b-adapter.test.mjs | provider token | Isolated lifecycle scan uses an explicitly nonfunctional synthetic credential. | ^(?:sk\x2dtest\x2dw80b\x2dnot\x2dreal)$

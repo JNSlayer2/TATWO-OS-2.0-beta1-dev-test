@@ -459,6 +459,8 @@ extension View {
     join(root, 'App/Sources/Tatwo2/Browser/BrowserShortcuts.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserTabRow.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserBookmarkRows.swift'),
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserFavoritesStrip.swift'),
+    join(root, 'App/Sources/Tatwo2/Browser/BrowserBookmarkExport.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserSidebarControls.swift'),
     join(root, 'App/Sources/Tatwo2/Browser/BrowserExtensionsView.swift'),
     join(root, 'App/Sources/Tatwo2/Shell/WorkspaceSpaceControls.swift'),

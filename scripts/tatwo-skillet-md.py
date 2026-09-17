@@ -110,7 +110,7 @@ def default_os_root() -> Path:
     env = os.environ.get("TATWO_OS_ROOT", "").strip()
     if env:
         return expand(env)
-    return expand("~/Library/Application Support/Tatwo Ultrawork/work-os")
+    return expand("~/AI/TATWO OS")
 
 
 def canonical_path(args: argparse.Namespace) -> Path:

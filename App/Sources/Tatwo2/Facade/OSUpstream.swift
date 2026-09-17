@@ -1,11 +1,22 @@
 import Foundation
 
-/// OS 上游宣告：每條討論串啟動時，把 docs/os-upstream.md（＋這條討論串的人設）塞給引擎的原生系統指令入口。
+/// OS 上游宣告：每條討論串啟動時，把本機產生的 os-upstream.md（＋人設）注入原生指令入口。
 /// Claude → Agent SDK systemPrompt 附加段；Codex → developer_instructions；Grok → --rules。
-/// 來源順序：使用者覆寫檔 → App 內建資源 → 專案 docs/。都沒有就只給人設。
+/// 來源為入口憲法＋本機身份的產物；來源不可讀時不退回另一份規則正本。
 enum OSUpstream {
+    // The app links the generator. Historical standalone swiftc probes link only
+    // this file + TatwoEntry/resources and retain their file-reader contract.
+    #if SWIFT_PACKAGE
+    private static let configure: Void = RuleGenerator.registerRuntime()
+    #endif
     static var overridePath: String {
-        let environment = ProcessInfo.processInfo.environment
+        #if SWIFT_PACKAGE
+        _ = configure
+        #endif
+        return runtimePath(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func runtimePath(environment: [String: String]) -> String {
         if let explicit = environment["TATWO2_OS_UPSTREAM_PATH"], !explicit.isEmpty {
             return explicit
         }
@@ -19,13 +30,16 @@ enum OSUpstream {
     }
 
     static func declaration() -> String? {
-        var candidates = [overridePath]
+        let path = overridePath
+        #if SWIFT_PACKAGE
+        _ = OSUpstreamRefresh.applyOnLaunch(runtimePath: path)
+        return try? OSUpstreamBinding.readText(path)
+        #else
+        var candidates = [path]
         if let bundled = TatwoResources.url(forResource: "os-upstream", withExtension: "md") { candidates.append(bundled.path) }
-        candidates.append("\(NSHomeDirectory())/Library/Application Support/tatwo2/docs/os-upstream.md")
-        for path in candidates {
-            if let text = try? String(contentsOfFile: path, encoding: .utf8), !text.isEmpty { return text }
-        }
-        return nil
+        candidates.append(TatwoEntry().repoDocs.appendingPathComponent("os-upstream.md").path)
+        return candidates.compactMap { try? String(contentsOfFile: $0, encoding: .utf8) }.first { !$0.isEmpty }
+        #endif
     }
 
     /// 組出要注入的完整文字：上游宣告 ＋ 討論串人設（bot）。

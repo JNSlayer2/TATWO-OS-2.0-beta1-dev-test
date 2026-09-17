@@ -45,10 +45,41 @@ struct EnrolledDevice: Codable, Equatable, Identifiable, Sendable {
 }
 struct TatwoFlexPrimaryState: Equatable {
     let localDeviceName: String; let currentPrimaryName: String?; let epoch: Int?; let changedAt: Date?
-    var isLocalPrimary: Bool { currentPrimaryName == localDeviceName }
+    var localRole: DeviceRole? = nil
+    var isLocalPrimary: Bool {
+        if let localRole { return localRole == .primary && isAssigned }
+        return currentPrimaryName == localDeviceName // screenshot-only legacy initializer
+    }
     var isAssigned: Bool { currentPrimaryName != nil }
 }
-enum TatwoFlexPrimaryReader { static func read(appSupportRoot: URL = DeviceSyncOutboxStore.defaultApplicationSupportRootPublic()) -> TatwoFlexPrimaryState { DevicesExportSyncFixture.primaryState() } }
+enum TatwoFlexPrimaryReader {
+    /// Pure read: missing/invalid identity is unassigned, never a screenshot fixture.
+    static func read(
+        entry: TatwoEntry = TatwoEntry(),
+        registryURL: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> TatwoFlexPrimaryState {
+        guard let identity = try? DeviceIdentityStore.readLocal(entry: entry) else {
+            return TatwoFlexPrimaryState(
+                localDeviceName: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
+                currentPrimaryName: nil, epoch: nil, changedAt: nil)
+        }
+        let liveRoot = environment["TATWO2_LIVE_ROOT"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("tatwo2/live", isDirectory: true)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let records = (try? Data(contentsOf: registryURL ?? liveRoot.appendingPathComponent("devices.json")))
+            .flatMap { try? decoder.decode([DeviceRecord].self, from: $0) } ?? []
+        let primaryName = identity.primaryDeviceID.map { id in
+            identity.role == .primary ? identity.name
+                : records.first { $0.id.lowercased() == id.lowercased() }?.name ?? id
+        }
+        return TatwoFlexPrimaryState(
+            localDeviceName: identity.name, currentPrimaryName: primaryName,
+            epoch: identity.epoch, changedAt: identity.updatedAt, localRole: identity.role)
+    }
+}
 enum TatwoHostMemoryPressureLevelV1: String, Codable, Sendable, Equatable { case normal, warn, urgent, critical, unknown }
 enum TatwoDeviceConnectionStatusV1: String, Codable, Sendable, Equatable { case local, online, offline, unknown }
 struct TatwoPressureWorkerV1: Sendable, Equatable { let loopID: String? }
@@ -207,13 +238,8 @@ struct TatwoSyncModuleRuntimeRecordV1: Codable, Sendable, Equatable { var module
 struct TatwoSyncModuleResolvedV1: Identifiable, Sendable, Equatable { var id: String { definition.id }; let definition: TatwoSyncModuleDefinitionV1; let enabled: Bool; let runtime: TatwoSyncModuleRuntimeRecordV1; var runState: TatwoSyncModuleRunStateV1 { runtime.state }; var reason: String? { runtime.reason } }
 struct TatwoSyncModulesRegistry: Codable, Hashable, Sendable {
     let modules: [TatwoSyncModuleDefinitionV1]
-    static func loadBundled() throws -> Self { .init(modules: [
-        .init(id: "cli-version", section: .version, titleZh: "CLI 版本", plainZh: "命令列工具版本"),
-        .init(id: "skillet-bundle-lane", section: .data, titleZh: "Skillet 技能", plainZh: "技能資料同步"),
-        .init(id: "os-skillet-md", section: .data, titleZh: "skillet.md", plainZh: "主控文件同步"),
-        .init(id: "model-collab-presets", section: .data, titleZh: "協作設定", plainZh: "模式與模型協作設定"),
-        .init(id: "governance-docs", section: .data, titleZh: "OS 文件", plainZh: "os.md、issue.md 與 TODO.md"),
-    ]) }
+    // No shipping dispatcher is wired here. Do not advertise five fictional modules.
+    static func loadBundled() throws -> Self { .init(modules: []) }
     func module(id: String) -> TatwoSyncModuleDefinitionV1? { modules.first { $0.id == id } }
     func resolvedModules(enablement: TatwoSyncModuleEnablementStore, runtime: TatwoSyncModuleRuntimeStateStore) throws -> [TatwoSyncModuleResolvedV1] { modules.map { .init(definition: $0, enabled: (try? enablement.isEnabled(moduleID: $0.id, registry: self)) ?? $0.enabled, runtime: .init(moduleID: $0.id)) } }
 }

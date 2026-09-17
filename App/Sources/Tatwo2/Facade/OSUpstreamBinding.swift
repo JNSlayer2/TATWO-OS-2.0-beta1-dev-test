@@ -19,17 +19,20 @@ struct UpstreamBindingStatus: Identifiable, Equatable {
 }
 
 enum OSUpstreamBinding {
+    // Installed by the local generator at app launch. Nil retains the standalone W71 migration API.
+    static var runtimeSource: (([String: String]) throws -> String)?
+    static var translatedBlock: ((UpstreamBindingTarget, [String: String], String) throws -> String)?
+    static var externalTargets: ((String) -> [UpstreamBindingTarget])?
     static let beginMarker = "<!-- TATWO_OS_UPSTREAM_V2:BEGIN -->"
     static let endMarker = "<!-- TATWO_OS_UPSTREAM_V2:END -->"
     /// 入口資料夾：使用者指定的外接卷 TATWO OS；可用環境變數或偏好覆寫。
     static func osRoot(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
-        if let env = environment["TATWO2_OS_ROOT"], !env.isEmpty { return env }
-        if let pref = UserDefaults.standard.string(forKey: "tatwo2.osRoot"), !pref.isEmpty { return pref }
-        return "\(NSHomeDirectory())/Library/Application Support/tatwo2"
+        TatwoEntry(environment: environment).root.path
     }
 
-    /// 現在的一頁規則：入口有就用入口的，沒有用 App 內建那份（跟 OSUpstream.declaration 同一順序）。
+    /// App 使用產生後的執行期上游；獨立 W71 遷移 API 保留原有讀取契約。
     static func upstreamText(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        if let runtimeSource { return try? runtimeSource(environment) }
         let path = osRoot(environment: environment) + "/os-upstream.md"
         if FileManager.default.fileExists(atPath: path) { return try? readText(path) }
         return try? bundled("os-upstream")
@@ -50,7 +53,7 @@ enum OSUpstreamBinding {
             }
         }
         let home = NSHomeDirectory()
-        var list: [UpstreamBindingTarget] = [
+        var list: [UpstreamBindingTarget] = externalTargets?(home) ?? [
             .init(id: "claude-cli", label: "Claude CLI（~/.claude/CLAUDE.md）", path: home + "/.claude/CLAUDE.md"),
             .init(id: "codex-cli", label: "Codex CLI（~/.codex/AGENTS.md）", path: home + "/.codex/AGENTS.md"),
         ]
@@ -90,8 +93,8 @@ enum OSUpstreamBinding {
     static func statuses(environment: [String: String] = ProcessInfo.processInfo.environment) -> [UpstreamBindingStatus] {
         preview(environment: environment).items.map { item in
             .init(target: item.target, state: item.state == .unreadable ? .unreachable :
-                item.state == .bound ? .bound : item.state == .stale ? .stale : .unbound,
-                detail: item.error ?? item.state.rawValue)
+                item.state == .bound ? .bound : (item.state == .stale || item.state == .edited) ? .stale : .unbound,
+                detail: item.error ?? (item.state == .edited ? "已手改（未覆蓋，可預覽套用或保留）" : item.state.rawValue))
         }
     }
 

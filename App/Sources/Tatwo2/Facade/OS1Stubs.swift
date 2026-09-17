@@ -195,16 +195,21 @@ struct DeviceSyncOutboxStore: Sendable {
     func pendingIntents() throws -> [DeviceSyncIntent] { [] }
     func receipts() throws -> [DeviceSyncReceipt] { [] }
     func receiptLoadResult() throws -> DeviceSyncReceiptLoadResult { .init(receipts: []) }
-    func enrolledDevices() throws -> [EnrolledDevice] { DevicesExportSyncFixture.secondaryDevices() }
-    func secondaryDevices() throws -> [EnrolledDevice] { DevicesExportSyncFixture.secondaryDevices() }
+    // W76：正式路徑讀真實設備名單；截圖匯出模式才用 fixture。
+    func enrolledDevices() throws -> [EnrolledDevice] {
+        if DevicesExportSyncFixture.isActive() { return DevicesExportSyncFixture.secondaryDevices() }
+        return DeviceRegistry().list().map { EnrolledDevice(name: $0.name, role: $0.role?.rawValue ?? "unknown", enrolledAt: $0.addedAt, deviceId: $0.id) }
+    }
+    func secondaryDevices() throws -> [EnrolledDevice] { try enrolledDevices().filter { $0.role != "primary" } }
 }
 struct TatwoPluginRegistryStore {
     static func loadDefaultEntries() -> [PluginRegistryEntry] { PluginsSource.load() }
     static func defaultStore() -> TatwoPluginRegistryStore { .init() }
     func register(kind: RegistryKind, path: String, plainPurpose: String, name: String?) throws -> PluginRegistryEntry { .init(id: path, name: name ?? path, kind: kind, purpose: plainPurpose, path: path, trigger: "", safetyLevel: .medium, installState: .unknown, smokeCommand: nil, publicInstallHint: "") }
+    // W90：移除失敗不得回 fixture 第一筆冒充「已移除某個外掛」；不支援就丟錯給 UI 顯示。
     func remove(id: String) throws -> PluginRegistryEntry {
-        if PluginsSource.mcpEngine(from: id) != nil { return try PluginsSource.removeRegistration(id: id) }
-        return PluginsFixture.entries.first ?? .init(id: id, name: id, kind: .plugin, purpose: "", path: nil, trigger: "", safetyLevel: .low, installState: .unknown, smokeCommand: nil, publicInstallHint: "")
+        guard PluginsSource.mcpEngine(from: id) != nil else { throw PluginsSource.RemovalError.unsupported }
+        return try PluginsSource.removeRegistration(id: id)
     }
     func syncClaudeMCPConfig() throws -> TatwoClaudeMCPSyncReceiptV1 { .init() }
 }

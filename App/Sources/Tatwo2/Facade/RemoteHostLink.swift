@@ -34,6 +34,11 @@ final class RemoteHostLink: @unchecked Sendable {
     private var reconnectDelay: TimeInterval = 1
     private var reconnectScheduled = false
     private var wantsConnection = false
+    private var statusProbeOnly = false
+    private var pinnedHostsFile: URL?
+    private var pinnedHostAlgorithm: String?
+    private var activeEndpoint: DeviceEndpoint?
+    private var endpointDeadline: Date?
 
     let localSocketPath: String
 
@@ -44,6 +49,97 @@ final class RemoteHostLink: @unchecked Sendable {
 
     deinit {
         disconnect()
+        if let pinnedHostsFile { try? FileManager.default.removeItem(at: pinnedHostsFile) }
+    }
+
+    /// A dedicated RPC link authenticated against the pairing record's SSH HOST key.
+    /// Do not use this with a record representing an inbound client key. No TOFU here.
+    func callPinned(device: DeviceRecord, method: String, params: [String: Any] = [:]) throws -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard tunnel == nil, !wantsConnection else { throw RemoteHostLinkError.invalidResponse }
+        statusProbeOnly = true
+        wantsConnection = true
+        self.device = device
+        defer {
+            wantsConnection = false
+            tunnel?.terminationHandler = nil
+            if tunnel?.isRunning == true { tunnel?.terminate() }
+            tunnel = nil
+            _ = unlink(localSocketPath)
+        }
+        try establishLocked(device)
+        return try callLocked(method: method, params: params)
+    }
+
+    /// Reuse the exact host-key pin established by callPinned; push only a captured
+    /// commit into an inbox ref, never the primary's checked-out branch.
+    func pushPinned(device: DeviceRecord, repository: String, localRepository: URL,
+                    commit: String, ref: String) throws {
+        guard pinnedHostsFile != nil, self.device?.id == device.id,
+              !device.user.hasPrefix("-"), !device.host.hasPrefix("-"),
+              device.user.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              device.host.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              ref.hasPrefix("refs/heads/inbox/") else { throw RemoteHostLinkError.invalidResponse }
+        func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.currentDirectoryURL = localRepository
+        var env = sshEnvironment.filter { !$0.key.hasPrefix("GIT_") }
+        env["GIT_SSH_COMMAND"] = (["/usr/bin/ssh"] + (try sshBaseArguments(device))).map(quote).joined(separator: " ")
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        process.environment = env
+        process.arguments = ["-c", "core.hooksPath=/dev/null", "push", "--",
+            "\(sshDestination(device)):\(repository)", "\(commit):\(ref)"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run(); process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw RemoteHostLinkError.remoteError("branch_push_failed") }
+    }
+
+    /// A wake-up has no content or authority. Receiver must fetch independently
+    /// from its own pinned primary; a spoofed notification cannot apply anything.
+    func notifyDispatch(device: DeviceRecord) throws {
+        lock.lock(); defer { lock.unlock() }
+        statusProbeOnly = true; wantsConnection = true; self.device = device
+        defer {
+            wantsConnection = false; tunnel?.terminationHandler = nil
+            if tunnel?.isRunning == true { tunnel?.terminate() }
+            tunnel = nil; _ = unlink(localSocketPath)
+        }
+        try establishLocked(device)
+        _ = try callLocked(method: "dispatch_wake", params: [:])
+    }
+
+    /// Use a dedicated short-lived link. Never connect(), call(), or schedule get_document.
+    func queryDeviceStatus(device: DeviceRecord, primaryCommit: String? = nil) -> DeviceStatusProbe {
+        lock.lock()
+        defer {
+            wantsConnection = false
+            tunnel?.terminationHandler = nil
+            if tunnel?.isRunning == true { tunnel?.terminate() }
+            tunnel = nil
+            _ = unlink(localSocketPath)
+            lock.unlock()
+        }
+        statusProbeOnly = true
+        var sshReachable = false
+        do {
+            self.device = device
+            wantsConnection = true
+            try establishLocked(device) { sshReachable = true }
+            // Cancel the legacy reconnect handler before issuing any request.
+            tunnel?.terminationHandler = nil
+            let params: [String: Any] = primaryCommit.map { ["primary_commit": $0] } ?? [:]
+            let result = try callLocked(method: "device_status", params: params)
+            return .init(connection: .reachable, snapshot: try DeviceStatusSnapshot.decode(result),
+                         acquiredAt: Date(), reason: nil)
+        } catch {
+            return .init(connection: sshReachable ? .appUnavailable : .sshUnavailable,
+                         snapshot: nil, acquiredAt: Date(),
+                         reason: sshReachable ? "app_rpc_unavailable" : "ssh_unavailable")
+        }
     }
 
     func connect(device: DeviceRecord) throws {
@@ -51,8 +147,7 @@ final class RemoteHostLink: @unchecked Sendable {
         defer { lock.unlock() }
         wantsConnection = true
         self.device = device
-        remoteSocketPath = try resolveRemoteSocketPath(device)
-        try startTunnelLocked(device: device)
+        try establishLocked(device)
         _ = try callLocked(method: "get_document", params: [:])
         reconnectDelay = 1
     }
@@ -80,34 +175,115 @@ final class RemoteHostLink: @unchecked Sendable {
         }
     }
 
-    private func resolveRemoteSocketPath(_ device: DeviceRecord) throws -> String {
-        if let override = environment["TATWO2_REMOTE_OS_SOCKET"], !override.isEmpty {
-            return override
+    /// Only transport establishment retries. Never replay a mutating RPC on another endpoint.
+    private func establishLocked(_ device: DeviceRecord, sshReady: () -> Void = {}) throws {
+        // No route (including LAN) may turn a paired record back into TOFU.
+        try prepareHostPin(device)
+        // Sessions may predate an endpoint edit. Reload routes, never silently replace
+        // the caller's paired identity/key with a differently paired registry record.
+        let current = DeviceStatusReader.registry(environment: environment).first { $0.id == device.id }
+        if let current, current.publicKeyFingerprint != device.publicKeyFingerprint || current.user != device.user {
+            throw RemoteHostLinkError.remoteError("pairing_identity_changed")
         }
-        let home = try sshHome(device)
-        return URL(fileURLWithPath: home, isDirectory: true)
-            .appendingPathComponent("Library/Application Support/tatwo2/live/os.sock")
-            .path
+        let routes = current ?? device
+        var lastError: Error = RemoteHostLinkError.remoteError("no_active_endpoints")
+        for endpoint in routes.orderedEndpoints {
+            stopTunnelLocked()
+            activeEndpoint = endpoint
+            endpointDeadline = Date().addingTimeInterval(8)
+            defer { endpointDeadline = nil }
+            do {
+                let home = try sshHome(device)
+                sshReady()
+                remoteSocketPath = environment["TATWO2_REMOTE_OS_SOCKET"]
+                    ?? URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/tatwo2/live/os.sock").path
+                try startTunnelLocked(device: device)
+                _ = try? DeviceRegistry(environment: environment).touch(id: device.id, endpoint: endpoint)
+                return
+            } catch {
+                lastError = error
+                stopTunnelLocked()
+            }
+        }
+        throw lastError
+    }
+
+    private func stopTunnelLocked() {
+        tunnel?.terminationHandler = nil
+        if tunnel?.isRunning == true { tunnel?.terminate() }
+        tunnel = nil
+        _ = unlink(localSocketPath)
+    }
+
+    private func prepareHostPin(_ device: DeviceRecord) throws {
+        guard device.publicKeyFingerprint.hasPrefix("SHA256:") else {
+            throw RemoteHostLinkError.remoteError("paired_host_key_not_found")
+        }
+        if let pinnedHostsFile { try? FileManager.default.removeItem(at: pinnedHostsFile) }
+        pinnedHostsFile = nil; pinnedHostAlgorithm = nil
+        let known = environment["TATWO2_SSH_KNOWN_HOSTS"] ?? environment["TATWO2_KNOWN_HOSTS"]
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/known_hosts").path
+        // Match key material, not an alias/hostname. Re-label ONLY the paired key for ssh's lookup.
+        let lines = (try? String(contentsOfFile: known, encoding: .utf8))?.split(separator: "\n") ?? []
+        var match: (String, String)?
+        for line in lines where !line.hasPrefix("#") && !line.hasPrefix("@") {
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            guard parts.count >= 3 else { continue }
+            let key = "\(parts[1]) \(parts[2])"
+            if (try? DeviceRegistry.fingerprint(publicKey: key)) == device.publicKeyFingerprint {
+                match = (key, String(parts[1])); break
+            }
+        }
+        guard let match else { throw RemoteHostLinkError.remoteError("paired_host_key_not_found") }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("w91-host-" + UUID().uuidString)
+        try Data(("tatwo-paired-host " + match.0 + "\n").utf8).write(to: file, options: .atomic)
+        _ = chmod(file.path, 0o600)
+        pinnedHostsFile = file
+        pinnedHostAlgorithm = match.1 == "ssh-rsa" ? "rsa-sha2-512,rsa-sha2-256" : match.1
+    }
+
+    /// GUI launches do not inherit a terminal's Homebrew PATH. Keep the caller's
+    /// precedence, but let an existing ProxyCommand find its installed helper.
+    private var sshEnvironment: [String: String] {
+        var result = environment
+        var paths = (result["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init)
+        for path in ["/opt/homebrew/bin", "/usr/local/bin"] where !paths.contains(path) { paths.append(path) }
+        result["PATH"] = paths.joined(separator: ":")
+        return result
+    }
+
+    private func sshDestination(_ device: DeviceRecord) -> String {
+        if activeEndpoint?.kind == .alias { return activeEndpoint?.alias ?? "" }
+        return "\(device.user)@\(activeEndpoint?.host ?? device.host)"
     }
 
     private func sshHome(_ device: DeviceRecord) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = sshBaseArguments(device) + ["\(device.user)@\(device.host)", "echo $HOME"]
-        process.environment = environment
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
+        process.arguments = try sshBaseArguments(device) + [sshDestination(device), "echo $HOME"]
+        process.environment = sshEnvironment
+        // A file avoids pipe backpressure from a noisy ProxyCommand. Never read private keys.
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("w91-ssh-" + UUID().uuidString)
+        FileManager.default.createFile(atPath: output.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        let handle = try FileHandle(forWritingTo: output)
+        defer { try? handle.close(); try? FileManager.default.removeItem(at: output) }
+        process.standardOutput = handle; process.standardError = handle
+        process.standardInput = FileHandle.nullDevice
         do {
             try process.run()
+            let deadline = endpointDeadline ?? Date().addingTimeInterval(8)
+            while process.isRunning && Date() < deadline { usleep(10_000) }
+            if process.isRunning {
+                process.terminate()
+                _ = kill(process.processIdentifier, SIGKILL)
+                throw RemoteHostLinkError.sshHomeLookupFailed("endpoint_timeout")
+            }
             process.waitUntilExit()
         } catch {
             throw RemoteHostLinkError.sshHomeLookupFailed(error.localizedDescription)
         }
-        let text = String(
-            decoding: output.fileHandleForReading.readDataToEndOfFile(),
-            as: UTF8.self
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = String(decoding: (try? Data(contentsOf: output)) ?? Data(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard process.terminationStatus == 0, !text.isEmpty else {
             throw RemoteHostLinkError.sshHomeLookupFailed(
                 "exit=\(process.terminationStatus) \(String(text.prefix(240)))")
@@ -127,22 +303,15 @@ final class RemoteHostLink: @unchecked Sendable {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = sshBaseArguments(device) + [
+        process.arguments = try sshBaseArguments(device) + [
             "-N",
             "-o", "ExitOnForwardFailure=yes",
             "-L", "\(localSocketPath):\(remoteSocketPath)",
-            "\(device.user)@\(device.host)",
+            sshDestination(device),
         ]
-        process.environment = environment
+        process.environment = sshEnvironment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { [weak self] _ in
-            guard let self else { return }
-            self.lock.lock()
-            self.tunnel = nil
-            self.scheduleReconnectLocked()
-            self.lock.unlock()
-        }
         do {
             try process.run()
         } catch {
@@ -150,32 +319,56 @@ final class RemoteHostLink: @unchecked Sendable {
         }
         tunnel = process
 
-        let deadline = Date().addingTimeInterval(10)
+        let deadline = endpointDeadline ?? Date().addingTimeInterval(8)
         while Date() < deadline {
             if !process.isRunning {
                 throw RemoteHostLinkError.tunnelStartFailed("ssh exited before forward became ready")
             }
-            if FileManager.default.fileExists(atPath: localSocketPath) { return }
+            if FileManager.default.fileExists(atPath: localSocketPath) {
+                if !statusProbeOnly {
+                    process.terminationHandler = { [weak self] ended in
+                        guard let self else { return }
+                        self.lock.lock(); defer { self.lock.unlock() }
+                        guard self.tunnel === ended else { return }
+                        self.tunnel = nil
+                        self.scheduleReconnectLocked()
+                    }
+                }
+                return
+            }
             usleep(50_000)
         }
         process.terminationHandler = nil
-        if process.isRunning { process.terminate() }
+        if process.isRunning { process.terminate(); _ = kill(process.processIdentifier, SIGKILL) }
         tunnel = nil
         throw RemoteHostLinkError.tunnelUnavailable
     }
 
-    private func sshBaseArguments(_ device: DeviceRecord) -> [String] {
-        [
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=8",
-            "-p", String(device.sshPort),
-        ]
+    private func sshBaseArguments(_ device: DeviceRecord) throws -> [String] {
+        guard let pinnedHostsFile, let pinnedHostAlgorithm else {
+            throw RemoteHostLinkError.remoteError("paired_host_key_not_found")
+        }
+        let port = activeEndpoint?.kind == .alias ? [] : ["-p", String(activeEndpoint?.port ?? device.sshPort)]
+        // -o is parsed using ssh_config syntax even though Process uses argv.
+        // Quote the value as well, since the approved staging volume has spaces.
+        let knownHosts = pinnedHostsFile.path.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        var arguments = [
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=\"\(knownHosts)\"", "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "HostKeyAlgorithms=\(pinnedHostAlgorithm)", "-o", "UpdateHostKeys=no",
+            "-o", "KnownHostsCommand=none", "-o", "VerifyHostKeyDNS=no",
+            "-o", "HostKeyAlias=tatwo-paired-host", "-o", "CheckHostIP=no",
+            "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=8",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1",
+        ] + port
+        if let key = environment["TATWO2_SSH_KEY_PATH"] { arguments += ["-i", key, "-o", "IdentitiesOnly=yes"] }
+        return arguments
     }
 
     private func callLocked(method: String, params: [String: Any]) throws -> [String: Any] {
         guard wantsConnection, let device else { throw RemoteHostLinkError.tunnelUnavailable }
-        try startTunnelLocked(device: device)
+        if tunnel?.isRunning != true { try establishLocked(device) }
         let request: [String: Any] = [
             "id": UUID().uuidString.lowercased(),
             "method": method,
@@ -233,7 +426,11 @@ final class RemoteHostLink: @unchecked Sendable {
         var chunk = [UInt8](repeating: 0, count: 65536)
         while true {
             let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, 65536) }
-            if n > 0 { out.append(contentsOf: chunk[0..<n]); if out.last == 0x0A { break }; continue }
+            if n > 0 {
+                out.append(contentsOf: chunk[0..<n])
+                guard out.count <= 16 * 1024 * 1024 else { throw RemoteHostLinkError.invalidResponse }
+                if out.last == 0x0A { break }; continue
+            }
             if n == 0 { break }
             if errno == EAGAIN || errno == EWOULDBLOCK { throw RemoteHostLinkError.invalidResponse }   // 逾時
             if errno == EINTR { continue }
@@ -243,6 +440,7 @@ final class RemoteHostLink: @unchecked Sendable {
     }
 
     private func scheduleReconnectLocked() {
+        guard !statusProbeOnly else { return }
         guard wantsConnection, !reconnectScheduled else { return }
         reconnectScheduled = true
         let delay = reconnectDelay
@@ -256,7 +454,7 @@ final class RemoteHostLink: @unchecked Sendable {
                 return
             }
             do {
-                try self.startTunnelLocked(device: device)
+                try self.establishLocked(device)
                 _ = try self.callLocked(method: "get_document", params: [:])
                 self.reconnectDelay = 1
             } catch {

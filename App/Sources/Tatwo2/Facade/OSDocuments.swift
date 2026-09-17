@@ -15,10 +15,16 @@ struct OSDocument: Identifiable, Hashable {
 }
 
 enum OSDocuments {
+    // Installed by the App's W78 coordinator. Kept injectable so the Foundation
+    // document adapter remains independently usable by legacy migration tooling.
+    static var secondaryWriter: ((String, String, String) throws -> WriteOutcome)?
+    private static let writeLock = NSRecursiveLock()
+    private static var readBases: [String: String] = [:]
     enum DocumentError: LocalizedError {
         case unknownDocument(String)
         case readOnly(String)
-        case missingSource(String)
+        case missingEntry(String)
+        case missingDocument(String, String)
 
         var errorDescription: String? {
             switch self {
@@ -26,39 +32,36 @@ enum OSDocuments {
                 return "找不到文件：\(id)"
             case let .readOnly(id):
                 return "文件不可編輯：\(id)"
-            case let .missingSource(path):
-                return "找不到可建立文件的來源：\(path)"
+            case let .missingEntry(path):
+                return "找不到入口 \(path)"
+            case let .missingDocument(name, path):
+                return "入口缺少 \(name)\n\(path)"
             }
         }
     }
 
-    /// 正本依 docs/決策紀錄.md 與 docs/os.md §6：
-    /// os.md／todo.md／issue.md／os-upstream.md 以 2.0 專案 docs 為準；
-    /// skillet.md 仍以使用者的 OS 根為準。
+    /// 入口文件與 repo 文件共用 TatwoEntry；執行期上游不搬移。
     static var osRoot: String {
-        ProcessInfo.processInfo.environment["TATWO2_OS_ROOT"]
-            ?? "\(NSHomeDirectory())/Library/Application Support/tatwo2"
+        TatwoEntry().root.path
     }
 
     static var docsRoot: String {
         ProcessInfo.processInfo.environment["TATWO2_DOCS_ROOT"]
-            ?? "\(NSHomeDirectory())/Library/Application Support/tatwo2/docs"
+            ?? TatwoEntry().repoDocs.path
     }
 
     static var skilletPath: String {
         ProcessInfo.processInfo.environment["TATWO2_SKILLET_PATH"]
-            ?? URL(fileURLWithPath: osRoot, isDirectory: true)
-                .appendingPathComponent("skillet.md").path
+            ?? TatwoEntry().skillet.path
     }
 
     static func list() -> [OSDocument] {
-        try? ensureOSUpstreamOverride()
         return [
             OSDocument(
                 id: "os",
                 title: "os.md",
                 audience: .user,
-                path: docsURL.appendingPathComponent("os.md").path,
+                path: TatwoEntry().constitution.path,
                 whatItIsFor: "放 TATWO OS 長期不變的規矩。",
                 isEditable: true),
             OSDocument(
@@ -93,33 +96,146 @@ enum OSDocuments {
     }
 
     static func read(id: String) throws -> String {
-        if id == "os-upstream" {
-            try ensureOSUpstreamOverride()
-        }
+        writeLock.lock(); defer { writeLock.unlock() }
         let document = try document(id: id)
-        return try String(contentsOfFile: document.path, encoding: .utf8)
+        try requireExisting(document)
+        let text = try String(contentsOfFile: document.path, encoding: .utf8)
+        readBases[id] = text
+        return text
     }
 
-    static func write(id: String, text: String) throws {
+    enum WriteOutcome: Equatable {
+        case saved
+        case committed
+        case secondary
+        case unchanged
+        case commitFailed(String)
+
+        var message: String {
+            switch self {
+            case .saved: return "已儲存，舊版已備份"
+            case .committed: return "已儲存並提交，舊版已備份"
+            case .secondary: return "已儲存；副設備：未提交"
+            case .unchanged: return "已儲存；內容未變，無需提交"
+            case let .commitFailed(reason): return "已儲存但未提交：\(reason)"
+            }
+        }
+    }
+
+    @discardableResult
+    static func write(id: String, text: String) throws -> WriteOutcome {
+        writeLock.lock(); defer { writeLock.unlock() }
+        if !isPrimary, id != "os-upstream", let secondaryWriter {
+            let base = try readBases[id] ?? String(contentsOfFile: document(id: id).path, encoding: .utf8)
+            return try secondaryWriter(id, text, base)
+        }
+        return try writeLocal(id: id, text: text)
+    }
+
+    /// Only an authenticated device RPC may call this. Compare before any backup,
+    /// write, or commit. The caller returns the three versions on conflict.
+    static func writeFromDevice(id: String, text: String, base: String, source: String) throws -> WriteOutcome {
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard isPrimary else { throw DocumentError.readOnly(id) }
+        let document = try document(id: id)
+        guard try String(contentsOfFile: document.path, encoding: .utf8) == base else {
+            throw DocumentError.readOnly("conflict")
+        }
+        return try writeLocal(id: id, text: text, source: source)
+    }
+
+    private static func writeLocal(id: String, text: String, source: String? = nil) throws -> WriteOutcome {
         let document = try document(id: id)
         guard document.isEditable else { throw DocumentError.readOnly(id) }
-        if id == "os-upstream" {
-            try ensureOSUpstreamOverride()
-        }
+        try requireExisting(document)
 
         let fileURL = URL(fileURLWithPath: document.path)
         let directory = fileURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-
         if fileManager.fileExists(atPath: fileURL.path) {
             let backupDirectory = directory.appendingPathComponent(".tatwo2-backups", isDirectory: true)
             try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
             let backupURL = nextBackupURL(for: fileURL, in: backupDirectory)
             try fileManager.copyItem(at: fileURL, to: backupURL)
-            try pruneBackups(for: fileURL, in: backupDirectory, keeping: 20)
         }
 
         try Data(text.utf8).write(to: fileURL, options: .atomic)
+        return commitIfPrimary(document, source: source)
+    }
+
+    static var isPrimary: Bool { deviceIdentity?["role"] as? String == "primary" }
+
+    private static var deviceIdentity: [String: Any]? {
+        guard let data = try? Data(contentsOf: TatwoEntry().deviceJSON) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func requireExisting(_ document: OSDocument) throws {
+        let entry = TatwoEntry()
+        guard entry.exists else { throw DocumentError.missingEntry(entry.root.path) }
+        var directory: ObjCBool = false
+        guard fileManager.fileExists(atPath: document.path, isDirectory: &directory),
+              !directory.boolValue else {
+            throw DocumentError.missingDocument(document.title, document.path)
+        }
+    }
+
+    private static func commitIfPrimary(_ document: OSDocument, source: String? = nil) -> WriteOutcome {
+        guard document.id == "todo" || document.id == "issue" else { return .saved }
+        guard let identity = deviceIdentity, identity["role"] as? String == "primary" else {
+            return .secondary
+        }
+        let entry = TatwoEntry()
+        let relativePath = "docs/\(document.title)"
+        // Legacy document overrides remain writable, but must never commit another repo/file.
+        guard URL(fileURLWithPath: document.path).resolvingSymlinksInPath()
+                == entry.repoRoot.appendingPathComponent(relativePath).resolvingSymlinksInPath(),
+              URL(fileURLWithPath: document.path).resolvingSymlinksInPath().path
+                .hasPrefix(entry.repoRoot.resolvingSymlinksInPath().path + "/") else {
+            return .commitFailed("文件不在入口的 tatwo2/docs")
+        }
+        let name = source ?? (identity["name"] as? String)
+            ?? (identity["deviceName"] as? String)
+            ?? (identity["device_name"] as? String)
+            ?? ProcessInfo.processInfo.hostName
+        do {
+            let top = try git(["rev-parse", "--show-toplevel"], in: entry.repoRoot)
+            guard top.status == 0,
+                  URL(fileURLWithPath: top.output).resolvingSymlinksInPath()
+                    == entry.repoRoot.resolvingSymlinksInPath() else {
+                return .commitFailed("入口的 tatwo2 不是獨立 git 工作樹")
+            }
+            let tracked = try git(["ls-files", "--error-unmatch", "--", relativePath], in: entry.repoRoot)
+            guard tracked.status == 0 else { return .commitFailed("文件尚未納入 git") }
+            let changed = try git(["diff", "--quiet", "HEAD", "--", relativePath], in: entry.repoRoot)
+            if changed.status == 0 { return .unchanged }
+            guard changed.status == 1 else { return .commitFailed(changed.output) }
+            // --only/pathspec excludes even unrelated staged changes; never git add -A.
+            let result = try git([
+                "commit", "--only", "-m",
+                "docs: 使用者經設定頁修改 \(document.title)（\(name)）",
+                "--", relativePath,
+            ], in: entry.repoRoot)
+            return result.status == 0 ? .committed : .commitFailed(result.output)
+        } catch {
+            return .commitFailed(error.localizedDescription)
+        }
+    }
+
+    private static func git(_ arguments: [String], in directory: URL) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.currentDirectoryURL = directory
+        // A launcher may carry GIT_DIR/GIT_INDEX_FILE; never let those redirect a save.
+        process.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
+        process.arguments = ["--literal-pathspecs"] + arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: output, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     static func modifiedAt(id: String) -> Date? {
@@ -148,23 +264,6 @@ enum OSDocuments {
             throw DocumentError.unknownDocument(id)
         }
         return document
-    }
-
-    private static func ensureOSUpstreamOverride() throws {
-        let destination = URL(fileURLWithPath: OSUpstream.overridePath)
-        guard !fileManager.fileExists(atPath: destination.path) else { return }
-        try fileManager.createDirectory(
-            at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-
-        let bundled = TatwoResources.url(forResource: "os-upstream", withExtension: "md")
-        let projectSource = docsURL.appendingPathComponent("os-upstream.md")
-        let source = bundled
-            ?? (fileManager.fileExists(atPath: projectSource.path) ? projectSource : nil)
-        guard let source else {
-            throw DocumentError.missingSource(projectSource.path)
-        }
-        try fileManager.copyItem(at: source, to: destination)
     }
 
     private static func nextBackupURL(for fileURL: URL, in directory: URL) -> URL {
@@ -196,15 +295,5 @@ enum OSDocuments {
             }
     }
 
-    private static func pruneBackups(
-        for fileURL: URL,
-        in directory: URL,
-        keeping limit: Int
-    ) throws {
-        let backups = backupURLs(for: fileURL, in: directory)
-        guard backups.count > limit else { return }
-        for backup in backups.prefix(backups.count - limit) {
-            try fileManager.removeItem(at: backup)
-        }
-    }
+    // Backups are user work products: retain them; permanent pruning requires a human gate.
 }

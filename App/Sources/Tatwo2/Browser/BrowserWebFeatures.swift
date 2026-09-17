@@ -16,6 +16,12 @@ final class BrowserWebFeatures {
     private var fullscreenKeys: Any?
     private var presentationSerial: UInt64 = 0
 
+    /// Explicit user-approved handoff; no CEF cookies or session data are exported.
+    static func openInSystemBrowser(_ url: URL) -> Bool {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return false }
+        return NSWorkspace.shared.open(url)
+    }
+
     static func focusOwner(for view: NSView) -> NSView {
         var ancestor: NSView? = view
         while let current = ancestor {

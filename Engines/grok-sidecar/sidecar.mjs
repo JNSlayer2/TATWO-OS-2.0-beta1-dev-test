@@ -64,8 +64,24 @@ function writeBuiltInMCP() {
   };
   let existing = '';
   try { existing = fs.readFileSync(file, 'utf8'); } catch {}
-  const kept = existing.split(/(?=^\[)/m).filter((section) => !/^\[mcp_servers\.tatwo2_(os|browser)\]/.test(section)).join('').trimEnd();
-  const next = `${kept ? kept + '\n\n' : ''}${block('tatwo2_os', OS_MCP, 'TATWO2_OS_SOCKET')}\n${block('tatwo2_browser', BROWSER_MCP, 'TATWO2_BROWSER_SOCKET')}`;
+  const definitions = mcpConfig?.engine === 'grok' ? mcpConfig.servers ?? {} : {};
+  const configured = new Set(mcpConfig?.configured ?? []);
+  const enabled = new Set(mcpConfig?.enabled ?? []);
+  const kept = existing.split(/(?=^\[)/m).filter((section) =>
+    !/^\[mcp_servers\.(?:"tatwo2_(?:os|browser)"|'tatwo2_(?:os|browser)'|tatwo2_(?:os|browser))(?:\.|\])/.test(section) &&
+    !(definitions.gbrain_allai && /^\[mcp_servers\.(?:"gbrain_allai"|'gbrain_allai'|gbrain_allai)(?:\.|\])/.test(section))
+  ).map(section => {
+    const match = section.match(/^\[mcp_servers\.(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\][^\n]*(?:\n|$)/);
+    const name = match?.[1] ?? match?.[2] ?? match?.[3];
+    if (!name || !configured.has(name)) return section;
+    return match[0].trimEnd() + `\nenabled = ${enabled.has(name)}\n` + section.slice(match[0].length).replace(/^enabled\s*=.*\n?/gm, '');
+  }).join('').trimEnd();
+  let managed = '';
+  const brain = definitions.gbrain_allai;
+  if (brain && typeof brain.command === 'string' && Array.isArray(brain.args)) {
+    managed = `\n[mcp_servers.gbrain_allai]\ncommand = ${q(brain.command)}\nargs = [${brain.args.map(q).join(', ')}]\nenabled = ${enabled.has('gbrain_allai')}\n`;
+  }
+  const next = `${kept ? kept + '\n\n' : ''}${block('tatwo2_os', OS_MCP, 'TATWO2_OS_SOCKET')}\n${block('tatwo2_browser', BROWSER_MCP, 'TATWO2_BROWSER_SOCKET')}${managed}`;
   fs.writeFileSync(file, next, { mode: 0o600 });
 }
 

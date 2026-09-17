@@ -6,6 +6,18 @@ import Combine
     @Published var busy = false
     @Published var report = ""
 
+    func keep(environment: [String: String]) {
+        guard !busy, let plan = preview else { return }
+        busy = true
+        Task {
+            do {
+                try await Task.detached { try OSUpstreamBinding.keep(plan, environment: environment) }.value
+                report = "已保留自訂；仍標示已手改，不視為對齊。"
+            } catch { report = error.localizedDescription }
+            busy = false
+        }
+    }
+
     func load(environment: [String: String]) {
         guard !busy else { return }
         busy = true
@@ -24,7 +36,7 @@ import Combine
         alert.alertStyle = .warning
         alert.messageText = "確認寫入修復？"
         alert.informativeText = "只更新 V2 綁定區塊。既有檔先備份；任一檔失敗即停止，已寫入的保留，不回復其他人的內容。\n" +
-            (plan.seed ? "入口缺少上游檔：先種入內建 os-upstream.md 與 os.md v3；原 os.md 保留為 os.1.0.md。\n" : "") +
+            (plan.notices.isEmpty ? "" : plan.notices.joined(separator: "\n") + "\n") +
             "下方列出所有修改路徑及備份位置（可捲動）。"
         let paths = NSTextView(frame: NSRect(x: 0, y: 0, width: 460, height: 200))
         paths.isEditable = false

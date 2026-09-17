@@ -56,7 +56,7 @@ CHANNEL_DIR="${TATWO_CHANNEL_DIR:-$APP_SUPPORT/device-sync-channel}"
 CHANNEL_REMOTE="${TATWO_CHANNEL_REMOTE:-}"
 ALLOW_LEGACY_CHANNEL_REMOTE="${TATWO_ALLOW_LEGACY_CHANNEL_REMOTE:-0}"
 SYNC_CATALOG="${TATWO_SYNC_CATALOG:-$HERE/../config/tatwo-sync-catalog-v1.json}"
-OS_ROOT="${TATWO_OS_ROOT:-}"
+OS_ROOT="${TATWO_OS_ROOT:-$HOME/AI/TATWO OS}"
 HOT_SYNC_STAGING="${TATWO_HOT_SYNC_STAGING:-$APP_SUPPORT/hot-sync-staging}"
 HOT_SYNC_MIRROR="${TATWO_HOT_SYNC_MIRROR:-$APP_SUPPORT/hot-sync-mirror}"
 SKILLET_STORE="${TATWO_SKILLET_STORE:-$APP_SUPPORT/skillet}"
@@ -474,13 +474,11 @@ cmd_version_push() {
   local branch="dev/${device}"
   [ "$branch" = "$RELEASE_BRANCH" ] && die "拒絕：dev 分支不可等於 release"
   case "$branch" in main|master|"release/"*) die "拒絕推到受保護分支 $branch";; esac
-  if [ -n "$(git -C "$repo" status --porcelain)" ]; then
-    log "有未提交改動 → commit 到 $branch"
-    git -C "$repo" add -A
-    git -C "$repo" commit -m "$msg" >/dev/null
-  else
-    log "無未提交改動，直接推目前 HEAD 到 $branch"
-  fi
+  local status
+  status="$(GIT_OPTIONAL_LOCKS=0 git -C "$repo" status --porcelain --untracked-files=all)" \
+    || die "無法檢查工作樹，拒絕推送"
+  [ -z "$status" ] || die "工作樹有未提交改動，請先提交或暫存"
+  log "無未提交改動，直接推目前 HEAD 到 $branch"
   git -C "$repo" push origin "HEAD:refs/heads/$branch"
   log "已推 ${branch}（commit $(git -C "$repo" rev-parse --short HEAD)）→ 等主設備整合進 $RELEASE_BRANCH"
 }
@@ -1686,8 +1684,18 @@ registered_device_name_for_id() {
   done
 }
 
+legacy_system_adapter_available() {
+  # W78: A/E have one owner: the 2.0 authenticated RemoteHostLink adapter.
+  # Never run the old git-channel payload builder against the new document catalog.
+  if [ "$(json_get "$SYNC_CATALOG" dispatchTransport)" = "RemoteHostLink" ]; then
+    log "A/E 派發已交給 2.0 RemoteHostLink；C 類文件請走 git"
+    return 1
+  fi
+}
+
 system_required_item_ids() {
   local count index=0 item_id
+  legacy_system_adapter_available || return 1
   count="$(plutil -extract systemPullItemIDs raw "$SYNC_CATALOG" 2>/dev/null || true)"
   case "$count" in ""|0|*[!0-9]*)
     die "同步 catalog 缺少有效 systemPullItemIDs"
@@ -2263,8 +2271,9 @@ system_item_source_file() {
   esac
   case "$1" in
     os.constitution) printf '%s\n' "$OS_ROOT/os.md";;
-    os.issue) printf '%s\n' "$OS_ROOT/issue.md";;
-    os.todo) printf '%s\n' "$OS_ROOT/TODO.md";;
+    skills.skillet) printf '%s\n' "$OS_ROOT/skillet.md";;
+    memory.global-notes) printf '%s\n' "$OS_ROOT/note";;
+    os.issue|os.todo) return 1;; # C documents are git-owned; never read entrance legacy files.
     *) return 1;;
   esac
 }
@@ -2688,6 +2697,8 @@ EOF
 }
 
 prepare_system_payload() {
+  # Guard in the caller too: a failure inside < <(...) is not propagated by bash.
+  legacy_system_adapter_available || die "legacy system adapter retired"
   local id="$1" catalog_revision="$2" source_device_id="$3" authority_epoch="$4"
   local target_device_id="$5" ledger_sequence="$6" target_name="$7" requested_at="$8"
   local final_payload_root="$CHANNEL_DIR/payloads/$id"
@@ -5516,6 +5527,7 @@ recover_incomplete_system_transactions() {
 }
 
 apply_system_manifest() {
+  legacy_system_adapter_available || return 1
   local request_file="$1" id="$2" authority_primary="$3" authority_epoch="$4"
   local source_device_id="$5" target_device_id="$6" catalog_revision="$7"
   local ledger_sequence="$8" preserve_committed_journal="${9:-0}"

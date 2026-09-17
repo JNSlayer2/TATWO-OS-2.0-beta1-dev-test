@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Preparation only by default. Chromium is built ONLY with explicit --execute.
+set -euo pipefail
+printf '%s\n' \
+  'CEF H.264/AAC 自建準備：外接卷至少預留 120 GB（建議更多）。' \
+  'M4／16 GB 預估 6–12 小時；實際時間及磁碟用量依版本而異。' \
+  '需要完整 Xcode（含已接受的授權）、depot_tools、Python 3、Git。' \
+  '預設只列計畫，不下載、不建置；專利／散布授權需另行確認。'
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+# This is the tracked pin used by tatwo-install-local-app.sh (not config/).
+PIN="$ROOT/Apps/TatwoUltraworkMac/CEF/cef-runtime-arm64.json"
+if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != "--execute" ) ]]; then
+  printf 'usage: %s /Volumes/<external-volume>/<output-directory> [--execute]\n' "$0" >&2
+  exit 2
+fi
+OUTPUT="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1")"
+case "$OUTPUT" in
+  /Volumes/*/*) ;;
+  *) printf '%s\n' 'error: output must be on an external volume under /Volumes' >&2; exit 1 ;;
+esac
+
+PIN_VALUES="$(python3 - "$PIN" <<'PY'
+import json
+import re
+import sys
+p = json.load(open(sys.argv[1], encoding="utf-8"))
+version = p["cefVersion"]
+chromium = p["chromiumVersion"]
+match = re.fullmatch(r"\d+\.\d+\.\d+\+g([0-9a-f]{7,40})\+chromium-(\d+\.\d+\.(\d+)\.\d+)", version)
+if not match or match[2] != chromium or p["platform"] != "macosarm64":
+    raise SystemExit("unsupported CEF pin")
+archive = f"cef_binary_{version}_macosarm64_minimal.tar.bz2"
+if p["archive"] != archive:
+    raise SystemExit("CEF archive/pin mismatch")
+print("\n".join([version, chromium, match[1], match[3], archive]))
+PY
+)"
+VERSION="$(printf '%s\n' "$PIN_VALUES" | sed -n '1p')"
+CHROMIUM="$(printf '%s\n' "$PIN_VALUES" | sed -n '2p')"
+REVISION="$(printf '%s\n' "$PIN_VALUES" | sed -n '3p')"
+BRANCH="$(printf '%s\n' "$PIN_VALUES" | sed -n '4p')"
+ARCHIVE="$(printf '%s\n' "$PIN_VALUES" | sed -n '5p')"
+WORK="$OUTPUT/work-$REVISION"
+export GN_DEFINES="proprietary_codecs=true ffmpeg_branding=Chrome is_official_build=true"
+ARGS=("--download-dir=$WORK" "--branch=$BRANCH" "--checkout=$REVISION"
+  "--chromium-checkout=refs/tags/$CHROMIUM" "--arm64-build" "--no-debug-build"
+  "--minimal-distrib-only" "--no-distrib-archive" "--build-target=cefsimple"
+  "--no-release-tests")
+printf 'CEF=%s\nCHROMIUM=%s\nGN_DEFINES=%s\nOUTPUT=%s/%s\n' \
+  "$VERSION" "$CHROMIUM" "$GN_DEFINES" "$OUTPUT" "$ARCHIVE"
+printf 'automate-git.py'; printf ' %q' "${ARGS[@]}"; printf '\n'
+if [[ "${2:-}" != "--execute" ]]; then
+  printf '%s\n' 'PLAN_ONLY: no files created, no downloads, no build started.'
+  exit 0
+fi
+
+[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || {
+  printf '%s\n' 'error: requires native arm64 macOS' >&2; exit 1;
+}
+[[ -n "${DEPOT_TOOLS:-}" && -f "$DEPOT_TOOLS/gclient.py" ]] || {
+  printf '%s\n' 'error: set DEPOT_TOOLS to an existing official depot_tools checkout' >&2; exit 1;
+}
+DEPOT_TOOLS="$(cd "$DEPOT_TOOLS" && pwd -P)"
+[[ "$(xcode-select -p)" == *Xcode*.app/Contents/Developer ]] || {
+  printf '%s\n' 'error: select full Xcode, not Command Line Tools' >&2; exit 1;
+}
+xcodebuild -checkFirstLaunchStatus
+VOLUME="/Volumes/$(printf '%s' "${OUTPUT#/Volumes/}" | cut -d / -f 1)"
+[[ -d "$VOLUME" && "$(stat -f %d "$VOLUME")" != "$(stat -f %d /Volumes)" ]] || {
+  printf '%s\n' 'error: external volume is not mounted' >&2; exit 1;
+}
+FREE_KB="$(df -Pk "$VOLUME" | awk 'END {print $4}')"
+(( FREE_KB >= 120 * 1024 * 1024 )) || {
+  printf '%s\n' 'error: less than 120 GiB available; refusing build' >&2; exit 1;
+}
+[[ ! -e "$OUTPUT/$ARCHIVE" && ! -e "$OUTPUT/$ARCHIVE.sha256" ]] || {
+  printf '%s\n' 'error: output already exists; choose another output directory' >&2; exit 1;
+}
+mkdir -p "$WORK/tmp" "$WORK/cache" "$WORK/vpython"
+export TMPDIR="$WORK/tmp/" XDG_CACHE_HOME="$WORK/cache" VPYTHON_VIRTUALENV_ROOT="$WORK/vpython"
+export PATH="$DEPOT_TOOLS:$PATH"
+# Fetch source, not a third-party binary. Pin automate to the SAME CEF revision.
+AUTOMATE="$WORK/automate-git.py"
+curl --fail --proto '=https' --tlsv1.2 --max-redirs 0 \
+  "https://raw.githubusercontent.com/chromiumembedded/cef/$REVISION/tools/automate/automate-git.py" \
+  --output "$AUTOMATE"
+python3 "$AUTOMATE" "${ARGS[@]}" "--depot-tools-dir=$DEPOT_TOOLS"
+
+DIST="$WORK/chromium/src/cef/binary_distrib"
+NAME="${ARCHIVE%.tar.bz2}"
+[[ -d "$DIST/$NAME/Release/Chromium Embedded Framework.framework" ]] || {
+  printf '%s\n' 'error: expected pinned minimal distribution not produced' >&2; exit 1;
+}
+tar -cjf "$OUTPUT/$ARCHIVE.part" -C "$DIST" "$NAME"
+mv "$OUTPUT/$ARCHIVE.part" "$OUTPUT/$ARCHIVE"
+(cd "$OUTPUT" && shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256")
+SHA="$(shasum -a 256 "$OUTPUT/$ARCHIVE" | awk '{print $1}')"
+printf 'TATWO2_CEF_LOCAL_ARCHIVE=%q\nTATWO2_CEF_LOCAL_SHA256=%s\n' "$OUTPUT/$ARCHIVE" "$SHA"
+printf '%s\n' 'Archive ready; playback and distribution/licensing review remain required.'

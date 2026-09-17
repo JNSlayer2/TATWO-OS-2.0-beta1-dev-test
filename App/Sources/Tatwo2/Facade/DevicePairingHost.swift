@@ -8,6 +8,7 @@ final class DevicePairingHost: @unchecked Sendable {
         let publicKey: String
         let name: String
         var user: String?
+        var deviceID: String?
     }
 
     private struct PairResponse: Codable {
@@ -16,6 +17,7 @@ final class DevicePairingHost: @unchecked Sendable {
         var hostName: String?
         var hostUser: String?
         var reason: String?
+        var hostDeviceID: String?
     }
 
     private final class StartProbe: @unchecked Sendable {
@@ -81,11 +83,14 @@ final class DevicePairingHost: @unchecked Sendable {
 
     func startPairingWindow() throws -> (code: String, expiresAt: Date, listenAddress: String) {
         cancelPairingWindow()
-        let authority = ProcessInfo.processInfo.hostName
+        let identity = try DeviceIdentityStore.forLocalDevice(
+            entry: TatwoEntry(environment: environment)).read()
+        let authority = identity.primaryDeviceID ?? identity.deviceID
         let code = try TatwoDevicePairingCodeEngineV1.mint(
-            createdBy: authority,
+            createdBy: identity.deviceID,
             authorityPrimary: authority,
-            authorityEpoch: 0,
+            // Unassigned bootstrap pairing is epoch 0; it does not grant primary role.
+            authorityEpoch: UInt64(identity.epoch ?? 0),
             ttlSeconds: 300)
         guard let bindAddress = Self.bindAddress(environment: environment) else {
             throw HostError.noLocalAddress
@@ -209,12 +214,16 @@ final class DevicePairingHost: @unchecked Sendable {
             send(PairResponse(ok: false, reason: "pairing_window_closed"), to: connection)
             return
         }
+        let local: DeviceIdentity
         do {
+            guard let identity = try DeviceIdentityStore.readLocal(entry: TatwoEntry(environment: environment))
+            else { throw DeviceIdentityError.identityConflict }
+            local = identity
             activeCode = try TatwoDevicePairingCodeEngineV1.consume(
                 seed: request.code,
                 record: record,
-                expectedPrimary: record.authorityPrimary,
-                expectedEpoch: record.authorityEpoch)
+                expectedPrimary: identity.primaryDeviceID ?? identity.deviceID,
+                expectedEpoch: UInt64(identity.epoch ?? 0))
             stateLock.unlock()
         } catch {
             stateLock.unlock()
@@ -222,8 +231,11 @@ final class DevicePairingHost: @unchecked Sendable {
             return
         }
 
-        let deviceID = UUID().uuidString.lowercased()
         do {
+            let deviceID = try registry.pairingDeviceID(
+                publicKey: request.publicKey, requestedID: request.deviceID,
+                localDeviceID: local.deviceID)
+            let previous = registry.list().first { $0.id.lowercased() == deviceID }
             let fingerprint = try registry.authorize(publicKey: request.publicKey, deviceID: deviceID)
             do {
                 _ = try registry.add(
@@ -232,16 +244,22 @@ final class DevicePairingHost: @unchecked Sendable {
                     host: Self.remoteHost(connection.endpoint),
                     user: request.user ?? NSUserName(),
                     sshPort: 22,
-                    publicKeyFingerprint: fingerprint)
+                    publicKeyFingerprint: fingerprint,
+                    workdirMap: previous?.workdirMap ?? [:],
+                    lanHost: previous?.lanHost,
+                    role: previous?.role,
+                    epoch: previous?.epoch)
             } catch {
-                try? registry.removeAuthorizedKey(deviceID: deviceID)
+                // A failed re-pair must not revoke the previously authorized device.
+                if previous == nil { try? registry.removeAuthorizedKey(deviceID: deviceID) }
                 throw error
             }
             let response = PairResponse(
                 ok: true,
                 deviceID: deviceID,
                 hostName: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
-                hostUser: NSUserName())
+                hostUser: NSUserName(),
+                hostDeviceID: local.deviceID)
             send(response, to: connection) { [weak self] in
                 self?.finishCurrentWindow(token: token)
             }

@@ -7,6 +7,20 @@ import Darwin
 final class OSAgentBridge: @unchecked Sendable {
     static let shared = OSAgentBridge()
 
+    static func pullThreadFiles(threadID: UUID, artifactsRoot: URL, workdir: String) throws -> [RemoteThreadTransferFile] {
+        let candidates = try RemoteThreadTransfer.candidates(
+            threadID: threadID, artifactsRoot: artifactsRoot, workdir: workdir)
+        let selected = candidates.filter(\.automatic)
+        let paths = selected.map(\.path)
+        guard !paths.isEmpty else { return [] }
+        let baselines = try RemoteThreadTransfer.sourceBaselines(in: workdir, paths: paths)
+        let observed = Dictionary(uniqueKeysWithValues: selected.compactMap { row in
+            row.observedSHA256.map { (row.path, $0) }
+        })
+        return try RemoteThreadTransfer.changedFiles(
+            in: workdir, paths: paths, baselines: baselines, observedHashes: observed)
+    }
+
     private weak var model: ChatPageModel?
     private var botTestLibrary: BotLibrary?
     // In-process test fixture only; does not expose an environment-enabled confirmation bypass.
@@ -118,6 +132,10 @@ final class OSAgentBridge: @unchecked Sendable {
     @MainActor
     func start(model: ChatPageModel) {
         self.model = model
+        OSDocuments.secondaryWriter = { id, text, base in
+            try DeviceInbox.shared.enqueue(id: id, text: text, base: base)
+        }
+        DeviceDispatch.shared.start()
         ComputerUseController.shared.consentPolicyProvider = { [weak model] caller in
             guard let model, let thread = model.live?.threadRecord(caller) else { return .askOncePerSession }
             return .resolve(user: model.permissionPreset, bot: thread.botPermissionPreset,
@@ -322,6 +340,39 @@ final class OSAgentBridge: @unchecked Sendable {
             guard allowed else { throw BridgeError.remoteAccessDisabled }
         }
         switch method {
+        case "dispatch_wake":
+            // Notification only; no claimed sender, epoch, or content is trusted.
+            if (try? DeviceDispatch.shared.identity().role) == .secondary { DeviceDispatch.shared.align() }
+            return ["scheduled": true]
+        case "dispatch_fetch", "dispatch_ack", "document_propose", "document_inspect", "inbox_target", "inbox_receive":
+            let (sender, payload) = try DeviceDispatch.shared.authenticate(method: method, proof: params)
+            switch method {
+            case "dispatch_fetch":
+                return try DeviceDispatch.object(DeviceDispatch.shared.offer(to: sender))
+            case "dispatch_ack":
+                try DeviceDispatch.shared.recordACK(DeviceDispatch.decode(DeviceDispatch.Receipt.self, payload), sender: sender)
+                return ["recorded": true]
+            case "document_propose":
+                return try DeviceInbox.shared.receiveDocument(payload, sender: sender)
+            case "document_inspect":
+                guard let id = payload["id"] as? String else { throw BridgeError.invalidParams }
+                return ["text": try DeviceInbox.shared.inspectDocument(id)]
+            case "inbox_target":
+                return ["repository": DeviceDispatch.shared.entry.repoRoot.path]
+            default:
+                return try DeviceInbox.shared.receiveBranch(payload, sender: sender)
+            }
+        case "device_status":
+            // No model/live access: get_document can save, even when called as a probe.
+            // The only parameter is a validated object ID for read-only commit distance.
+            guard Set(params.keys).isSubset(of: ["primary_commit"]) else { throw BridgeError.invalidParams }
+            let primaryCommit = params["primary_commit"] as? String
+            if params["primary_commit"] != nil {
+                guard let primaryCommit, DeviceStatusReader.validCommit(primaryCommit) else {
+                    throw BridgeError.invalidParams
+                }
+            }
+            return try DeviceStatusReader.read(primaryCommit: primaryCommit).jsonObject()
         case "bot_list", "bot_get", "bot_state_get", "bot_state_update", "bot_remember", "bot_profile", "bot_pending_list":
             let library = botTestLibrary ?? onMain { [weak self] in self?.model?.botLibraryForBridge }
             guard let library else { throw BotLibraryError.invalid("bot_library_unavailable") }
@@ -565,6 +616,16 @@ final class OSAgentBridge: @unchecked Sendable {
             }
             return ["stopRequested": true, "stopped": stopped]
         case "push_thread":
+            // Baseline reads use the existing paired push_thread route, no new sync channel.
+            if params["phase"] as? String == "baseline" {
+                guard let paths = params["paths"] as? [String] else { throw BridgeError.invalidParams }
+                let hashes: [String: String] = try onMainThrowing { [weak self] in
+                    guard let live = self?.model?.live as? ChatLiveEngine else { throw BridgeError.invalidParams }
+                    let project = try live.transferProject(named: params["projectName"] as? String, requiresFiles: true)
+                    return try RemoteThreadTransfer.baselines(paths: paths, in: project.workdir)
+                }
+                return ["baselines": hashes]
+            }
             guard
                 let title = params["title"] as? String,
                 let rawMessages = params["messages"]
@@ -603,15 +664,20 @@ final class OSAgentBridge: @unchecked Sendable {
                     let thread = live.threadRecord(threadID),
                     let project = live.projectRecord(thread.projectID)
                 else { throw BridgeError.invalidParams }
+                let workdir = thread.cwdOverride ?? project.workdir
+                // Same provenance and committed source baseline as push_thread. Uncertain
+                // observations are not thread edits; the receiver atomically rejects conflicts.
+                let files = try Self.pullThreadFiles(
+                    threadID: threadID, artifactsRoot: live.turnArtifacts.root, workdir: workdir)
                 live.appendSystemMessage(
                     threadID: threadID,
-                    text: "這條討論串已被另一台設備拉走一份副本（訊息與有改動的檔案）；這裡的原件不變。",
+                    text: "另一台設備已索取這條討論串的副本；檔案仍須通過接收端衝突檢查，這裡的原件不變。",
                     status: "info|設備搬移")
                 return (
                     project.name,
                     thread.title,
                     live.transcript(for: threadID).map(RemoteThreadTransferMessage.init),
-                    RemoteThreadTransfer.changedFiles(in: thread.cwdOverride ?? project.workdir))
+                    files)
             }
             return [
                 "projectName": transfer.projectName ?? NSNull(),

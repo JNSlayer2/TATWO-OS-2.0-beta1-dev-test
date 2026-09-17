@@ -1390,7 +1390,7 @@ extension ChatPage {
                         .help("重新讀取 PluginRegistry staging")
                     }
                     if model.availableThreadPluginEntries.isEmpty {
-                        Text("registry empty")
+                        Text("正在掃描技能…")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     } else {

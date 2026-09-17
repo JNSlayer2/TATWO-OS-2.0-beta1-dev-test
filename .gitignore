@@ -64,3 +64,6 @@ docs/UI定位冊/截圖-2x/
 
 # Local UI/debug evidence can contain private screenshots and must not be exported.
 evidence/
+
+# OSDocuments 主設備寫入的備份（W74/W78 writeFromDevice）
+docs/.tatwo2-backups/

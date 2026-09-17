@@ -3,7 +3,7 @@ import CryptoKit
 
 struct OSBindingPreview: Equatable {
     struct Item: Identifiable, Equatable {
-        enum State: String { case bound, stale, unbound, unreadable }
+        enum State: String { case bound, stale, unbound, unreadable, edited = "已手改" }
         let target: UpstreamBindingTarget
         var id: String { target.id }
         var path: String { target.path }
@@ -17,13 +17,15 @@ struct OSBindingPreview: Equatable {
     let root: String
     let items: [Item]
     let upstream: String
-    let constitution: String?
-    let originalConstitution: String?
+    let constitutionMissing: Bool
     let seed: Bool
     let error: String?
+    var notices: [String] {
+        (constitutionMissing ? ["入口缺憲法，請先由主設備派發"] : []) +
+        (seed ? ["入口尚無 os-upstream.md：確認後只種入內建上游規則；不封存、不覆寫、不種入 os.md。"] : [])
+    }
     var paths: [String] {
-        (seed ? [root + "/os-upstream.md", root + "/os.md"] +
-            (originalConstitution == nil ? [] : [root + "/os.1.0.md"]) : []) +
+        (seed ? [root + "/os-upstream.md"] : []) +
         items.filter { $0.state != .bound }.map(\.path)
     }
 }
@@ -53,10 +55,12 @@ extension OSUpstreamBinding {
         let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
         defer { try? handle.close() }
         let data = try handle.read(upToCount: byteLimit + 1) ?? Data()
-        guard data.count <= byteLimit, let text = String(data: data, encoding: .utf8) else {
+        guard data.count <= byteLimit, String(data: data, encoding: .utf8) != nil else {
             throw failure("超過 1 MiB 或不是 UTF-8：" + path)
         }
-        return text
+        // Foundation's encoding initializer strips a UTF-8 BOM. Preserve every
+        // original byte for source hashes, non-managed content and removal.
+        return String(decoding: data, as: UTF8.self)
     }
     static func failure(_ text: String) -> NSError { NSError(domain: "OSBinding", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
     static func bundled(_ name: String) throws -> String {
@@ -80,21 +84,20 @@ extension OSUpstreamBinding {
     static func preview(environment: [String: String] = ProcessInfo.processInfo.environment) -> OSBindingPreview {
         let root = osRoot(environment: environment)
         let fm = FileManager.default
-        let seed = !fm.fileExists(atPath: root + "/os-upstream.md")
-        var upstream = "", constitution: String?, original: String?, issue: String?
+        let seed = runtimeSource == nil && !fm.fileExists(atPath: root + "/os-upstream.md")
+        // The constitution is dispatched by the primary device, never by this seed path.
+        let constitutionMissing = !fm.fileExists(atPath: root + "/os.md")
+        var upstream = "", issue: String?
         do {
-            upstream = try seed ? bundled("os-upstream") : readText(root + "/os-upstream.md")
+            if let runtimeSource { upstream = try runtimeSource(environment) }
+            else { upstream = try seed ? bundled("os-upstream") : readText(root + "/os-upstream.md") }
             guard !upstream.isEmpty else { throw failure("上游宣告不可為空") }
-            if seed {
-                constitution = try bundled("os")
-                if fm.fileExists(atPath: root + "/os.md") { original = try readText(root + "/os.md") }
-                if original != nil, fm.fileExists(atPath: root + "/os.1.0.md") { throw failure("os.1.0.md 已存在；不覆寫") }
-            }
         } catch { issue = error.localizedDescription }
-        let expected = block(root: root, hash: String(digest(upstream).prefix(12)))
         let items = targets(environment: environment).map { target -> OSBindingPreview.Item in
+            var expected = block(root: root, hash: String(digest(upstream).prefix(12)))
             do {
                 if let issue { throw failure(issue) }
+                if let translatedBlock { expected = try translatedBlock(target, environment, String(digest(upstream).prefix(12))) }
                 let exists = fm.fileExists(atPath: target.path)
                 let parent = (target.path as NSString).deletingLastPathComponent
                 var directory: ObjCBool = false
@@ -102,14 +105,18 @@ extension OSUpstreamBinding {
                 let text = exists ? try readText(target.path) : ""
                 let range = try blockRange(text)
                 let current = range.map { String(text[$0]) }
-                let state: OSBindingPreview.Item.State = current == nil ? .unbound : current.map(digest) == digest(expected) ? .bound : .stale
+                let installed = receipt(target.path, root: root)?.blockHash
+                let edited = current != nil ? installed != current.map(digest) : installed?.isEmpty == false
+                let state: OSBindingPreview.Item.State = edited && translatedBlock != nil ? .edited :
+                    current == nil ? .unbound :
+                    current.map(digest) == digest(expected) ? .bound : .stale
                 let diff = state == .bound ? "" : (current.map { $0.components(separatedBy: "\n").map { "-" + $0 }.joined(separator: "\n") + "\n" } ?? "") + expected.components(separatedBy: "\n").map { "+" + $0 }.joined(separator: "\n")
                 return .init(target: target, state: state, currentBlockHash: current.map(digest), expectedHash: digest(expected), diff: diff, error: nil, original: exists ? text : nil)
             } catch {
                 return .init(target: target, state: .unreadable, currentBlockHash: nil, expectedHash: digest(expected), diff: "", error: error.localizedDescription, original: nil)
             }
         }
-        return .init(root: root, items: items, upstream: upstream, constitution: constitution, originalConstitution: original, seed: seed, error: issue)
+        return .init(root: root, items: items, upstream: upstream, constitutionMissing: constitutionMissing, seed: seed, error: issue)
     }
 
     // Called only with the exact preview approved by the user. Recheck bytes before each write.
@@ -150,40 +157,96 @@ extension OSUpstreamBinding {
             let fresh = preview(environment: environment)
             guard fresh == plan,
                   digest(fresh.upstream) == digest(plan.upstream),
-                  fresh.originalConstitution.map(digest) == plan.originalConstitution.map(digest),
                   zip(fresh.items, plan.items).allSatisfy({ $0.original.map(digest) == $1.original.map(digest) }) else {
                 throw failure("預覽已過期，請重新預覽")
             }
             if let error = plan.error { throw failure(error) }
             if plan.seed {
                 try fm.createDirectory(atPath: plan.root, withIntermediateDirectories: true)
-                if let old = plan.originalConstitution {
-                    active = plan.root + "/os.md"
-                    guard try digest(readText(active)) == digest(old) else { throw failure("原憲法在預覽後已改變") }
-                    try backup(active, old: old, index: -2)
-                    let archive = plan.root + "/os.1.0.md"
-                    try fm.moveItem(atPath: active, toPath: archive)
-                    report.modified.append(contentsOf: [active, archive])
-                    guard try digest(readText(archive)) == digest(old) else { throw failure("保留原憲法讀回 hash 不一致") }
-                }
-                guard let constitution = plan.constitution else { throw failure("缺少 v3 憲法") }
-                try write(plan.root + "/os.md", old: nil, new: constitution, index: -2)
                 try write(plan.root + "/os-upstream.md", old: nil, new: plan.upstream, index: -1)
             }
-            let expected = block(root: plan.root, hash: String(digest(plan.upstream).prefix(12)))
             for (index, item) in plan.items.enumerated() where item.state != .bound {
                 active = item.path
                 if item.state == .unreadable { throw failure(item.error ?? "讀不到") }
+                let expected = try translatedBlock?(item.target, environment, String(digest(plan.upstream).prefix(12)))
+                    ?? block(root: plan.root, hash: String(digest(plan.upstream).prefix(12)))
                 var text = item.original ?? ""
+                var record = receipt(item.path, root: plan.root)
+                    ?? Receipt(blockHash: digest(expected), prefix: "", suffix: "", kept: nil)
                 if let range = try blockRange(text) { text.replaceSubrange(range, with: expected) }
-                else { text += (text.isEmpty || text.hasSuffix("\n") ? "" : "\n") + expected + "\n" }
+                else {
+                    record.prefix = text.isEmpty || text.hasSuffix("\n") ? "" : "\n"
+                    record.suffix = "\n"
+                    text += record.prefix + expected + record.suffix
+                }
                 try write(item.path, old: item.original, new: text, index: index)
                 let readback = try readText(item.path)
                 guard let range = try blockRange(readback), digest(String(readback[range])) == item.expectedHash else {
                     throw failure("區塊 hash 不一致")
                 }
+                record.blockHash = digest(expected)
+                record.kept = nil
+                try saveReceipt(record, path: item.path, root: plan.root)
             }
         } catch { report.failure = active + "：" + error.localizedDescription }
         return report
+    }
+
+    private struct Receipt: Codable {
+        var blockHash: String
+        var prefix: String
+        var suffix: String
+        var kept: String?
+    }
+    private static func receiptURL(_ path: String, root: String) -> URL {
+        URL(fileURLWithPath: root).appendingPathComponent(".rule-bindings/\(digest(path)).json")
+    }
+    private static func receipt(_ path: String, root: String) -> Receipt? {
+        guard let data = try? Data(contentsOf: receiptURL(path, root: root)) else { return nil }
+        return try? JSONDecoder().decode(Receipt.self, from: data)
+    }
+    private static func saveReceipt(_ value: Receipt, path: String, root: String) throws {
+        let url = receiptURL(path, root: root)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try JSONEncoder().encode(value).write(to: url, options: .atomic)
+    }
+
+    static func keep(_ plan: OSBindingPreview, environment: [String: String]) throws {
+        try writeLock.withLock {
+            guard preview(environment: environment) == plan else { throw failure("預覽已過期，請重新預覽") }
+            for item in plan.items where item.state == .edited {
+                var record = receipt(item.path, root: plan.root)
+                    ?? Receipt(blockHash: "", prefix: "", suffix: "", kept: nil)
+                record.kept = (item.currentBlockHash ?? "") + "\n" + item.expectedHash
+                try saveReceipt(record, path: item.path, root: plan.root)
+            }
+        }
+    }
+
+    /// Explicitly reviewed removal preserves all non-managed bytes, including original EOF style.
+    static func removeBlock(target: UpstreamBindingTarget, reviewedText: String,
+                            environment: [String: String]) throws {
+        try writeLock.withLock {
+            let root = osRoot(environment: environment)
+            guard try digest(readText(target.path)) == digest(reviewedText),
+                  let range = try blockRange(reviewedText) else { throw failure("預覽已過期，請重新預覽") }
+            var before = String(reviewedText[..<range.lowerBound])
+            var after = String(reviewedText[range.upperBound...])
+            if let record = receipt(target.path, root: root) {
+                if !record.prefix.isEmpty && before.hasSuffix(record.prefix) { before.removeLast(record.prefix.count) }
+                if !record.suffix.isEmpty && after.hasPrefix(record.suffix) { after.removeFirst(record.suffix.count) }
+            }
+            let backup = URL(fileURLWithPath: root).appendingPathComponent("backups/bindings/remove-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: backup.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            try Data(reviewedText.utf8).write(to: backup, options: .withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+            guard try digest(readText(target.path)) == digest(reviewedText) else { throw failure("備份期間內容已改變") }
+            try Data((before + after).utf8).write(to: URL(fileURLWithPath: target.path), options: .atomic)
+            guard try digest(readText(target.path)) == digest(before + after) else { throw failure("讀回不一致") }
+            // An explicitly removed block is unbound, unlike an externally deleted one.
+            try saveReceipt(Receipt(blockHash: "", prefix: "", suffix: "", kept: nil), path: target.path, root: root)
+        }
     }
 }

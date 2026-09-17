@@ -92,7 +92,8 @@ enum OSUpstream { static let overridePath = "unused" }
 });
 
 test('D10 production plan recovery preserves content and requires new human confirmation', () => {
-  swift(`${app('Chat/TatwoPlanArtifact.swift')}
+  swift(`${app('Chat/DistillSubmission.swift')}
+${app('Chat/TatwoPlanArtifact.swift')}
 struct PRPlanReview: Codable, Equatable, Sendable {}
 @main struct Main { static func main() throws {
   var plan = TatwoPlanArtifactV1(threadID: UUID(), objective: "fixture", sections: [.init(title: "做什麼", body: "test")], state: .confirmed, kind: "pr")
@@ -152,10 +153,12 @@ test('D9/D11/D18 wiring and private skill export boundaries', () => {
   for (const text of ['基本附件十個', 'results/<uuid>.json', '重新啟動以更新', 'keptUserEdited']) assert.ok(skill.includes(text));
 });
 
-test('D23 all 316 baseline allowances constrain every detected value; unknown values fail closed', () => {
+test('D23 all 333 reviewed allowances constrain every detected value; unknown values fail closed', () => {
   const policy = read('scripts/public-safety-allow.txt').split('\n').filter(s => s && !s.startsWith('#'));
-  // W40–W61 baseline already contains 316 reviewed entries; W62 adds none. Retain the exact gate.
-  assert.equal(policy.length, 316);
+  // v2.0.8 has 324 entries; W71–W83 appended 9 reviewed fixture allowances.
+  // W84 adds none and restores the immutable W61 prefix (public-privacy.test).
+  // Retain an exact count and check EVERY entry, including those additions.
+  assert.equal(policy.length, 333);
   for (const line of policy) {
     const regex = line.split('|').slice(3).join('|').trim();
     assert.ok(regex.startsWith('^') && regex.endsWith('$'));
@@ -226,7 +229,8 @@ test('D10 actual live/plans loader recovers only on canvas load with no active t
   const src = app('Facade/ChatLiveEngine+Plan.swift');
   const methods = src.slice(src.indexOf('    private func planURL('), src.indexOf('    /// Appends'));
   const root = fs.mkdtempSync(join(tmpdir(), 'w29b-plan-load-'));
-  swift(`${app('Chat/TatwoPlanArtifact.swift')}
+  swift(`${app('Chat/DistillSubmission.swift')}
+${app('Chat/TatwoPlanArtifact.swift')}
 struct PRPlanReview: Codable, Equatable, Sendable {}
 final class ChatLiveEngine {
  struct Store { let url: URL }

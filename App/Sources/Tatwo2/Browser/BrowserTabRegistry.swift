@@ -49,6 +49,14 @@ struct BrowserBookmark: Codable, Identifiable, Equatable {
     var title: String
 }
 
+struct BrowserFavorite: Codable, Identifiable, Equatable {
+    let id: UUID
+    var url: URL
+    var title: String
+    var faviconPNG: Data?
+    var order: Int
+}
+
 struct BrowserLaneSnapshot: Codable, Equatable {
     var laneState: TatwoBrowserLaneState
     var laneURLs: [String: URL]
@@ -76,6 +84,7 @@ final class BrowserTabRegistry: ObservableObject {
 
     @Published private(set) var spaces: [BrowserSpace] = []
     @Published private(set) var tabs: [BrowserTab] = []
+    @Published private(set) var favorites: [BrowserFavorite] = []
     /// Transient engine state; never persisted as a live load on the next launch.
     private(set) var loadingTabIDs: Set<UUID> = []
     struct ClosedTab: Equatable {
@@ -134,6 +143,10 @@ final class BrowserTabRegistry: ObservableObject {
         var tab: BrowserTab
         var faviconFile: String?
     }
+    private struct StoredFavorite: Codable {
+        var favorite: BrowserFavorite
+        var faviconFile: String?
+    }
     private struct Document: Codable {
         var schemaVersion = 1
         var spaces: [BrowserSpace]
@@ -146,6 +159,9 @@ final class BrowserTabRegistry: ObservableObject {
         /// Lane raw IDs the embedded panel has already reported per session; only those may be
         /// removed by a later snapshot. A tab moved into the session stays until the panel sees it.
         var storedLaneIDs: [String: Set<String>]? = [:]
+        var codecNoticeTabIDs: Set<UUID>? = nil
+        var dismissedCodecHosts: Set<String>? = nil
+        var favorites: [StoredFavorite]? = nil
     }
     private struct LegacyDocument: Decodable {
         var browserLanesBySession: [String: BrowserLaneSnapshot]
@@ -156,6 +172,9 @@ final class BrowserTabRegistry: ObservableObject {
     private var storedLaneIDs: [String: Set<String>] = [:]
     private var legacyImported = false
     private var bookmarksImported = false
+    private var codecNoticeTabIDs: Set<UUID> = []
+    private var dismissedCodecHosts: Set<String> = []
+    private var pendingCodecHosts: Set<String> = []
     private let storageURL: URL?
     private var pendingSave: Task<Void, Never>?
     private var writable = true
@@ -183,6 +202,8 @@ final class BrowserTabRegistry: ObservableObject {
                 storedLaneIDs = document.storedLaneIDs ?? [:]
                 legacyImported = document.legacyImported
                 bookmarksImported = document.bookmarksImported ?? false
+                codecNoticeTabIDs = document.codecNoticeTabIDs ?? []
+                dismissedCodecHosts = document.dismissedCodecHosts ?? []
                 tabs = document.tabs.map { stored in
                     var tab = stored.tab
                     if stored.faviconFile == "\(tab.id.uuidString).png" {
@@ -191,6 +212,22 @@ final class BrowserTabRegistry: ObservableObject {
                     }
                     return tab
                 }
+                var favoriteURLs = Set<String>()
+                var favoriteIDs = Set<UUID>()
+                favorites = (document.favorites ?? []).sorted { $0.favorite.order < $1.favorite.order }.compactMap { stored in
+                    var favorite = stored.favorite
+                    let key = Self.favoriteURLKey(favorite.url)
+                    guard !favoriteURLs.contains(key), !favoriteIDs.contains(favorite.id) else { return nil }
+                    favoriteURLs.insert(key)
+                    favoriteIDs.insert(favorite.id)
+                    let filename = "favorite-\(favorite.id.uuidString).png"
+                    if stored.faviconFile == filename {
+                        favorite.faviconPNG = try? Data(contentsOf: storageURL.deletingLastPathComponent()
+                            .appendingPathComponent("favicons/\(filename)"))
+                    }
+                    return favorite
+                }
+                for index in favorites.indices { favorites[index].order = index }
             } catch {
                 writable = false // Never overwrite a corrupt or newer-schema document.
                 persistenceError = "Browser registry load failed: \(error.localizedDescription)"
@@ -216,6 +253,40 @@ final class BrowserTabRegistry: ObservableObject {
     }
 
     func tabs(ownedBy owner: BrowserTabOwner) -> [BrowserTab] { tabs.filter { $0.owner == owner } }
+
+    /// Called only for a current human CEF page's boolean codec result.
+    /// Reserve before awaiting Island so duplicate callbacks cannot enqueue twice.
+    func reserveCodecNotice(tabID: UUID, url: URL) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == tabID }),
+              tab.url == url, !tab.usesAgentContext,
+              let host = Self.codecNoticeHost(url),
+              !dismissedCodecHosts.contains(host),
+              !pendingCodecHosts.contains(host),
+              !codecNoticeTabIDs.contains(tabID) else { return false }
+        if case .bot = tab.owner { return false }
+        codecNoticeTabIDs.insert(tabID)
+        pendingCodecHosts.insert(host)
+        changed()
+        return true
+    }
+
+    func dismissCodecNotice(url: URL) {
+        guard let host = Self.codecNoticeHost(url) else { return }
+        dismissedCodecHosts.insert(host)
+        changed()
+    }
+
+    func finishCodecNotice(url: URL) {
+        guard let host = Self.codecNoticeHost(url) else { return }
+        pendingCodecHosts.remove(host)
+    }
+
+    private static func codecNoticeHost(_ url: URL) -> String? {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.user == nil, url.password == nil,
+              let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        return host
+    }
     /// Public tab UUIDs differ from legacy chat lane IDs used by the CEF host.
     /// Resolve only current records; a moved workspace tab uses its UUID.
     func runtimeTabID(for id: UUID) -> String? {
@@ -349,6 +420,95 @@ final class BrowserTabRegistry: ObservableObject {
     }
     func touch(_ id: UUID) { edit(id) { $0.lastActiveAt = Date() } }
     func setPinned(_ id: UUID, _ pinned: Bool) { edit(id) { $0.isPinned = pinned } }
+
+    /// Favorites are URL shortcuts, not bookmark/tab identities. Queries remain significant.
+    nonisolated static func favoriteURLKey(_ url: URL) -> String {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url.absoluteString }
+        parts.fragment = nil
+        while parts.percentEncodedPath.hasSuffix("/") { parts.percentEncodedPath.removeLast() }
+        return parts.string ?? url.absoluteString
+    }
+
+    func favorite(for url: URL) -> BrowserFavorite? {
+        favorites.first { Self.favoriteURLKey($0.url) == Self.favoriteURLKey(url) }
+    }
+
+    @discardableResult
+    func addFavorite(url: URL, title: String, faviconPNG: Data? = nil) -> BrowserFavorite {
+        if let existing = favorite(for: url) { return existing }
+        let favorite = BrowserFavorite(id: UUID(), url: url, title: title,
+                                       faviconPNG: faviconPNG, order: favorites.count)
+        favorites.append(favorite)
+        changed()
+        return favorite
+    }
+
+    @discardableResult
+    func addFavorite(tabID: UUID) -> BrowserFavorite? {
+        guard let tab = tabs.first(where: { $0.id == tabID }), let url = tab.url else { return nil }
+        return addFavorite(url: url, title: tab.title, faviconPNG: tab.faviconPNG)
+    }
+
+    @discardableResult
+    func addFavorite(bookmarkID: UUID) -> BrowserFavorite? {
+        guard let bookmark = spaces.flatMap(\.folders).flatMap(\.bookmarks).first(where: { $0.id == bookmarkID }) else { return nil }
+        let icon = tabs.first { $0.bookmarkID == bookmarkID }?.faviconPNG
+            ?? tabs.first { $0.url.map(Self.favoriteURLKey) == Self.favoriteURLKey(bookmark.url) }?.faviconPNG
+        return addFavorite(url: bookmark.url, title: bookmark.title, faviconPNG: icon)
+    }
+
+    func removeFavorite(_ id: UUID) {
+        guard favorites.contains(where: { $0.id == id }) else { return }
+        favorites.removeAll { $0.id == id }
+        for index in favorites.indices { favorites[index].order = index }
+        changed()
+    }
+
+    /// Merge an exported snapshot without replacing tabs, folders or existing favorites.
+    @discardableResult
+    func importFavorites(_ incoming: [BrowserFavorite]) -> Int {
+        var added = 0
+        for value in incoming.sorted(by: { $0.order < $1.order }) where favorite(for: value.url) == nil {
+            let id = favorites.contains { $0.id == value.id } ? UUID() : value.id
+            favorites.append(BrowserFavorite(id: id, url: value.url, title: value.title,
+                                             faviconPNG: value.faviconPNG, order: favorites.count))
+            added += 1
+        }
+        if added > 0 { changed() }
+        return added
+    }
+
+    /// nil appends to the end; moving before itself is a no-op.
+    @discardableResult
+    func moveFavorite(_ id: UUID, before targetID: UUID?) -> Bool {
+        guard id != targetID, let source = favorites.firstIndex(where: { $0.id == id }),
+              targetID == nil || favorites.contains(where: { $0.id == targetID }) else { return false }
+        let favorite = favorites.remove(at: source)
+        let destination = targetID.flatMap { target in favorites.firstIndex { $0.id == target } } ?? favorites.count
+        favorites.insert(favorite, at: destination)
+        for index in favorites.indices { favorites[index].order = index }
+        changed()
+        return true
+    }
+
+    @discardableResult
+    func openFavorite(_ id: UUID, owner: BrowserTabOwner) -> BrowserTab? {
+        guard let favorite = favorites.first(where: { $0.id == id }) else { return nil }
+        let key = Self.favoriteURLKey(favorite.url)
+        // Prefer the current space, but do not duplicate a tab already open in another owner.
+        let matching = tabs.filter {
+            if case .bot = $0.owner { return false } // Bot rows have no selectable human surface.
+            return $0.url.map(Self.favoriteURLKey) == key
+        }
+        if let existing = matching.first(where: { $0.owner == owner }) ?? matching.first {
+            select(existing.id)
+            return existing
+        }
+        guard accepts(owner) else { return nil }
+        let tab = openTab(owner: owner, url: favorite.url, title: favorite.title)
+        update(tab.id, url: favorite.url, title: favorite.title, favicon: favorite.faviconPNG)
+        return tabs.first { $0.id == tab.id }
+    }
     private func edit(_ id: UUID, _ body: (inout BrowserTab) -> Void) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         body(&tabs[index]); changed()
@@ -505,8 +665,17 @@ final class BrowserTabRegistry: ObservableObject {
             if let data = tab.faviconPNG, let filename { favicons.append((filename, data)) }
             return StoredTab(tab: copy, faviconFile: filename)
         }
+        let storedFavorites = favorites.map { favorite -> StoredFavorite in
+            var copy = favorite
+            copy.faviconPNG = nil
+            let filename = favorite.faviconPNG.map { _ in "favorite-\(favorite.id.uuidString).png" }
+            if let data = favorite.faviconPNG, let filename { favicons.append((filename, data)) }
+            return StoredFavorite(favorite: copy, faviconFile: filename)
+        }
         let document = Document(spaces: spaces, tabs: stored, laneIdentities: laneIdentities, sessions: sessions,
-                                retiredLanes: retiredLanes, legacyImported: legacyImported, bookmarksImported: bookmarksImported, storedLaneIDs: storedLaneIDs)
+                                retiredLanes: retiredLanes, legacyImported: legacyImported, bookmarksImported: bookmarksImported, storedLaneIDs: storedLaneIDs,
+                                codecNoticeTabIDs: codecNoticeTabIDs.intersection(Set(tabs.map(\.id))),
+                                dismissedCodecHosts: dismissedCodecHosts, favorites: storedFavorites)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         // Encoding a value type cannot fail here except for programmer error; surface it as empty data.
         return SavePayload(documentData: (try? encoder.encode(document)) ?? Data(), favicons: favicons.map { (file: $0.0, data: $0.1) })

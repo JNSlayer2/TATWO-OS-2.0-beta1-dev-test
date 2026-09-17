@@ -1,6 +1,6 @@
-Source commit: 4ef2ea5a43a04ca7f94bc8d71e438402447bd63a
+Source commit: c7031efe14323377f7865030fd03d73afbab56c1
 Source worktree: clean
-Files: 1605
+Files: 1658
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -25,11 +25,13 @@ App/Sources/Tatwo2/Browser/BrowserDownloadStore.swift
 App/Sources/Tatwo2/Browser/BrowserExtensionsView.swift
 App/Sources/Tatwo2/Browser/BrowserExternalLoginPolicy.swift
 App/Sources/Tatwo2/Browser/BrowserExternalURLQueue.swift
+App/Sources/Tatwo2/Browser/BrowserFavoritesStrip.swift
 App/Sources/Tatwo2/Browser/BrowserGeneralSettings.swift
 App/Sources/Tatwo2/Browser/BrowserHumanInteraction.swift
 App/Sources/Tatwo2/Browser/BrowserLoginHelpView.swift
 App/Sources/Tatwo2/Browser/BrowserManagementView.swift
 App/Sources/Tatwo2/Browser/BrowserManagementViewModel.swift
+App/Sources/Tatwo2/Browser/BrowserMediaFallback.swift
 App/Sources/Tatwo2/Browser/BrowserMemoryPolicy.swift
 App/Sources/Tatwo2/Browser/BrowserMemorySettings.swift
 App/Sources/Tatwo2/Browser/BrowserMemorySettingsView.swift
@@ -130,6 +132,7 @@ App/Sources/Tatwo2/Chat/ChatSliderPointerLifecycle.swift
 App/Sources/Tatwo2/Chat/ChatTranscriptPresentation.swift
 App/Sources/Tatwo2/Chat/ChatTranscriptScrollFollowState.swift
 App/Sources/Tatwo2/Chat/ChatTranscriptScrollIntentObserver.swift
+App/Sources/Tatwo2/Chat/DistillSubmission.swift
 App/Sources/Tatwo2/Chat/Fable5MothDecor.swift
 App/Sources/Tatwo2/Chat/FeedbackPlanActions.swift
 App/Sources/Tatwo2/Chat/HeaderQuotaStrip.swift
@@ -200,16 +203,21 @@ App/Sources/Tatwo2/Facade/ChatNativeGoalAcceptance.swift
 App/Sources/Tatwo2/Facade/ChatPageModel+Retry.swift
 App/Sources/Tatwo2/Facade/ChatPageModel.swift
 App/Sources/Tatwo2/Facade/ChatSteeringAcceptance.swift
+App/Sources/Tatwo2/Facade/DeviceDispatch.swift
+App/Sources/Tatwo2/Facade/DeviceIdentity.swift
+App/Sources/Tatwo2/Facade/DeviceInbox.swift
 App/Sources/Tatwo2/Facade/DevicePairingClient.swift
 App/Sources/Tatwo2/Facade/DevicePairingCode.swift
 App/Sources/Tatwo2/Facade/DevicePairingHost.swift
 App/Sources/Tatwo2/Facade/DevicePairingStubs.swift
 App/Sources/Tatwo2/Facade/DeviceRegistry.swift
+App/Sources/Tatwo2/Facade/DeviceStatus.swift
 App/Sources/Tatwo2/Facade/DevicesStubs.swift
 App/Sources/Tatwo2/Facade/DiscussionCommandAcceptance.swift
 App/Sources/Tatwo2/Facade/DispatchEngine.swift
 App/Sources/Tatwo2/Facade/DispatchRooms.swift
 App/Sources/Tatwo2/Facade/DispatchWatchdog.swift
+App/Sources/Tatwo2/Facade/DistillCanvas.swift
 App/Sources/Tatwo2/Facade/EngineDisableStore.swift
 App/Sources/Tatwo2/Facade/EngineLogin.swift
 App/Sources/Tatwo2/Facade/EnginePaths.swift
@@ -217,6 +225,8 @@ App/Sources/Tatwo2/Facade/EngineQuotaDetail.swift
 App/Sources/Tatwo2/Facade/FeedbackCoordinator.swift
 App/Sources/Tatwo2/Facade/FeedbackNativeReview.swift
 App/Sources/Tatwo2/Facade/FeedbackService.swift
+App/Sources/Tatwo2/Facade/GBrainKeychain.swift
+App/Sources/Tatwo2/Facade/GBrainService.swift
 App/Sources/Tatwo2/Facade/GitHubAccounts.swift
 App/Sources/Tatwo2/Facade/GitHubReleaseUpdateChecker.swift
 App/Sources/Tatwo2/Facade/GlobalNoteStore.swift
@@ -253,6 +263,7 @@ App/Sources/Tatwo2/Facade/PluginStubs.swift
 App/Sources/Tatwo2/Facade/PluginsBuiltinSource.swift
 App/Sources/Tatwo2/Facade/PluginsRemoval.swift
 App/Sources/Tatwo2/Facade/PluginsSource.swift
+App/Sources/Tatwo2/Facade/PrimaryTransfer.swift
 App/Sources/Tatwo2/Facade/PullRequestCoordinator.swift
 App/Sources/Tatwo2/Facade/PullRequestService.swift
 App/Sources/Tatwo2/Facade/RemoteDeviceLookup.swift
@@ -261,9 +272,12 @@ App/Sources/Tatwo2/Facade/RemoteEngineHandle.swift
 App/Sources/Tatwo2/Facade/RemoteEngineSync.swift
 App/Sources/Tatwo2/Facade/RemoteHostLink.swift
 App/Sources/Tatwo2/Facade/RemoteLiveEngine.swift
+App/Sources/Tatwo2/Facade/RuleGenerator.swift
+App/Sources/Tatwo2/Facade/RuleTranslators.swift
 App/Sources/Tatwo2/Facade/RunTask.swift
 App/Sources/Tatwo2/Facade/StreamingAppendAcceptance.swift
 App/Sources/Tatwo2/Facade/Tatwo2PlumbingStubs.swift
+App/Sources/Tatwo2/Facade/TatwoEntry.swift
 App/Sources/Tatwo2/Facade/TatwoResources.swift
 App/Sources/Tatwo2/Facade/TatwoSkillsDirectoryCatalog.swift
 App/Sources/Tatwo2/Facade/TurnArtifacts.swift
@@ -334,6 +348,11 @@ App/Sources/Tatwo2/New/PocketCatalogPresentation.swift
 App/Sources/Tatwo2/New/PocketSettingsView.swift
 App/Sources/Tatwo2/New/RemoteDevicesSidebarSections.swift
 App/Sources/Tatwo2/New/UpdateAvailableCard.swift
+App/Sources/Tatwo2/Onboarding/ManagedRulesRemoval.swift
+App/Sources/Tatwo2/Onboarding/OSOnboarding.swift
+App/Sources/Tatwo2/Onboarding/OSOnboardingView.swift
+App/Sources/Tatwo2/Onboarding/OnboardingAcceptance.swift
+App/Sources/Tatwo2/Onboarding/OnboardingDiscovery.swift
 App/Sources/Tatwo2/Pages/DeviceCrossSyncCard.swift
 App/Sources/Tatwo2/Pages/DevicePressureMonitorCard.swift
 App/Sources/Tatwo2/Pages/DeviceSyncLeafViews.swift
@@ -360,7 +379,6 @@ App/Sources/Tatwo2/Resources/ProviderIcons/ProviderIcon-codex.svg
 App/Sources/Tatwo2/Resources/ProviderIcons/ProviderIcon-grok.svg
 App/Sources/Tatwo2/Resources/ProviderIcons/ProviderIcon-minimax.svg
 App/Sources/Tatwo2/Resources/ProviderIcons/ProviderIcon-ollama.svg
-App/Sources/Tatwo2/Resources/os-architecture-standard.md
 App/Sources/Tatwo2/Resources/os-upstream.md
 App/Sources/Tatwo2/Resources/os.md
 App/Sources/Tatwo2/Resources/tatwo2-git-credential
@@ -380,6 +398,7 @@ App/Sources/Tatwo2/Shell/WindowChrome.swift
 App/Sources/Tatwo2/Shell/WorkspaceSidebarModePicker.swift
 App/Sources/Tatwo2/Shell/WorkspaceSidebarShell.swift
 App/Sources/Tatwo2/Shell/WorkspaceSpaceControls.swift
+App/Sources/Tatwo2/Space/SpaceCreation.swift
 App/Sources/Tatwo2/Space/SpaceLiveSetupView.swift
 App/Sources/Tatwo2/Space/SpaceSetupComposerToolbar.swift
 App/Sources/Tatwo2/Space/SpaceSetupEdgeTabs.swift
@@ -732,6 +751,9 @@ Engines/codex-sidecar/first-init-worker.mjs
 Engines/codex-sidecar/first-init.mjs
 Engines/codex-sidecar/sidecar-wiring-probe.mjs
 Engines/codex-sidecar/sidecar.mjs
+Engines/gbrain-adapter/README.md
+Engines/gbrain-adapter/server.mjs
+Engines/gbrain-adapter/service.mjs
 Engines/grok-sidecar/sidecar.mjs
 Engines/os-mcp/caller-test.mjs
 Engines/os-mcp/computer-use-test.mjs
@@ -1226,9 +1248,12 @@ scripts/browser-pump-probe.mjs
 scripts/browser-pump-probe.sh
 scripts/browser-stress.sh
 scripts/build-app.sh
+scripts/build-cef-proprietary.sh
 scripts/bundle-cli-runtime.sh
 scripts/bundle-engines.sh
+scripts/bundle-gbrain.py
 scripts/check-appstorage-registry.sh
+scripts/clean-install-gate.sh
 scripts/copy-audit-waivers.txt
 scripts/impact.mjs
 scripts/install-j2-temp.sh
@@ -1387,6 +1412,7 @@ scripts/tests/browser-staging-loopback-startup.py
 scripts/update-blocklists.sh
 scripts/validate-tatwo-sync-catalog.mjs
 scripts/verify-release-train.py
+scripts/w91-live-check.sh
 skills/tatwo-ultrawork/SKILL.md
 skills/tatwo-ultrawork/agents/openai.yaml
 tests/agent-accounts.test.mjs
@@ -1601,6 +1627,33 @@ tests/w29a-update-fixes.test.mjs
 tests/w29b-ux-fixes.test.mjs
 tests/w31-r2-tail.test.mjs
 tests/w64-honesty.test.mjs
+tests/w71-binding.test.mjs
+tests/w72-transfer-engine.test.mjs
+tests/w72-version-push.test.mjs
+tests/w72-wiring.test.mjs
+tests/w74-entry-documents.test.mjs
+tests/w75-public-export.test.mjs
+tests/w75-single-authority.test.mjs
+tests/w75-template.test.mjs
+tests/w76-device-identity.test.mjs
+tests/w77-device-status.test.mjs
+tests/w78-dispatch.test.mjs
+tests/w79-generators.test.mjs
+tests/w80b-adapter.test.mjs
+tests/w80b-modes.test.mjs
+tests/w80b-stale-lock.test.mjs
+tests/w80b-ui-guards.test.mjs
+tests/w81-distill.test.mjs
+tests/w82-onboarding.test.mjs
+tests/w83-gbrain-retained.test.mjs
+tests/w83-primary-transfer.test.mjs
+tests/w85-cef-local-source.test.mjs
+tests/w85-media-fallback.test.mjs
+tests/w86-favorites.test.mjs
+tests/w87a-download-speed.test.mjs
+tests/w89-space-from-zero.test.mjs
+tests/w90-empty-state.test.mjs
+tests/w91-remote-endpoints.test.mjs
 tests/webmcp-runtime.test.mjs
 tests/window-traffic-lights.test.mjs
 tests/work-space-add.test.mjs

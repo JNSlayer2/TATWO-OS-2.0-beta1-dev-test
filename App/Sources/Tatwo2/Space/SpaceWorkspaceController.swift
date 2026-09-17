@@ -12,6 +12,8 @@ final class SpaceWorkspaceController: ObservableObject {
         set { state?.selectedDomain.presentsInterface = newValue }
     }
     @Published private(set) var error: String?
+    /// 0 個領域 Space 不是錯誤，是「從零」的空狀態（W89）。
+    @Published private(set) var isEmptyWorkspace = false
     private weak var model: ChatPageModel?
     private var library: BotLibrary?
     private var observation: AnyCancellable?
@@ -55,6 +57,7 @@ final class SpaceWorkspaceController: ObservableObject {
         error = nil
         observation = nil
         hasInvalidWorkspace = false
+        isEmptyWorkspace = false
         await library.ready()
         if let failure = library.snapshot.spaceWorkspaceError {
             hasInvalidWorkspace = true
@@ -82,7 +85,7 @@ final class SpaceWorkspaceController: ObservableObject {
             }
             return domain
         }
-        guard !domains.isEmpty else { error = "尚無領域 Space；請先建立領域。"; return }
+        guard !domains.isEmpty else { isEmptyWorkspace = true; return }
         let projection = SpaceSetupPreviewState(domains: domains)
         if let id = library.snapshot.spaceWorkspace.selectedDomainID { projection.selectDomain(id) }
         state = projection
@@ -91,6 +94,35 @@ final class SpaceWorkspaceController: ObservableObject {
             self?.model?.objectWillChange.send()
         }
     }
+
+    /// 空狀態的前置條件：有沒有 bot 可以當 owner、有沒有目前專案。
+    func creationOutcome(selectedBotID: String? = nil) -> SpaceCreationOutcome {
+        SpaceCreation.outcome(botIDs: library?.list().map(\.id) ?? [],
+                              selectedBotID: selectedBotID,
+                              projectWorkdir: model?.selectedThreadProject?.workdir)
+    }
+
+    /// 從零建立領域的唯一入口：設定 › Space 空狀態與 Bot 頁「搭建工作平台」都走這裡。
+    @discardableResult
+    func createDomain(name rawName: String, ownerBotID: String? = nil, density: String? = nil) async -> SpaceCreationResult {
+        guard let library else { return .failed("work space 尚未載入") }
+        guard let name = SpaceCreation.normalizedName(rawName) else { return .failed("請輸入領域名稱") }
+        let outcome = creationOutcome(selectedBotID: ownerBotID)
+        guard case .ready(let owner) = outcome else { return .blocked(outcome) }
+        await flushWrites()
+        do {
+            let space = try await BotStore(library: library)
+                .createSpace(name: name, density: density ?? SpaceCreation.defaultDensity, ownerBotID: owner)
+            await load(library: library)
+            selectDomain(space.id)
+            return .created(id: space.id, name: space.name)
+        } catch {
+            return .failed("建立領域失敗：\(error)")
+        }
+    }
+
+    /// 空狀態導引：沒有 bot 時切到 Bot 頁。
+    func openBotPage() { model?.mode = .bot }
 
     private func restore(_ domain: SpaceSetupPreviewState.Domain) {
         guard let library else { return }

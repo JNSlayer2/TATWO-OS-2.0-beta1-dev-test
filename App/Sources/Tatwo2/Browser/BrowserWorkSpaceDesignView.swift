@@ -165,7 +165,7 @@ final class BrowserWorkSpaceStore: ObservableObject {
     @Published private(set) var importData: Set<ImportData> = [.bookmarks, .passwords, .history]
     @Published var profile = "Default"
     @Published private(set) var notice = ""
-    private let registry: BrowserTabRegistry
+    let registry: BrowserTabRegistry
     private var lastWorkSpaceID: UUID?
     private var observation: AnyCancellable?
     // Stable window-local integer aliases preserve the existing view/drag payload API.
@@ -299,6 +299,19 @@ final class BrowserWorkSpaceStore: ObservableObject {
             folders[index].toggle()
         }
         registry.touch(uuid)
+    }
+    func openFavorite(_ id: UUID) {
+        guard let destination = sessionDestination,
+              let tab = registry.openFavorite(id, owner: .workSpace(spaceID: destination.id)) else { return }
+        switch tab.owner {
+        case let .workSpace(spaceID):
+            selectSpace(spaceKey(spaceID))
+            select(tabKey(tab.id))
+        case .chatSession:
+            selectSpace(spaceKey(BrowserTabRegistry.sessionSpaceID))
+            selectSessionTab(tab.id)
+        case .bot: break // Bot rows are read-only, never selected by a human shortcut.
+        }
     }
     var selectedRegistryID: UUID? { canAddTab ? tabIDs[selectedID] : nil }
     var showsStartPage: Bool { canAddTab && (selectedRegistryID == nil || selectedTab.url == "about:blank" || selectedTab.url.isEmpty) }
@@ -860,6 +873,7 @@ struct BrowserWorkSpaceSidebarList: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: BrowserSidebarMetrics.hairline) {
+                        BrowserFavoritesStrip(store: store)
                         pinnedSection
                         folderSection
                         Divider().padding(.horizontal, BrowserSidebarMetrics.dividerHorizontalInset).padding(.vertical, BrowserSidebarMetrics.rowHorizontalPadding)
@@ -939,6 +953,9 @@ struct BrowserWorkSpaceSidebarList: View {
             onSelect: { store.selectSessionTab(tab.id) }).help(tab.url?.absoluteString ?? tab.title)
             .accessibilityAddTraits(store.selectedSessionTabID == tab.id ? .isSelected : [])
             .contextMenu {
+                BrowserFavoriteMenu(registry: store.registry, url: tab.url) {
+                    store.registry.addFavorite(tabID: tab.id)
+                }
                 Menu("移入 browser space") {
                     Button("成為分頁（到目前 space）") { store.moveSessionTab(tab.id) }
                         .disabled(store.sessionDestination == nil)
@@ -1178,6 +1195,9 @@ struct BrowserWorkSpaceSidebarList: View {
                     ForEach(folder.bookmarks) { bookmark in
                         BrowserBookmarkRow(store: store, bookmark: bookmark, folderID: folder.id)
                             .contextMenu {
+                                BrowserFavoriteMenu(registry: store.registry, url: URL(string: bookmark.url)) {
+                                    store.registry.addFavorite(bookmarkID: bookmark.id)
+                                }
                                 Button("新增書籤（目前分頁）") { store.saveBookmark(tabID: store.selectedID, into: folder.id) }
                                 Button("刪除書籤") {
                                     store.deleteBookmark(bookmark.id)
@@ -1219,6 +1239,9 @@ struct BrowserWorkSpaceSidebarList: View {
         .background(selected ? fieldFill : .clear, in: RoundedRectangle(cornerRadius: BrowserSidebarMetrics.rowSpacing))
         .shadow(color: shadowColor.opacity(selected ? BrowserSidebarMetrics.selectedRowShadowOpacity : BrowserSidebarMetrics.hiddenOpacity), radius: BrowserSidebarMetrics.controlGap, x: BrowserSidebarMetrics.zero, y: BrowserSidebarMetrics.childGap)
         .contextMenu {
+            BrowserFavoriteMenu(registry: store.registry, url: URL(string: tab.url)) {
+                if let id = tab.registryID { store.registry.addFavorite(tabID: id) }
+            }
             Button("關閉分頁") { store.close(tab.id) }
             Button("重新開啟關閉的分頁", action: store.reopenClosedTab).disabled(!store.canReopenClosedTab)
             Button("註解…") { store.showAnnotations(tab.id) }

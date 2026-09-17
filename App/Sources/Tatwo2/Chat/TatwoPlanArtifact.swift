@@ -12,7 +12,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
 
   /// Shared by the canvas start action, outgoing rules and one-shot persistence.
   func acceptsStart(_ text: String) -> Bool {
-    guard kind != "pr", kind != "feedback", state == .confirmed, executionTurnID == nil else { return false }
+    guard kind != "pr", kind != "feedback", kind != "distill", state == .confirmed, executionTurnID == nil else { return false }
     let command = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     return command.hasPrefix("開始") || command == "start" || command == "go"
   }
@@ -150,6 +150,9 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   public var planFlowSelection: PlanFlowSelectionV1?
   public var executionTurnID: String?
   public var kind: String?
+  // Distillation preserves the human's bytes instead of round-tripping Markdown.
+  var distillText: String?
+  var distillSubmission: DistillSubmission?
   var prReview: PRPlanReview?
   var prMessage: String?
   var prImplementationInterrupted: Bool?
@@ -220,6 +223,8 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
       forKey: .planFlowSelection)
     self.executionTurnID = try container.decodeIfPresent(String.self, forKey: .executionTurnID)
     self.kind = try container.decodeIfPresent(String.self, forKey: .kind)
+    self.distillText = try container.decodeIfPresent(String.self, forKey: .distillText)
+    self.distillSubmission = try container.decodeIfPresent(DistillSubmission.self, forKey: .distillSubmission)
     self.prReview = try container.decodeIfPresent(PRPlanReview.self, forKey: .prReview)
     self.prMessage = try container.decodeIfPresent(String.self, forKey: .prMessage)
     self.prImplementationInterrupted = try container.decodeIfPresent(Bool.self, forKey: .prImplementationInterrupted)
@@ -251,6 +256,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   ) {
     self.objective = objective
     self.sections = sections
+    if kind == "distill" { distillText = nil }
     updatedAt = Self.storagePrecision(at)
     state = .discussing
     executionTurnID = nil
@@ -268,6 +274,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   /// 編輯用文本格式＝第一行 objective、空行、之後 `## 標題` 段落——
   /// 與 `sections(fromModelResponse:)` 解析規則對齊，往返穩定。
   public func editableText() -> String {
+    if kind == "distill", let distillText { return distillText }
     var blocks = [objective]
     blocks.append(
       contentsOf: sections.map { "## \($0.title)\n\($0.body)" })
@@ -277,6 +284,13 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   /// 套用使用者手改的文本：首個非空且非標題行＝新 objective；其餘走
   /// 既有段落解析。任何內容修改都回到 discussing（沿用確認語義）。
   public mutating func applyEditedText(_ text: String, at: Date = Date()) {
+    if kind == "distill" {
+      guard distillSubmission == nil else { return }
+      distillText = text
+      updatedAt = Self.storagePrecision(at)
+      state = .discussing
+      return
+    }
     let normalized = text
       .replacingOccurrences(of: "\r\n", with: "\n")
       .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -301,6 +315,7 @@ public struct TatwoPlanArtifactV1: Codable, Sendable, Equatable {
   }
 
   public func markdownExport() -> String {
+    if kind == "distill" { return editableText() }
     var blocks = [
       kind == "pr" ? (state == .ready ? "# PR" : "# PR · Plan") : (kind == "feedback" ? "# 回報問題" : "# Plan"),
       "## Objective\n\n\(objective)",

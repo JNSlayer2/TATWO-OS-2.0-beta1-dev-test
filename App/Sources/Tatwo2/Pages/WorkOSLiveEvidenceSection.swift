@@ -5,14 +5,11 @@ import SwiftUI
 // 純讀 TatwoSandboxRunReader / TatwoGBrainReader；缺根/無權限優雅顯示狀態，不 crash。
 // 視覺跟主題（GlassCard/液態玻璃 aurora、扁平牛皮紙 fable5）。
 //
-// OS root 注入（F7 graceful-empty）：
-// 1. 環境變數 `TATWO_OS_ROOT`
-// 2. App Support `os-root.local.json`（若存在）
-// 3. 皆無 → section 顯示「未配置 OS root」，不 hardcode 本機絕對路徑
+// OS root 由 TatwoEntry 統一解析；入口不存在時優雅顯示未配置。
+// 舊 os-root.local.json 僅保留 sandboxRoot / gbrainRoot 的個別覆寫。
 //
 // `os-root.local.json` 格式（本機使用者狀態；App 不建立此檔）：
 // {
-//   "osRoot": "<absolute path>",
 //   "sandboxRoot": "<optional absolute override>",
 //   "gbrainRoot": "<optional absolute override>"
 // }
@@ -20,7 +17,6 @@ import SwiftUI
 
 struct WorkOSLiveEvidenceSection: View {
     @ObservedObject private var themeStore = TatwoThemeStore.shared
-    private static let osRootEnvKey = "TATWO_OS_ROOT"
     private static let osRootLocalFileName = "os-root.local.json"
 
     @State private var runs: [TatwoSandboxRun] = []
@@ -68,23 +64,19 @@ struct WorkOSLiveEvidenceSection: View {
     }
 
     private struct OsRootLocalFile: Decodable {
-        var osRoot: String?
         var sandboxRoot: String?
         var gbrainRoot: String?
     }
 
-    /// Resolution: `TATWO_OS_ROOT` → App Support `os-root.local.json` → nil (unconfigured).
+    /// Root resolution belongs exclusively to TatwoEntry.
     private static func resolveLiveRoots(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) -> LiveRoots? {
-        let fromEnv = nonempty(environment[osRootEnvKey])
+        let entry = TatwoEntry(environment: environment)
+        guard entry.exists else { return nil }
         let fromFile = loadOsRootLocalFile(fileManager: fileManager)
-
-        let osRootPath = fromEnv ?? fromFile.flatMap { nonempty($0.osRoot) }
-        guard let osRootPath else { return nil }
-
-        let osRoot = URL(fileURLWithPath: osRootPath, isDirectory: true)
+        let osRoot = entry.root
 
         let sandboxPath = fromFile.flatMap { nonempty($0.sandboxRoot) }
         let gbrainPath = fromFile.flatMap { nonempty($0.gbrainRoot) }

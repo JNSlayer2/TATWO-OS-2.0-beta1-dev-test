@@ -149,28 +149,3 @@ enum EmbeddedBrowserUIFixturePolicy {
         ]
     }
 }
-
-struct EmbeddedBrowserExtensionFixture: Identifiable, Equatable {
-    let id: String
-    let name: String
-    let purpose: String
-    var isEnabled: Bool
-
-    static let items = [
-        EmbeddedBrowserExtensionFixture(
-            id: "ad-blocker",
-            name: "uBlock Origin（廣告封鎖）",
-            purpose: "擋掉大多數網頁廣告與追蹤器。",
-            isEnabled: true),
-        EmbeddedBrowserExtensionFixture(
-            id: "password-manager",
-            name: "密碼管理",
-            purpose: "在網站上安全填入已儲存的帳號與密碼。",
-            isEnabled: false),
-        EmbeddedBrowserExtensionFixture(
-            id: "translation",
-            name: "網頁翻譯",
-            purpose: "把目前網頁翻成你熟悉的語言。",
-            isEnabled: true),
-    ]
-}

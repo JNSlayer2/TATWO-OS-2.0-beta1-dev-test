@@ -55,6 +55,11 @@ final class BotStore {
         url = base.appendingPathComponent("bots")
         library = BotLibrary(root: base)
     }
+    /// 已載入的 library 直接包一層；不另開第二個 BotLibrary（同一個 root 兩個寫入佇列會打架）。
+    init(library: BotLibrary) {
+        self.library = library
+        url = library.root.appendingPathComponent("bots")
+    }
     var spaces: [BotSpaceRecord] { document.spaces }
     var bots: [BotRecord] { document.bots }
     func bot(id: String) -> BotRecord? { bots.first { $0.id == id } }
@@ -87,83 +92,5 @@ final class BotStore {
         try await library.update(bot)
         try await library.saveSpaces(spaces + [space])
         return space
-    }
-
-    /// 種子逐項取自 Fixture/BotFixture.swift 的 defaultPrincipals/defaultTempBots。
-    private static func fixtureSeed() -> BotStoreDocument {
-        let principals = BotPageFixture.defaultPrincipals
-        let workdir = NSHomeDirectory()
-        let spaces = principals.flatMap { principal in
-            principal.spaces.map {
-                BotSpaceRecord(
-                    id: $0.id,
-                    name: $0.name,
-                    density: $0.density.rawValue,
-                    ownerBotID: principal.id
-                )
-            }
-        }
-
-        var bots: [BotRecord] = []
-        for principal in principals {
-            bots.append(BotRecord(
-                id: principal.id,
-                name: principal.name,
-                emoji: principal.emoji,
-                role: principal.isGroup ? "多人設共識群" : "獨立 bot",
-                systemPrompt: systemPrompt(
-                    name: principal.name,
-                    role: principal.isGroup ? "多人設共識群" : "獨立 bot"
-                ),
-                defaultEngine: "claude",
-                defaultModel: nil,
-                workdir: workdir,
-                parentBotID: nil,
-                spaceIDs: principal.spaces.map(\.id),
-                isTemporary: false
-            ))
-            bots.append(contentsOf: principal.subs.map { sub in
-                BotRecord(
-                    id: sub.id,
-                    name: sub.name,
-                    emoji: sub.isConsensusGroup ? "🗂️" : sub.emoji,
-                    role: sub.role,
-                    systemPrompt: systemPrompt(name: sub.name, role: sub.role),
-                    defaultEngine: "claude",
-                    defaultModel: nil,
-                    workdir: workdir,
-                    parentBotID: principal.id,
-                    spaceIDs: principal.spaces.map(\.id),
-                    isTemporary: false
-                )
-            })
-        }
-        bots.append(contentsOf: BotPageFixture.defaultTempBots.map {
-            BotRecord(
-                id: $0.id,
-                name: $0.name,
-                emoji: $0.emoji,
-                role: $0.task,
-                systemPrompt: systemPrompt(name: $0.name, role: $0.task),
-                defaultEngine: "claude",
-                defaultModel: nil,
-                workdir: workdir,
-                parentBotID: nil,
-                spaceIDs: [],
-                isTemporary: true
-            )
-        })
-        return BotStoreDocument(
-            spaces: spaces,
-            bots: bots,
-            threadIDsByBotID: [:]
-        )
-    }
-
-    private static func systemPrompt(name: String, role: String) -> String {
-        """
-        你是「\(name)」。你的人設與職責是：\(role)。
-        請維持這個角色，直接遵從使用者要求；不要宣稱自己是展示資料。
-        """
     }
 }

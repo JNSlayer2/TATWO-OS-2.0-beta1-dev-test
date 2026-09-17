@@ -169,6 +169,12 @@ cleanup() {
       fi
     fi
   fi
+  if [[ -n "$STAGE" && -d "${TEMP:-}" ]] && declare -F phases_json >/dev/null; then
+    local phases; phases="$(phases_json)"
+    [[ -f "$STAGE/result.json" ]] || printf '{"ok":false,"message":"install_failed"}\n' > "$STAGE/result.json"
+    plutil -replace phases -json "$phases" "$STAGE/result.json" 2>/dev/null || plutil -insert phases -json "$phases" "$STAGE/result.json" || true
+    [[ -z "${TATWO_OS_PHASES_FILE:-}" ]] || printf '%s' "$phases" > "$TATWO_OS_PHASES_FILE"
+  fi
   if [[ -n "$LOCK" && -n "$STAGE" ]]; then mv "$LOCK" "$STAGE/lock.finished" || true; fi
   finish_update_stage || printf '更新暫存清理未完成；保留原位置供檢查。\n' >&2
   exit "$status"
@@ -329,14 +335,15 @@ archive_old_downloads() {
 # INVISIBLE-PRIMITIVES-BEGIN
 clone_copy() { cp -cRPp "$1" "$2" 2>/dev/null || ditto "$1" "$2"; }
 check_space() {
-  local path="$1" bytes="$2" available required
+  local path="$1" bytes="$2" available required reserve="${DOWNLOAD_RESERVE_BYTES:-0}"
   available="$(df -Pk "$path" | awk 'END {print $4}')"
   [[ "$available" =~ ^[0-9]+$ && "$bytes" =~ ^[0-9]+$ ]] || fail "無法確認可用空間"
   # 待接 todo #25 治理器的磁碟保留額。
   local -r safety_multiplier=2
   [[ "$bytes" -gt 0 && "${#bytes}" -le 13 && "$bytes" -le 1000000000000 ]] || fail "候選大小無效"
-  required=$(((bytes * safety_multiplier + 1023) / 1024))
-  [[ "$available" -ge "$required" ]] || fail "空間不足，請清出至少 $(((required - available + 1023) / 1024)) MB（候選 App 大小 ×2）"
+  [[ "$reserve" =~ ^[0-9]+$ && "${#reserve}" -le 13 && "$reserve" -le 4000000000000 ]] || fail "下載空間估算無效"
+  required=$(((bytes * safety_multiplier + reserve + 1023) / 1024))
+  [[ "$available" -ge "$required" ]] || fail "空間不足，請清出至少 $(((required - available + 1023) / 1024)) MB（候選 App 大小 ×2＋分段下載峰值）"
 }
 manifest_size() {
   osascript -l JavaScript - "$1" <<'JXA'
@@ -354,6 +361,8 @@ function run(a) {
 }
 JXA
 }
+# 階段秒數收據（W87a）；放在 primitives 區塊裡，delta／runtime 組裝被單獨切片測試時仍有定義。
+phase_time() { [[ -z "${TEMP:-}" ]] || printf '%s\n' "$2" >> "$TEMP/phase-$1.seconds"; }
 # INVISIBLE-PRIMITIVES-END
 # OFFLINE-RELEASE-BEGIN
 # App handoff revalidates the release and marker online before quitting.
@@ -405,7 +414,16 @@ TAG="$(plutil -extract tag_name raw -o - "$TEMP/release.json")"
 [[ -z "${TATWO_OS_VERSION:-}" || "${TATWO_OS_VERSION#v}" == "${TAG#v}" ]] || fail "Release tag 與指定版本不符"
 [[ "$(plutil -extract draft raw -o - "$TEMP/release.json")" == false && "$(plutil -extract prerelease raw -o - "$TEMP/release.json")" == false ]] || fail "Release 尚未發行或已撤回"
 ZIP_URL="" SHA_URL="" APP_URL="" RUNTIME_NAMES=" " INSTALL_READY=0 READY_URL="" RELEASE_HAS_MANIFEST=0 ZIP_SIZE=0 INDEX=0
+DOWNLOAD_RESERVE_BYTES=0
 while NAME="$(plutil -extract "assets.$INDEX.name" raw -o - "$TEMP/release.json" 2>/dev/null)"; do
+  # At most two selected ZIPs: retain their products plus parts/joining.
+  # Use the largest advertised ZIP for each slot, before knowing the reuse route.
+  # Peak per ZIP is parts + joining (2×); the App reserves the same on top of its 2× budget.
+  if [[ "$NAME" == TATWO-OS*.zip ]]; then
+    ASSET_BYTES="$(plutil -extract "assets.$INDEX.size" raw -o - "$TEMP/release.json" 2>/dev/null)" || ASSET_BYTES=0
+    [[ "$ASSET_BYTES" =~ ^[0-9]+$ && "${#ASSET_BYTES}" -le 13 && "$ASSET_BYTES" -le 1000000000000 ]] || fail "附件大小無效"
+    [[ "$DOWNLOAD_RESERVE_BYTES" -ge "$((ASSET_BYTES * 2))" ]] || DOWNLOAD_RESERVE_BYTES=$((ASSET_BYTES * 2))
+  fi
   case "$NAME" in
     TATWO-OS-runtime-????????????.zip) RUNTIME_NAMES+="$NAME " ;;
     TATWO-OS-app.zip) APP_URL="$(plutil -extract "assets.$INDEX.browser_download_url" raw -o - "$TEMP/release.json")" ;;
@@ -428,14 +446,129 @@ LEGACY_READY=0
 grep -qE '^[[:xdigit:]]{64}  ' "$TEMP/install-ready" || { [[ "$RELEASE_HAS_MANIFEST" == 0 ]] || fail "含 manifest 的版本必須有 hash-bound marker"; LEGACY_READY=1; printf 'install-ready 為舊格式（無 SHA），改以 .sha256 綁定候選版本。\n' >&2; }
 curl --proto '=https' --proto-redir '=https' -fsSL --retry 2 -o "$TEMP/TATWO-OS.zip.sha256" "$SHA_URL"
 # DOWNLOAD-RETRY-BEGIN
-retry_download() {
+# W87a: part files are scoped to one output + source URL. curl forbids -r with
+# -C: resume a bounded range explicitly from start + the validated partial length.
+download_part() (
+  local output="$1" url="$2" start="$3" end="$4" total="$5" attempt have from status range got
+  for attempt in 1 2 3; do
+    have=0; [[ ! -f "$output" ]] || have=$(wc -c < "$output" | tr -d ' ')
+    [[ "$have" -le "$((end - start + 1))" ]] || { rm -f "$output"; have=0; }
+    [[ "$have" != "$((end - start + 1))" ]] || return 0
+    from=$((start + have))
+    status=0
+    curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 15 --max-time 3600 --speed-limit 1024 --speed-time 60 \
+      --max-filesize "$((end - from + 1))" -r "$from-$end" -D "$output.headers" -o "$output.next" "$url" || status=$?
+    range="$(tr -d '\r' < "$output.headers" | awk 'tolower($1)=="content-range:" {v=$2 " " $3} /^HTTP\// {v=""} END {print v}')"
+    got=0; [[ ! -f "$output.next" ]] || got=$(wc -c < "$output.next" | tr -d ' ')
+    if grep -qE '^HTTP/[^ ]+ 206' "$output.headers" && [[ "$range" == "bytes $from-$end/$total" && "$got" -le "$((end - from + 1))" ]]; then
+      if [[ "$have" == 0 ]]; then mv "$output.next" "$output"; else cat "$output.next" >> "$output"; rm -f "$output.next"; fi
+      [[ "$status" == 0 && "$((have + got))" == "$((end - start + 1))" ]] && return 0
+    else
+      rm -f "$output"
+    fi
+  done
+  return 1
+)
+parallel_download() {
+  local output="$1" url="$2" count="${TATWO_OS_DOWNLOAD_PARTS:-24}" size i start end pid failed=0
+  local pids=()
+  [[ "$count" =~ ^[0-9]+$ && ${#count} -le 2 ]] || count=24
+  count=$((10#$count)); [[ "$count" -ge 1 && "$count" -le 32 ]] || count=24
+  [[ "$count" -gt 1 ]] || return 1
+  # Asset metadata avoids a HEAD for small attachments; HEAD remains authoritative.
+  [[ "${DOWNLOAD_SIZE:-0}" -ge 20000000 ]] || return 1
+  size="$(curl --proto '=https' --proto-redir '=https' -fsSL -I --connect-timeout 15 --max-time 60 "$url" | tr -d '\r' | awk '/^HTTP\// {v=""} tolower($1)=="content-length:" {v=$2} END {print v}')" || return 1
+  [[ "$size" =~ ^[0-9]+$ && ${#size} -le 12 && "$size" -ge 20000000 && "$size" == "$DOWNLOAD_SIZE" ]] || return 1
+  local parts="$output.parts"
+  mkdir -p "$parts" || return 1
+  local identity; identity="$(printf '%s\n%s\n%s' "$url" "$size" "$count" | shasum -a 256)"
+  if [[ ! -f "$parts/identity" || "$(< "$parts/identity")" != "$identity" ]]; then
+    rm -f "$parts"/*; printf '%s' "$identity" > "$parts/identity"
+  fi
+  for ((i=0; i<count; i++)); do
+    start=$((size * i / count)); end=$((size * (i + 1) / count - 1))
+    download_part "$parts/$i" "$url" "$start" "$end" "$size" & pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+  [[ "$failed" == 0 ]] || return 1
+  : > "$output.joining"
+  for ((i=0; i<count; i++)); do cat "$parts/$i" >> "$output.joining" || return 1; done
+  mv "$output.joining" "$output" || return 1
+  DOWNLOAD_PARTS="$count"
+  rm -rf "$parts"
+}
+single_download() {
   local output="$1" url="$2" attempt
-  if [[ -n "${TATWO_OS_OFFLINE_RELEASE:-}" ]]; then curl -o "$output" "$url"; return; fi
+  DOWNLOAD_PARTS=1
   for attempt in 1 2 3 4 5 6; do
     curl --proto '=https' --proto-redir '=https' --http1.1 -fSL -C - --connect-timeout 15 --max-time 3600 --speed-limit 1024 --speed-time 60 -o "$output" "$url" && return 0
     [[ "$attempt" == 6 ]] || sleep "$((attempt * 3))"
   done
   return 1
+}
+download_hash_matches() {
+  local actual started=$SECONDS
+  actual="$(shasum -a 256 "$1")" || return 1
+  phase_time verify "$((SECONDS - started))"
+  [[ "${actual%% *}" == "$2" ]]
+}
+record_download() {
+  local name="$1" source="$2" output="$3" started="$4" parts="$5" bytes
+  [[ -n "${TEMP:-}" && "$name" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
+  bytes=$(wc -c < "$output" | tr -d ' ')
+  printf '{"name":"%s","source":"%s","bytes":%s,"seconds":%s,"parts":%s}' "$name" "$source" "$bytes" "$((SECONDS - started))" "$parts" > "$TEMP/phase-download-$name.json"
+}
+phases_json() {
+  local file comma='' phase seconds
+  printf '{"download":['
+  for file in "$TEMP"/phase-download-*.json; do
+    [[ -f "$file" ]] || continue
+    printf '%s' "$comma"; cat "$file"; comma=,
+  done
+  printf ']'
+  for phase in verify extract switch; do
+    seconds=0
+    [[ ! -f "$TEMP/phase-$phase.seconds" ]] || seconds=$(awk '{s+=$1} END {print s+0}' "$TEMP/phase-$phase.seconds")
+    printf ',"%s":%s' "$phase" "$seconds"
+  done
+  printf '}'
+}
+mirror_download() (
+  local output="$1" url="$2" expected="$3" started="$4" name="$5"
+  # Private installer wraps curl for authenticated GitHub-only gh requests.
+  # Mirror payloads must bypass that wrapper and never inherit its credentials.
+  if declare -F tatwo_private_transport >/dev/null; then curl() { command curl "$@"; }; fi
+  { parallel_download "$output.mirror" "$url" || single_download "$output.mirror" "$url"; } || return 1
+  download_hash_matches "$output.mirror" "$expected" || return 1
+  mv "$output.mirror" "$output" || return 1
+  record_download "$name" mirror "$output" "$started" "$DOWNLOAD_PARTS"
+)
+retry_download() {
+  local output="$1" url="$2" expected='' source=github started=$SECONDS
+  DOWNLOAD_PARTS=1
+  if [[ -n "${TATWO_OS_OFFLINE_RELEASE:-}" ]]; then
+    curl -o "$output" "$url" || return 1
+    record_download "${url##*/}" prefetched "$output" "$started" 0; return
+  fi
+  [[ ! -f "$output.sha256" ]] || read -r expected _ < "$output.sha256" || true
+  local mirror="${TATWO_OS_MIRROR_BASE:-}"
+  if [[ "$mirror" == https://* && "$expected" =~ ^[[:xdigit:]]{64}$ ]]; then
+    # Mirror gets no GitHub credentials and never supplies control/checksum files.
+    if mirror_download "$output" "${mirror%/}/${url##*/}" "$expected" "$started" "${url##*/}"; then return 0; fi
+    rm -f "$output.mirror"; rm -rf "$output.mirror.parts"
+  fi
+  if parallel_download "$output" "$url"; then
+    if [[ -z "$expected" ]] || download_hash_matches "$output" "$expected"; then
+      record_download "${url##*/}" "$source" "$output" "$started" "$DOWNLOAD_PARTS"; return 0
+    fi
+    rm -f "$output" "$output.joining"
+    rm -rf "$output.parts"
+    return 1 # Verified range join was corrupt; do not amplify traffic with a full GET.
+  fi
+  single_download "$output" "$url" || return 1
+  [[ -z "$expected" ]] || download_hash_matches "$output" "$expected" || return 1
+  rm -rf "$output.parts"
+  record_download "${url##*/}" "$source" "$output" "$started" 1
 }
 ready_matches() {
   local name="$1" expected="$2" hash entry count=0
@@ -452,6 +585,8 @@ ready_matches() {
 download_full() {
 printf '正在下載 App 與 SHA-256 校驗檔…\n'
 ZIP="$TEMP/TATWO-OS.zip"
+DOWNLOAD_SIZE="${ZIP_SIZE:-0}"
+DOWNLOAD_STARTED=$SECONDS
 # 大檔下載：慢線路上 HTTP/2 串流常在中途被中斷（curl 92）；用 HTTP/1.1、續傳、對所有錯誤重試。
 if [[ -n "${TATWO_OS_PREFETCHED_ZIP:-}" ]]; then
   [[ -f "$TATWO_OS_PREFETCHED_ZIP" ]] || fail "預先下載的 App 不存在"
@@ -460,10 +595,13 @@ else
   retry_download "$ZIP" "$ZIP_URL"
 fi
 curl --proto '=https' --proto-redir '=https' -fSL --retry 2 -o "$TEMP/TATWO-OS.zip.sha256" "$SHA_URL"
+[[ -z "${TATWO_OS_PREFETCHED_ZIP:-}" ]] || record_download TATWO-OS.zip prefetched "$ZIP" "$DOWNLOAD_STARTED" 0
 read -r EXPECTED _ < "$TEMP/TATWO-OS.zip.sha256" || true
 [[ "${EXPECTED:-}" =~ ^[[:xdigit:]]{64}$ ]] || fail "SHA-256 校驗檔格式錯誤"
+verify_started=$SECONDS
 ACTUAL="$(shasum -a 256 "$ZIP")"
 ACTUAL="${ACTUAL%% *}"
+phase_time verify "$((SECONDS - verify_started))"
 [[ "$ACTUAL" == "$EXPECTED" ]] || fail "SHA-256 不符；未變更已安裝 App"
 ready_matches TATWO-OS.zip "$EXPECTED" || fail "install-ready SHA 不符"
 printf '校驗成功，正在解壓縮…\n'
@@ -473,22 +611,26 @@ while IFS= read -r ENTRY; do
   case "$ENTRY" in /*|../*|*/../*|*/..) fail "壓縮檔含不安全路徑" ;; esac
 done < "$TEMP/full.entries"
 # ditto 解壓會把 AppleDouble（._ 檔）還原成 xattr 而不是留成檔案；unzip 會留成檔案，破壞簽章封印。
+phase_started=$SECONDS
 ditto -x -k "$ZIP" "$STAGE/full"
+phase_time extract "$((SECONDS - phase_started))"
 SOURCE="$STAGE/full/TATWO OS.app"
 [[ -d "$SOURCE" && ! -L "$SOURCE" && -f "$SOURCE/Contents/Info.plist" ]] || fail "附件內沒有有效的 TATWO OS.app"
 }
 # SHA-256 checks transport integrity; a valid persistent signature checks app identity.
 verify_signed_app() {
-  local app="$1" details
+  local app="$1" details started=$SECONDS
   [[ -d "$app" && ! -L "$app" ]] || fail "App 路徑無效"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == ai.tatwo.tatwo2 ]] || fail "App 識別碼不符"
   codesign --verify --deep --strict "$app" || fail "App 簽章驗證失敗"
   details="$(codesign -dv "$app" 2>&1)" || fail "無法讀取簽章"
   [[ "$details" != *Signature=adhoc* ]] || fail "ad-hoc 版本需先完成一次簽章身分遷移；未變更既有 App"
+  phase_time verify "$((SECONDS - started))"
 }
 verify_continuity() {
-  local requirement
+  local requirement started
   verify_signed_app "$1"
+  started=$SECONDS
   requirement="$(codesign -dr - "$1" 2>&1 | sed -n 's/^designated => //p')"
   [[ -n "$requirement" ]] || fail "無法讀取既有簽章身分"
   # codesign -R 的引數若不以 = 開頭會被當成檔案路徑；= 才是 inline requirement 文字。
@@ -496,6 +638,7 @@ verify_continuity() {
   requirement="$(codesign -dr - "$2" 2>&1 | sed -n 's/^designated => //p')"
   [[ -n "$requirement" ]] || fail "無法讀取新版簽章身分"
   codesign --verify --strict -R "=$requirement" "$1" || fail "新版簽章要求不相容"
+  phase_time verify "$((SECONDS - started))"
 }
 # VERSION-BINDING-BEGIN
 verify_version_binding() {
@@ -521,10 +664,11 @@ JXA
 # VERSION-BINDING-END
 # RUNTIME-ASSEMBLY-BEGIN
 layer_download() {
-  local name="$1" cached="$2" output="$3" url="" checksum="" n=0 entry expected actual
+  local name="$1" cached="$2" output="$3" url="" checksum="" n=0 entry expected actual started=$SECONDS
+  local DOWNLOAD_SIZE=0
   while entry="$(plutil -extract "assets.$n.name" raw -o - "$TEMP/release.json" 2>/dev/null)"; do
     case "$entry" in
-      "$name") url="$(plutil -extract "assets.$n.browser_download_url" raw -o - "$TEMP/release.json")" ;;
+      "$name") url="$(plutil -extract "assets.$n.browser_download_url" raw -o - "$TEMP/release.json")"; DOWNLOAD_SIZE="$(plutil -extract "assets.$n.size" raw -o - "$TEMP/release.json" 2>/dev/null)" || DOWNLOAD_SIZE=0 ;;
       "$name.sha256") checksum="$(plutil -extract "assets.$n.browser_download_url" raw -o - "$TEMP/release.json")" ;;
     esac
     n=$((n + 1))
@@ -537,10 +681,13 @@ layer_download() {
   [[ "${expected:-}" =~ ^[[:xdigit:]]{64}$ ]] || return 1
   if [[ -n "$cached" ]]; then
     [[ -f "$cached" ]] && clone_copy "$cached" "$output" || return 1
+    record_download "$name" prefetched "$output" "$started" 0
   else
     retry_download "$output" "$url" || return 1
   fi
+  local verify_started=$SECONDS
   actual="$(shasum -a 256 "$output")" || return 1
+  phase_time verify "$((SECONDS - verify_started))"
   [[ "${actual%% *}" == "$expected" ]] || return 1
   ready_matches "$name" "$expected" || return 1
   [[ "$name" != TATWO-OS.manifest.json ]] || return 0
@@ -749,9 +896,11 @@ assemble_delta() (
   [[ "$from" =~ ^v[0-9]+([.][0-9]+){1,3}$ && "$tag" =~ ^v[0-9]+([.][0-9]+){1,3}$ && "$from" == "v${installed#v}" &&
      "$tag" == "$(plutil -extract tag_name raw -o - "$TEMP/release.json")" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   layer_download "TATWO-OS-delta-$from-$tag.zip" "$TATWO_OS_PREFETCHED_DELTA_ZIP" "$STAGE/delta.zip" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  local extract_started=$SECONDS
   delta_tree "$manifest" "$STAGE/delta.zip" "$DEST" "$STAGE/delta.app.disabled" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   SOURCE="$STAGE/delta.app.disabled"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE/Contents/Info.plist")" == "${tag#v}" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  phase_time extract "$((SECONDS - extract_started))"
   verify_signed_app "$SOURCE" || soft_fail "候選 App 簽章驗證失敗"
 ) 2>>"$STAGE/fallback.log"
 assemble_runtime() (
@@ -759,8 +908,11 @@ assemble_runtime() (
   fail() { soft_fail "$@"; }
   local meta="$SOURCE/Contents/Resources/runtime-layer.json" sha old_sha path parent n=0 reuse=1
   local paths=()
+  local phase_started
   layer_download TATWO-OS-app.zip "${TATWO_OS_PREFETCHED_APP_ZIP:-}" "$TEMP/app.zip" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  phase_started=$SECONDS
   ditto -x -k "$TEMP/app.zip" "$STAGE/split" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+  phase_time extract "$((SECONDS - phase_started))"
   [[ -d "$SOURCE" && ! -L "$SOURCE" && ! -L "$SOURCE/Contents" ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   sha="$(plutil -extract sha raw -o - "$meta")" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   [[ "$sha" =~ ^[0-9a-f]{64}$ && "$RUNTIME_NAMES" == *" TATWO-OS-runtime-${sha:0:12}.zip "* ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
@@ -780,7 +932,9 @@ assemble_runtime() (
   [[ "$n" -gt 0 ]] || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
   if [[ "$reuse" == 0 ]]; then
     layer_download "TATWO-OS-runtime-${sha:0:12}.zip" "${TATWO_OS_PREFETCHED_RUNTIME_ZIP:-}" "$TEMP/runtime.zip" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+    phase_started=$SECONDS
     ditto -x -k "$TEMP/runtime.zip" "$SOURCE/Contents" || soft_fail "差異／層級組裝檢查失敗（第 $LINENO 行）"
+    phase_time extract "$((SECONDS - phase_started))"
   fi
   for path in "${paths[@]}"; do
     if [[ "$reuse" == 1 ]]; then
@@ -810,6 +964,7 @@ else
   printf '此版本沒有大小清單，以壓縮大小 ×4 估計所需空間。\n' >&2
 fi
 check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"
+check_space "$TEMP" "$CANDIDATE_BYTES"
 SOURCE="$STAGE/split/TATWO OS.app"
 if [[ -n "${TATWO_OS_PREFETCHED_DELTA_ZIP:-}" && -n "${TATWO_OS_PREFETCHED_MANIFEST:-}" ]] && delta_preferred; then
   if assemble_delta; then SOURCE="$STAGE/delta.app.disabled"
@@ -847,6 +1002,7 @@ mv "$SOURCE" "$STAGE/TATWO OS.app"
 verify_version_binding "$STAGE/TATWO OS.app"
 check_space "$(dirname "$DEST")" "$CANDIDATE_BYTES"
 pgrep -x tatwo2 >/dev/null && fail "TATWO OS 已重新啟動；請退出後重試"
+SWITCH_STARTED=$SECONDS
 # Staging and destination share a filesystem; prepare before the one-rename gap.
 [[ ! -e "$DEST.new" && ! -L "$DEST.new" ]] || fail "保留的新版候選需先人工檢查"
 if [[ -e "$DEST.old" ]]; then mv "$DEST.old" "$STAGE/previous-retained.app.disabled"; fi
@@ -870,7 +1026,13 @@ LAUNCH_MESSAGE=installed
 "$LSREGISTER" -f "$DEST" || { LAUNCH_MESSAGE=registration_failed; true; }
 open "$DEST" || { LAUNCH_MESSAGE=open_failed; true; }
 INSTALL_SECONDS=$(($(date +%s) - INSTALL_STARTED_AT))
-printf '{"ok":true,"message":"%s","installSeconds":%s}\n' "$LAUNCH_MESSAGE" "$INSTALL_SECONDS" > "$STAGE/result.json"
+PHASES='{"download":[],"verify":0,"extract":0,"switch":0}'
+if declare -F phases_json >/dev/null; then
+  phase_time switch "$((SECONDS - ${SWITCH_STARTED:-SECONDS}))"
+  PHASES="$(phases_json)"
+fi
+printf '{"ok":true,"message":"%s","installSeconds":%s,"phases":%s}\n' "$LAUNCH_MESSAGE" "$INSTALL_SECONDS" "$PHASES" > "$STAGE/result.json"
+[[ -z "${TATWO_OS_PHASES_FILE:-}" ]] || printf '%s' "$PHASES" > "$TATWO_OS_PHASES_FILE"
 [[ -z "${TATWO_OS_TIMING_FILE:-}" ]] || printf '%s' "$INSTALL_SECONDS" > "$TATWO_OS_TIMING_FILE"
 [[ ! -e "$DEST.old" ]] || mv "$DEST.old" "$STAGE/previous.app.disabled"
 # EXIT archives and prunes this stage on both success and failure. The backup

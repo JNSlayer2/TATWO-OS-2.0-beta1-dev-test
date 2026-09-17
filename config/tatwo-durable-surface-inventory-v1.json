@@ -1,7 +1,8 @@
 {
-  "inventoryRevision": "2026-07-24.1",
+  "inventoryRevision": "2026-09-17.w84",
   "schemaVersion": 1,
   "surfaceIDs": [
+    "memory.global-notes",
     "os.constitution",
     "os.issue",
     "os.todo",

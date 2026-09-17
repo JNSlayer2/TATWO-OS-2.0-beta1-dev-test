@@ -116,6 +116,17 @@ const githubMCPEnvironment = {};
 if (mcpConfig?.engine === 'codex' && mcpConfig.servers && typeof mcpConfig.servers === 'object') {
   let index = 0;
   for (const [name, server] of Object.entries(mcpConfig.servers)) {
+    if (name === 'gbrain_allai' && typeof server?.command === 'string' && Array.isArray(server.args)) {
+      // OS-owned definition overrides the isolated legacy entry. No token in TOML or argv.
+      githubMCPArgs.push(
+        '-c', `mcp_servers.gbrain_allai.command=${JSON.stringify(server.command)}`,
+        '-c', `mcp_servers.gbrain_allai.args=${JSON.stringify(server.args.map(String))}`,
+        '-c', `mcp_servers.gbrain_allai.enabled=${(mcpConfig.enabled ?? []).includes(name)}`,
+        '-c', 'mcp_servers.gbrain_allai.env={}',
+        '-c', 'mcp_servers.gbrain_allai.env_vars=["TATWO_GBRAIN_TOKEN"]',
+      );
+      continue;
+    }
     if (!/^github-[A-Za-z0-9-]+$/.test(name) || !server || typeof server.command !== 'string') continue;
     const args = Array.isArray(server.args) ? server.args.map(String) : [];
     const token = (mcpConfig.enabled ?? []).includes(name) ? server.env?.GITHUB_PERSONAL_ACCESS_TOKEN : undefined;

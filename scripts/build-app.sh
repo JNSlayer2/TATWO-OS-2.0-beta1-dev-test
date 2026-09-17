@@ -12,7 +12,8 @@ if [[ "${1:-}" == "--check-inputs" ]]; then
     Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/Resources/BrowserBlocklists
     App/Sources/Tatwo2/Resources/os-upstream.md)
   for engine in claude codex grok; do inputs+=("Engines/$engine-sidecar/sidecar.mjs"); done
-  inputs+=(Engines/claude-sidecar/package.json Engines/browser-mcp/server.mjs Engines/os-mcp/server.mjs scripts/impact.mjs)
+  inputs+=(Engines/claude-sidecar/package.json Engines/browser-mcp/server.mjs Engines/os-mcp/server.mjs scripts/impact.mjs
+    Engines/gbrain-adapter/server.mjs Engines/gbrain-adapter/service.mjs scripts/bundle-gbrain.py)
   for input in "${inputs[@]}"; do
     [[ -e "$ROOT/$input" ]] || { echo "missing build input: $input" >&2; exit 1; }
   done
@@ -65,6 +66,8 @@ done
 cp -R "Engines/browser-mcp" "$CONTENTS/Resources/browser-mcp"
 # 內建派工 MCP（E1）同理。
 cp -R "Engines/os-mcp" "$CONTENTS/Resources/os-mcp"
+cp -R "Engines/gbrain-adapter" "$CONTENTS/Resources/gbrain-adapter"
+python3 -E "$ROOT/scripts/bundle-gbrain.py" prepare "$APP"
 # The one-shot code_impact implementation is shared with the standalone CLI.
 cp "scripts/impact.mjs" "$CONTENTS/Resources/os-mcp/impact.mjs"
 bash "$ROOT/scripts/stage-ipad-use-device.sh" \
@@ -131,11 +134,13 @@ if [[ -z "$SIGN_IDENTITY" ]]; then
 fi
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "sign: $SIGN_IDENTITY"
+  python3 -E "$ROOT/scripts/bundle-gbrain.py" finalize "$APP" "$SIGN_IDENTITY"
   python3 -E "$ROOT/scripts/runtime-sign.py" "$APP" "$SIGN_IDENTITY"
   bash "$ROOT/scripts/runtime-layer.sh" prepare "$APP"
   codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
 else
   echo "sign: ad-hoc（找不到開發憑證）"
+  python3 -E "$ROOT/scripts/bundle-gbrain.py" finalize "$APP" -
   python3 -E "$ROOT/scripts/runtime-sign.py" "$APP" -
   bash "$ROOT/scripts/runtime-layer.sh" prepare "$APP"
   codesign --force --sign - "$APP"

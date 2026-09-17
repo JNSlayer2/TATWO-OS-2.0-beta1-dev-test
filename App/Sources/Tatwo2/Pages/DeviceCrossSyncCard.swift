@@ -2,9 +2,8 @@
 import AppKit
 import SwiftUI
 
-// 設備分頁視覺結構（2026-08-14）：頂部設備卡 + ①版本同步 + ②資料同步。
-// ③Loops 派送與壓力在 DevicePressureMonitorCard。舊進度牆與證據失敗區塊已移除。
-// 所有動作皆一鍵真執行：App 只寫本機 intent 檔，由常駐 helper 代執行並回寫 receipt。
+// W77: the mounted surface is DeviceConsistencyPanel (read-only).
+// Legacy action helpers remain for compatibility, but are never mounted or polled here.
 
 enum TatwoSyncActionKind: String, Identifiable {
     case data = "system-pull"
@@ -245,21 +244,8 @@ struct DeviceCrossSyncCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            identityStrip
-            versionSyncSection
-            dataSyncSection
-            secondaryAdminSection
-        }
-        .task {
-            refreshVisibleState()
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled else { break }
-                refreshVisibleState()
-            }
-        }
-        .sheet(isPresented: $showAddDeviceSheet) { addDeviceSheet }
+        // Legacy action helpers below are not mounted. W77 never enqueues an intent.
+        DeviceConsistencyPanel()
     }
 
     // MARK: - Top identity cards

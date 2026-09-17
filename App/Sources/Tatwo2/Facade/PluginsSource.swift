@@ -16,6 +16,15 @@ enum PluginsSource {
         guard NativeStagingIsolation.validationError(environment) == nil else { return [] }
         guard !isExport(environment) else { return PluginsFixture.entries }
         if environment["TATWO2_SOURCETEST"] == "1" { return scanNow(environment: environment) }   // 無頭測試要同步看到真結果
+        if GBrainService.definition(environment: environment) != nil {
+            for engine in MCPEngine.allCases {
+                if let legacy = configuredServers(engine: engine, environment: environment)["gbrain_allai"],
+                   let command = legacy.command {
+                    GBrainService.adoptLegacy(["command": command, "args": legacy.args], environment: environment)
+                }
+            }
+            GBrainService.shared.start()
+        }
         // Staging starts from real selected roots, never a previous host cache.
         let cached = NativeStagingIsolation.isEnabled(environment) ? nil : readCache(environment: environment)
         DispatchQueue.global(qos: .utility).async {
@@ -26,8 +35,9 @@ enum PluginsSource {
         }
         // Cache only the expensive skill scan. MCP definitions and their liveness must not
         // resurrect stale registration/status text from an older App process.
-        return (cached?.filter { $0.kind == .skill }
-                ?? (NativeStagingIsolation.isEnabled(environment) ? [] : PluginsFixture.entries.filter { $0.kind == .skill }))
+        // W90：首次沒有快取就回空清單，等上面那輪背景 refreshNow 掃完再補；
+        // 乾淨安裝的第一屏不得拿 PluginsFixture 假技能充數。
+        return (cached?.filter { $0.kind == .skill } ?? [])
             + builtinEntries(environment: environment) + mcpEntries(environment: environment)
     }
 
@@ -128,10 +138,11 @@ enum PluginsSource {
         let githubNames = githubMCPAccounts(environment: environment).map {
             githubMCPName(username: $0.username)
         }
+        let brainNames = GBrainService.definition(environment: environment) == nil ? [] : ["gbrain_allai"]
         switch engine {
-        case .codex: return Array(Set(codexServerNames(environment: environment) + githubNames)).sorted()
-        case .claude: return Array(Set(Array(claudeConfiguredServers(environment: environment).keys) + githubNames)).sorted()
-        case .grok: return Array(configuredServers(engine: .grok, environment: environment).keys).sorted()
+        case .codex: return Array(Set(codexServerNames(environment: environment) + githubNames + brainNames)).sorted()
+        case .claude: return Array(Set(Array(claudeConfiguredServers(environment: environment).keys) + githubNames + brainNames)).sorted()
+        case .grok: return Array(Set(Array(configuredServers(engine: .grok, environment: environment).keys) + brainNames)).sorted()
         }
     }
 
@@ -203,11 +214,13 @@ enum PluginsSource {
     ) -> String? {
         guard NativeStagingIsolation.validationError(environment) == nil else { return nil }
         let enabled = effectiveEnabledNames(stored: stored, engine: engine, environment: environment)
+        let brain = GBrainService.definition(environment: environment)
         var object: [String: Any]
         switch engine {
         case .claude:
             let enabledSet = Set(enabled)
             var servers = claudeConfiguredServers(environment: environment)
+            if let brain { servers["gbrain_allai"] = brain }
             for (name, definition) in githubMCPServers(
                 environment: environment,
                 includeTokensFor: enabledSet)
@@ -217,16 +230,23 @@ enum PluginsSource {
             servers = servers.filter { enabledSet.contains($0.key) }
             object = ["engine": engine.rawValue, "servers": servers]
         case .codex:
+            var servers = githubMCPServers(environment: environment, includeTokensFor: Set(enabled))
+            if let brain { servers["gbrain_allai"] = brain }
             object = [
                 "engine": engine.rawValue,
                 "configured": mcpNames(for: engine, environment: environment),
                 "enabled": enabled,
-                "servers": githubMCPServers(
-                    environment: environment,
-                    includeTokensFor: Set(enabled)),
+                "servers": servers,
             ]
         case .grok:
-            object = ["engine": engine.rawValue, "configured": [], "enabled": []]
+            var servers: [String: Any] = [:]
+            for (name, definition) in configuredServers(engine: .grok, environment: environment) {
+                if let command = definition.command {
+                    servers[name] = ["command": command, "args": definition.args]
+                }
+            }
+            if let brain { servers["gbrain_allai"] = brain }
+            object = ["engine": engine.rawValue, "configured": Array(servers.keys), "enabled": enabled, "servers": servers]
         }
         if let threadID { object["threadID"] = threadID.uuidString }
         guard JSONSerialization.isValidJSONObject(object),
@@ -280,6 +300,7 @@ enum PluginsSource {
         guard !names.isEmpty else { return [:] }
         return livenessCache.resolve(key: probeKey(engine: engine, environment: environment), force: force) {
             var definitions = configuredServers(engine: engine, environment: environment)
+            if let brain = GBrainService.definition(environment: environment) { definitions["gbrain_allai"] = .init(brain) }
             for (name, object) in githubMCPServers(environment: environment, includeTokensFor: []) {
                 if engine != .grok, let object = object as? [String: Any] { definitions[name] = .init(object) }
             }

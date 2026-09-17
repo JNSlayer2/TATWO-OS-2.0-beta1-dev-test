@@ -2176,6 +2176,7 @@ struct TatwoPanelView: View {
     let initialSnapshot: TatwoAppSnapshot?
     let initialLiveQuotaSnapshot: LiveQuotaDeckSnapshot?
     @State private var chatModel: ChatPageModel?
+    @State private var onboardingReady = false
     // 啟動期磁碟解析狀態。resolving 走 first-frame shell，
     // main thread 不得為了它同步開檔（staging 65）；逾時必須走到
     // storageUnavailable，不得無限空白（staging 66）。
@@ -2202,6 +2203,9 @@ struct TatwoPanelView: View {
 
     var body: some View {
         Group {
+            if !onboardingReady {
+                OSOnboardingGate { onboardingReady = true }
+            } else {
             switch launch.state {
             case let .hydrated(hydration):
                 if let chatModel {
@@ -2229,9 +2233,10 @@ struct TatwoPanelView: View {
                     surface: surface,
                     initialSelection: initialSelection)
             }
+            }
         }
-        .task {
-            guard chatModel == nil else { return }
+        .task(id: onboardingReady) {
+            guard onboardingReady, chatModel == nil else { return }
             await Task.yield()
             guard !Task.isCancelled, chatModel == nil else { return }
             chatModel =
@@ -2240,8 +2245,8 @@ struct TatwoPanelView: View {
                         TatwoAppMCPRuntimeRegistry.state
                     })
         }
-        .task {
-            launch.start()
+        .task(id: onboardingReady) {
+            if onboardingReady { launch.start() }
         }
         // 使用者在 TCC 面板或系統設定按下允許後會回到本 App；此時被擋住的
         // open() 通常已經放行，重新倒數即可自動 hydrate，不需要使用者再點。

@@ -7,7 +7,187 @@ import SwiftUI
 enum SelfTest {
     @MainActor private static var headlessHostModel: ChatPageModel?
 
+    static func ruleGeneratorChecks() throws {
+        let fm = FileManager.default
+        let temporary = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory())
+        let root = temporary.appendingPathComponent("w79-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let runtime = root.appendingPathComponent("runtime/os-upstream.md").path
+        let environment = ["TATWO2_OS_ROOT": root.path, "TATWO2_OS_UPSTREAM_PATH": runtime,
+                           "TATWO2_BIND_TARGETS": "claude-cli=\(root.path)/CLAUDE.md,codex-cli=\(root.path)/AGENTS.md"]
+        func write(_ text: String, _ name: String) throws {
+            try Data(text.utf8).write(to: root.appendingPathComponent(name), options: .atomic)
+        }
+        func check(_ condition: @autoclosure () throws -> Bool, _ label: String) throws {
+            guard try condition() else { throw OSUpstreamBinding.failure("W79 " + label) }
+            print("W79TEST PASS \(label)")
+        }
+        let roles = """
+        | 角色 | 預設 |
+        |---|---|
+        | 主導 | Fable 5.1 |
+        | loops（整批施工） | GPT-6 |
+        | 細修 | Opus 5 |
+        | 機械工 | Grok 4.6 |
+        | 審查 | 另一家引擎（GPT 系優先） |
+        """
+        let constitution = RuleGenerator.sections.map {
+            "\($0.contains(".") ? "###" : "##") \($0). fixture\n" +
+            ($0 == "4" ? roles : $0 == "2.1" ? "**主設備＝fixture**" : "原文條文 \($0)") + "\n"
+        }.joined(separator: "\n") + "\n## 9. excluded\nDO NOT INCLUDE\n"
+        try write(constitution, "os.md")
+        let primaryID = "11111111-1111-4111-8111-111111111111"
+        let secondaryID = "22222222-2222-4222-8222-222222222222"
+        let date = Date(timeIntervalSince1970: 1_789_603_200)
+        let primary = DeviceIdentity(deviceID: primaryID, name: "fixture", hardwareModel: "fixture",
+                                     role: .primary, epoch: 1, primaryDeviceID: primaryID, updatedAt: date)
+        let secondary = DeviceIdentity(deviceID: secondaryID, name: "sample", hardwareModel: "fixture",
+                                       role: .secondary, epoch: 1, primaryDeviceID: primaryID, updatedAt: date)
+        let identityURL = root.appendingPathComponent("device.json")
+        try primary.encoded().write(to: identityURL)
+        let a = try RuleGenerator.generate(environment: environment, runtimePath: runtime, now: date)
+        let constitutionHash = RuleGenerator.hash(Data(constitution.utf8))
+        try check(a.contains("來源憲法 sha256=" + constitutionHash), "exact constitution hash")
+        try check(a.contains("身份 sha256=" + RuleGenerator.hash(Data(contentsOf: identityURL))), "exact identity hash")
+        try check(a.contains(roles) && !a.contains("DO NOT INCLUDE"), "verbatim section selection")
+        try write("\u{FEFF}" + constitution, "os.md")
+        let withBOM = try RuleGenerator.generate(environment: environment, runtimePath: runtime, now: date)
+        try check(withBOM.contains("來源憲法 sha256=" + RuleGenerator.hash(Data(contentsOf: root.appendingPathComponent("os.md")))),
+                  "source hash includes UTF8 BOM")
+        try write(constitution, "os.md")
+        let defaults = UltraworkRoleConfiguration.constitutionSection4
+        try check(defaults.lead == "fable-5.1" && defaults.loops == "gpt-6-astra" &&
+                  defaults.refinement == "opus-5" && defaults.mechanic == "grok-build", "W76 section4 defaults")
+        try secondary.encoded().write(to: identityURL)
+        let b = try RuleGenerator.generate(environment: environment, runtimePath: runtime, now: date)
+        try check(a != b && b.contains("來源憲法 sha256=" + constitutionHash) &&
+                  b.contains("sample") && b.contains("主設備：fixture"), "two local identities")
+        try check(!b.contains("身份 sha256=" + RuleGenerator.hash(primary.encoded())), "distinct identity hash")
+        // Force app initialization before installing synthetic hooks; no production read or write.
+        _ = OSUpstream.overridePath
+        RuleGenerator.configure(environment: environment)
+        defer {
+            OSUpstreamRefresh.generatedContent = nil
+            OSUpstreamBinding.runtimeSource = nil
+            OSUpstreamBinding.translatedBlock = nil
+            OSUpstreamBinding.externalTargets = nil
+        }
+        try check(OSUpstreamRefresh.applyOnLaunch(runtimePath: runtime) == .installed, "generated runtime installs")
+        let installed = try OSUpstreamBinding.readText(runtime)
+        try check(OSUpstreamRefresh.applyOnLaunch(runtimePath: runtime) == .unchanged, "generation timestamp stable")
+        let edited = installed + "\nUSER EDIT\n"
+        try Data(edited.utf8).write(to: URL(fileURLWithPath: runtime), options: .atomic)
+        try check(OSUpstreamRefresh.applyOnLaunch(runtimePath: runtime) == .keptUserEdited &&
+                  OSUpstreamRefresh.isUserEdited(runtimePath: runtime), "runtime marked edited")
+        try check(OSUpstreamBinding.readText(runtime) == edited, "runtime edit not overwritten")
+        guard let pending = try OSUpstreamRefresh.pendingUpdate(runtimePath: runtime) else {
+            throw OSUpstreamBinding.failure("missing generated diff")
+        }
+        try OSUpstreamRefresh.keepCustomVersion(pending, runtimePath: runtime)
+        try check(OSUpstreamRefresh.pendingUpdate(runtimePath: runtime) == nil &&
+                  OSUpstreamRefresh.isUserEdited(runtimePath: runtime), "keep remains edited")
+        _ = try OSUpstreamRefresh.applyBundledVersion(pending, runtimePath: runtime)
+        try check(!OSUpstreamRefresh.isUserEdited(runtimePath: runtime), "explicit apply adopts runtime")
+        let original = "\u{FEFF}Human rules\r\n<!-- TATWO_OS_UPSTREAM_BINDING_V1:BEGIN -->legacy<!-- TATWO_OS_UPSTREAM_BINDING_V1:END -->"
+        try write(original, "CLAUDE.md")
+        try write("Human codex rules\n", "AGENTS.md")
+        let plan = OSUpstreamBinding.preview(environment: environment)
+        try check(plan.error == nil && !plan.seed && plan.items.allSatisfy { $0.state == .unbound }, "binding preview is local runtime")
+        let report = OSUpstreamBinding.apply(plan, environment: environment)
+        try check(report.failure == nil && report.backups.count == 2, "binding confirmed backup write")
+        let aligned = OSUpstreamBinding.preview(environment: environment)
+        try check(aligned.items.allSatisfy { $0.state == .bound }, "binding readback consistent")
+        let target = plan.items[0].target
+        let bound = try OSUpstreamBinding.readText(target.path)
+        try check(bound.hasPrefix(original) && bound.contains(runtime) &&
+                  bound.contains("角色：secondary") && bound.contains("主設備：fixture"), "binding preserves human bytes and identity")
+        let changed = bound.replacingOccurrences(of: "每條新對話先讀", with: "手改每條新對話先讀")
+        try write(changed, "CLAUDE.md")
+        let manual = OSUpstreamBinding.preview(environment: environment)
+        try check(manual.items[0].state == .edited && !manual.items[0].diff.isEmpty, "block marked edited with diff")
+        try OSUpstreamBinding.keep(manual, environment: environment)
+        try check(OSUpstreamBinding.readText(target.path) == changed &&
+                  OSUpstreamBinding.preview(environment: environment).items[0].state == .edited, "keep block preserves edit")
+        let stale = OSUpstreamBinding.apply(aligned, environment: environment)
+        try check(stale.failure != nil && OSUpstreamBinding.readText(target.path) == changed, "stale preview cannot overwrite")
+        let repaired = OSUpstreamBinding.apply(manual, environment: environment)
+        try check(repaired.failure == nil, "explicit block apply")
+        try OSUpstreamBinding.removeBlock(target: target, reviewedText: OSUpstreamBinding.readText(target.path), environment: environment)
+        try check(Data(contentsOf: URL(fileURLWithPath: target.path)) == Data(original.utf8), "remove restores exact original bytes")
+        try check(OSUpstreamBinding.preview(environment: environment).items[0].state == .unbound, "explicit removal is unbound")
+        let other = plan.items[1].target
+        let composed = try OSUpstreamBinding.readText(other.path) + "\u{e9}\n"
+        try write(composed, "AGENTS.md")
+        let decomposed = composed.replacingOccurrences(of: "\u{e9}", with: "e\u{301}")
+        try write(decomposed, "AGENTS.md")
+        var refusedUnicodeChange = false
+        do { try OSUpstreamBinding.removeBlock(target: other, reviewedText: composed, environment: environment) }
+        catch { refusedUnicodeChange = true }
+        try check(refusedUnicodeChange && Data(contentsOf: URL(fileURLWithPath: other.path)) == Data(decomposed.utf8),
+                  "removal rejects Unicode-equivalent byte changes")
+        var deletedBlock = decomposed
+        if let range = try OSUpstreamBinding.blockRange(deletedBlock) { deletedBlock.removeSubrange(range) }
+        try write(deletedBlock, "AGENTS.md")
+        try check(OSUpstreamBinding.preview(environment: environment).items[1].state == .edited,
+                  "externally deleted block remains edited")
+        for translator in RuleTranslators.all {
+            let block = translator.managedBlock(source: try RuleGenerator.sources(environment: environment),
+                                                runtimePath: runtime, hash: RuleGenerator.hash(Data(installed.utf8)))
+            try check(block.contains(runtime) && block.contains(OSUpstreamBinding.beginMarker), "translator \(translator.engine)")
+        }
+        try check(GrokRuleTranslator().externalFile == nil, "external Grok unsupported without verified file")
+        // Source changes after preview must be detected even if runtime did not change.
+        let beforeChange = OSUpstreamBinding.preview(environment: environment)
+        try write(constitution + "\nChanged source\n", "os.md")
+        try check(OSUpstreamBinding.apply(beforeChange, environment: environment).failure != nil, "source changed after preview")
+        let malformed = "## 0. only\n"
+        try write(malformed, "os.md")
+        if case .failed = OSUpstreamRefresh.applyOnLaunch(runtimePath: runtime) {
+            print("W79TEST PASS missing source sections fail closed")
+        } else { throw OSUpstreamBinding.failure("incomplete constitution accepted") }
+    }
+
     @MainActor static func runIfRequested() {
+        #if DEBUG  // primaryTransferChecks／deviceDispatchChecks 只在 DEBUG 編譯（見 extension 內 #if DEBUG）
+        if let root = ProcessInfo.processInfo.environment["TATWO2_W83_TEST_ROOT"] {
+            do {
+                try primaryTransferChecks(root: URL(fileURLWithPath: root))
+                print("W83TEST SUMMARY failures=0"); exit(0)
+            } catch { print("W83TEST FAIL \(error)"); exit(1) }
+        }
+        #endif
+        if let root = ProcessInfo.processInfo.environment["TATWO2_W82_TEST_ROOT"] {
+            guard let live = ProcessInfo.processInfo.environment["TATWO2_LIVE_ROOT"],
+                  live.hasPrefix(root + "/") else {
+                print("W82TEST FAIL isolated TATWO2_LIVE_ROOT required"); exit(1)
+            }
+            do {
+                try onboardingChecks(root: URL(fileURLWithPath: root))
+                print("W82TEST SUMMARY failures=0"); exit(0)
+            } catch { print("W82TEST FAIL \(error)"); exit(1) }
+        }
+        if ProcessInfo.processInfo.environment["TATWO2_W81_TEST_ROOT"] != nil {
+            do { try distillCanvasChecks(); print("W81TEST SUMMARY failures=0"); exit(0) }
+            catch { print("W81TEST FAIL \(error)"); exit(1) }
+        }
+        if ProcessInfo.processInfo.environment["TATWO2_RULEGENERATORTEST"] == "1" {
+            do { try ruleGeneratorChecks(); print("W79TEST ALL PASS"); exit(0) }
+            catch { print("W79TEST FAILED \(error)"); exit(1) }
+        }
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["TATWO2_SELFTEST"] == "w78" {
+            do { try deviceDispatchChecks(); print("W78TEST SUMMARY failures=0\nW78TEST ALL PASS"); exit(0) }
+            catch { print("W78TEST FAIL \(error)"); exit(1) }
+        }
+        if ProcessInfo.processInfo.environment["TATWO2_W78_TEST_ROOT"] != nil {
+            do { try deviceDispatchChecks(); print("W78TEST SUMMARY failures=0"); exit(0) }
+            catch { print("W78TEST FAIL \(error)"); exit(1) }
+        }
+        #endif
+        if ProcessInfo.processInfo.environment["TATWO2_DEVICESTATUSTEST"] == "1" {
+            do { try deviceStatusReadOnlyChecks(); exit(0) }
+            catch { print("DEVICESTATUSTEST FAIL \(error)"); exit(1) }
+        }
         if ProcessInfo.processInfo.environment["TATWO2_SKILLREFRESHTEST"] == "1" {
             Task { @MainActor in
                 do { exit(try await skillRefreshChecks() ? 0 : 1) }
@@ -16,8 +196,30 @@ enum SelfTest {
             NSApplication.shared.run()
             return
         }
+        if ProcessInfo.processInfo.environment["TATWO2_EMPTYSTATETEST"] == "1" {
+            setvbuf(stdout, nil, _IOLBF, 0)
+            Task { @MainActor in
+                do { exit(try await emptyStateChecks() ? 0 : 1) }
+                catch { print("EMPTYSTATETEST ERROR \(error)"); exit(1) }
+            }
+            NSApplication.shared.run()
+            return
+        }
         if ProcessInfo.processInfo.environment["TATWO2_OSUPSTREAMREFRESHTEST"] == "1" {
             exit(runOSUpstreamRefreshTest() ? 0 : 1)
+        }
+        if let root = ProcessInfo.processInfo.environment["TATWO2_W89_TEST_ROOT"] {
+            guard let live = ProcessInfo.processInfo.environment["TATWO2_LIVE_ROOT"],
+                  live.hasPrefix(root + "/") else {
+                print("W89TEST FAIL isolated TATWO2_LIVE_ROOT required"); exit(1)
+            }
+            setvbuf(stdout, nil, _IOLBF, 0)
+            Task { @MainActor in
+                do { exit(try await spaceFromZeroChecks(root: URL(fileURLWithPath: root)) ? 0 : 1) }
+                catch { print("W89TEST ERROR \(error)"); exit(1) }
+            }
+            NSApplication.shared.run()
+            return
         }
         if ProcessInfo.processInfo.environment["TATWO2_PLANCANVASTEST"] == "1" {
             do { exit(try planCanvasChecks() ? 0 : 1) }
@@ -228,6 +430,162 @@ enum SelfTest {
               && !model.skillSuggestions.contains { $0.id == "w15e-refresh" })
         observer.cancel()
         print("SKILLREFRESHTEST RESULT failures=\(failures)")
+        return failures == 0
+    }
+
+    @MainActor private static func distillCanvasChecks() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let path = environment["TATWO2_W81_TEST_ROOT"], let tmp = environment["TMPDIR"] else {
+            throw DistillCanvas.Failure(reason: "missing_fixture_root")
+        }
+        let root = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        guard root.path.hasPrefix(URL(fileURLWithPath: tmp).resolvingSymlinksInPath().path + "/"),
+              FileManager.default.fileExists(atPath: root.appendingPathComponent("owned-fixture").path),
+              NativeStagingIsolation.isEnabled(environment),
+              NativeStagingIsolation.validationError(environment) == nil else {
+            throw DistillCanvas.Failure(reason: "unsafe_fixture_root")
+        }
+        func check(_ name: String, _ okay: Bool) throws {
+            guard okay else { throw DistillCanvas.Failure(reason: name) }
+            print("W81TEST PASS \(name)")
+        }
+        func rejects(_ action: () throws -> Void) -> Bool {
+            do { try action(); return false } catch { return true }
+        }
+        let body = DistillCanvas.headings.map { "## \($0)\n合成草稿，保留　空白與 emoji 🧪。" }.joined(separator: "\n\n")
+        if let rawDefinition = environment["TATWO2_W81_GBRAIN_DEFINITION"] {
+            let definition = try JSONSerialization.jsonObject(with: Data(rawDefinition.utf8)) as! [String: Any]
+            let final = try String(contentsOf: root.appendingPathComponent("gbrain-draft.txt"), encoding: .utf8)
+            let snapshot = DistillSubmission(threadID: UUID(), content: final, title: "Synthetic distillation",
+                                            slug: "distill/w81-fixture", gbrain: true, skillet: false)
+            let slug = try DistillGBrainClient.write(snapshot, definition: definition)
+            try check("real-gbrain-roundtrip", slug == snapshot.slug)
+            return
+        }
+        let entry = TatwoEntry()
+        try FileManager.default.createDirectory(at: entry.root, withIntermediateDirectories: true)
+        try Data("synthetic constitution".utf8).write(to: entry.constitution)
+        try Data("original skillet\n".utf8).write(to: entry.skillet)
+        let primaryID = "11111111-1111-4111-8111-111111111111"
+        try DeviceIdentity(deviceID: primaryID, name: "Fixture", hardwareModel: "Fixture", role: .primary,
+                           epoch: 1, primaryDeviceID: primaryID, updatedAt: Date()).encoded().write(to: entry.deviceJSON)
+        let live = URL(fileURLWithPath: environment["TATWO2_LIVE_ROOT"]!)
+        let engine = ChatLiveEngine(store: ChatLiveStore(root: live), environment: environment)
+        let id = engine.doc.selectedThreadID!
+        let model = ChatPageModel(environment: environment, botCoreFixture: (engine, BotStore(root: live)))
+        model.selectedThreadID = id
+        try check("exact-command-token", DistillCanvas.argument(in: "/蒸餾") == ""
+                  && DistillCanvas.argument(in: "/蒸餾\t架構") == "架構"
+                  && DistillCanvas.argument(in: "/蒸餾其他") == nil)
+        model.prompt = "/蒸餾"
+        model.send()
+        try check("bare-command-opens-canvas", model.activePlanArtifact?.kind == "distill"
+                  && model.planInspectorRequest != nil && model.activePlanArtifact?.state == .discussing)
+        model.prompt = "/蒸餾 架構與經驗"
+        model.send()
+        try check("argument-command-opens-canvas", model.activePlanArtifact?.objective == "架構與經驗")
+        engine.updatePlanFromReply(id, reply: ChatMessage(role: .assistant, text: "```tatwo-plan\n\(body)\n```"))
+        try check("ai-draft-exact", try engine.loadPlanArtifact(id)?.editableText() == body)
+        let revised = body.replacingOccurrences(of: "合成草稿", with: "第二次 AI 改寫")
+        engine.updatePlanFromReply(id, reply: ChatMessage(role: .assistant, text: "```tatwo-plan\n\(revised)\n```"))
+        try check("ai-multiple-rewrites", try engine.loadPlanArtifact(id)?.editableText() == revised)
+        let nested = body + "\n\n```swift\nlet x = 1\n```"
+        try check("nested-fence-preserved", DistillCanvas.draft(from: "```tatwo-plan\n\(nested)\n```") == nested)
+        try check("example-and-incomplete-fence-ignored",
+                  DistillCanvas.draft(from: "````markdown\n```tatwo-plan\n\(body)\n```\n````") == nil
+                  && DistillCanvas.draft(from: "```tatwo-plan\n\(body)") == nil)
+        let edited = "\n  " + revised + "  \r\n"
+        try check("human-edit-byte-exact", model.saveEditedPlanCanvasText(edited)
+                  && model.activePlanArtifact?.editableText() == edited && model.activePlanArtifact?.markdownExport() == edited)
+        let editedPlan = try engine.loadPlanArtifact(id)!
+        try check("raw-json-roundtrip", try JSONDecoder.tatwoPlanArtifact.decode(TatwoPlanArtifactV1.self,
+                    from: editedPlan.canonicalJSONData()).editableText() == edited)
+        model.confirmActivePlan()
+        try check("ordinary-confirm-cannot-submit", model.activePlanArtifact?.state == .discussing
+                  && !editedPlan.acceptsStart("開始")
+                  && engine.planContext(editedPlan, userText: "送出")?.contains("不呼叫任何寫入工具") == true)
+        model.selectedThreadID = nil
+        model.selectedThreadID = id
+        try check("close-reopen-no-write", try String(contentsOf: entry.skillet, encoding: .utf8) == "original skillet\n"
+                  && model.activePlanArtifact?.distillSubmission == nil)
+        let blank = DistillSubmission(threadID: id, content: body, title: "Fixture", slug: "distill/fixture",
+                                      gbrain: false, skillet: false)
+        try check("no-destination-rejected", rejects { try DistillCanvas.validate(blank, available: true) })
+        var gbrain = DistillSubmission(threadID: id, content: body, title: "Fixture", slug: "distill/fixture",
+                                       gbrain: true, skillet: false)
+        try check("unavailable-gbrain-rejected", rejects { try DistillCanvas.validate(gbrain, available: false) })
+        try check("gbrain-normalization-rejected", DistillCanvas.gbrainBodyProblem(edited) != nil
+                  && DistillCanvas.gbrainBodyProblem(body + "\n## Timeline\n2026") != nil
+                  && DistillCanvas.gbrainBodyProblem(body) == nil)
+        try check("unicode-byte-not-canonical-equality", !DistillCanvas.byteEqual("Cafe\u{301}", "Caf\u{e9}"))
+        gbrain = DistillSubmission(threadID: id, content: edited, title: "Fixture", slug: "distill/fixture",
+                                   gbrain: false, skillet: true)
+        try DistillCanvas.validate(gbrain, available: false)
+        try check("stale-snapshot-rejected", !model.saveDistillSubmission(editedPlan.planID, blank))
+        try check("human-submit-boundary", model.saveDistillSubmission(editedPlan.planID, gbrain))
+        let dispatch = DeviceDispatch(entry: entry, registry: DeviceRegistry(root: root.appendingPathComponent("devices"),
+                                      authorizedKeysURL: root.appendingPathComponent("authorized")),
+                                      rpc: { _, _, _ in throw DistillCanvas.Failure(reason: "unexpected_network") })
+        _ = try DistillCanvas.writeSkillet(gbrain.content, base: "original skillet\n", dispatch: dispatch)
+        try check("primary-write-byte-exact", try Data(contentsOf: entry.skillet) == Data(edited.utf8))
+        try check("stale-preview-no-overwrite", rejects {
+            _ = try DistillCanvas.writeSkillet("wrong", base: "original skillet\n", dispatch: dispatch)
+        })
+        try check("submitted-edit-blocked", !model.saveEditedPlanCanvasText("unexpected edit"))
+        engine.updatePlanFromReply(id, reply: ChatMessage(role: .assistant, text: "```tatwo-plan\n\(body)\n```"))
+        let reopened = ChatLiveEngine(store: ChatLiveStore(root: live), environment: environment)
+        try check("submission-survives-reopen-no-rewrite", try reopened.loadPlanArtifact(id)?.distillSubmission == gbrain
+                  && reopened.loadPlanArtifact(id)?.editableText() == edited)
+        var duplicate = gbrain; duplicate.id = UUID()
+        try check("repeat-submission-rejected", !model.saveDistillSubmission(editedPlan.planID, duplicate))
+    }
+
+    /// W89 從零：空 library 不是錯誤 → 建專案 → 建 bot → 建第一個領域 → domains==1、bot-spaces.json 一筆。
+    @MainActor private static func spaceFromZeroChecks(root: URL) async throws -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        var failures = 0
+        func check(_ name: String, _ ok: Bool) {
+            if !ok { failures += 1 }
+            print("W89TEST \(ok ? "PASS" : "FAIL") \(name)")
+        }
+        let live = URL(fileURLWithPath: environment["TATWO2_LIVE_ROOT"]!)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: true)
+        let engine = ChatLiveEngine(store: ChatLiveStore(root: live), environment: environment)
+        let store = BotStore(root: live)
+        await store.library.ready()
+        let model = ChatPageModel(environment: environment, botCoreFixture: (engine, store))
+        let controller = SpaceWorkspaceController.shared
+        await controller.load(model: model)
+        check("empty-library-is-not-error", controller.error == nil)
+        check("empty-library-state-empty", controller.isEmptyWorkspace && controller.state == nil)
+        var blocked = true
+        if case .ready = controller.creationOutcome() { blocked = false }
+        check("no-bot-blocks-creation", blocked)
+        if case .blocked(let outcome) = await controller.createDomain(name: "擋下的領域") {
+            check("no-bot-returns-needs-bot-or-project", outcome == .needsBot || outcome == .needsProject)
+        } else {
+            check("no-bot-returns-needs-bot-or-project", false)
+        }
+        let project = engine.newProject(name: "w89 合成專案", workdir: root.path)
+        model.selectedThreadID = engine.newThread(in: project, title: "w89 合成討論串")
+        model.document = engine.document
+        check("project-selected", model.selectedThreadProject?.workdir == root.path)
+        check("no-bot-still-needs-bot", controller.creationOutcome() == .needsBot)
+        let bot = try await store.createBot(name: "w89 合成 bot", role: "general",
+                                            systemPrompt: "", workdir: root.path)
+        check("bot-owner-ready", controller.creationOutcome() == .ready(ownerBotID: bot.id))
+        let created = await controller.createDomain(name: "  第一個領域  ")
+        check("created-trimmed-name", created == .created(id: controller.selectedDomainID ?? "", name: "第一個領域"))
+        check("controller-one-domain", controller.state?.domains.count == 1
+              && controller.isEmptyWorkspace == false && controller.error == nil)
+        let spacesFile = live.appendingPathComponent("bot-spaces.json")
+        let spaces = try JSONDecoder().decode([BotSpaceRecord].self, from: Data(contentsOf: spacesFile))
+        check("bot-spaces-json-single-record", spaces.count == 1 && spaces[0].name == "第一個領域"
+              && spaces[0].density == SpaceCreation.defaultDensity && spaces[0].ownerBotID == bot.id
+              && spaces[0].id.hasPrefix("space-"))
+        check("owner-bot-links-space", store.library.bot(id: bot.id)?.spaceIDs == [spaces[0].id])
+        check("blank-name-rejected", await controller.createDomain(name: "   ") == .failed("請輸入領域名稱"))
+        print("W89TEST SUMMARY failures=\(failures)")
         return failures == 0
     }
 
@@ -484,7 +842,7 @@ extension SelfTest {
 }
 
 extension SelfTest {
-    /// TATWO2_DOCSTEST=1：只在暫存 OS/docs 根驗文件清單、備份上限與上游即時重讀。
+    /// TATWO2_DOCSTEST=1：只在暫存入口驗文件清單、備份保留與上游即時重讀。
     @MainActor static func runDocumentsTest() {
         setvbuf(stdout, nil, _IOLBF, 0)
         let fileManager = FileManager.default
@@ -495,15 +853,17 @@ extension SelfTest {
         try? fileManager.createDirectory(at: osRoot, withIntermediateDirectories: true)
         try? fileManager.createDirectory(at: docsRoot, withIntermediateDirectories: true)
         setenv("TATWO2_OS_ROOT", osRoot.path, 1)
+        setenv("TATWO_OS_ROOT", osRoot.path, 1)
         setenv("TATWO2_DOCS_ROOT", docsRoot.path, 1)
         unsetenv("TATWO2_SKILLET_PATH")
         unsetenv("TATWO2_OS_UPSTREAM_PATH")
 
         let seeds = [
-            docsRoot.appendingPathComponent("os.md"): "# os\n原始規則\n",
+            osRoot.appendingPathComponent("os.md"): "# os\n原始規則\n",
             osRoot.appendingPathComponent("skillet.md"): "# skillet\n常用技能\n",
             docsRoot.appendingPathComponent("todo.md"): "# todo\n施工單\n",
             docsRoot.appendingPathComponent("issue.md"): "# issue\n待拍板\n",
+            docsRoot.appendingPathComponent("os-upstream.md"): "# upstream\n原始上游\n",
         ]
         for (url, text) in seeds {
             try? Data(text.utf8).write(to: url, options: .atomic)
@@ -548,12 +908,12 @@ extension SelfTest {
             }
             let backups = OSDocuments.backupURLs(id: "todo")
             check(
-                "備份最多 20 份且清最舊",
-                backups.count == 20
-                    && oldest.map { name in !backups.contains(where: { $0.lastPathComponent == name }) } == true,
-                "count=\(backups.count) oldestRemoved=\(oldest.map { name in !backups.contains(where: { $0.lastPathComponent == name }) } ?? false)")
+                "備份保留且不永久刪除",
+                backups.count == 25
+                    && oldest.map { name in backups.contains(where: { $0.lastPathComponent == name }) } == true,
+                "count=\(backups.count) oldestRetained=\(oldest.map { name in backups.contains(where: { $0.lastPathComponent == name }) } ?? false)")
         } catch {
-            check("備份最多 20 份且清最舊", false, "error=\(error.localizedDescription)")
+            check("備份保留且不永久刪除", false, "error=\(error.localizedDescription)")
         }
 
         do {
@@ -567,7 +927,7 @@ extension SelfTest {
             check("os-upstream 下一次 declaration 即時重讀", false, "error=\(error.localizedDescription)")
         }
 
-        try? fileManager.removeItem(at: base)
+        // Keep this synthetic TMPDIR fixture for verification; no permanent deletion.
         print(failed ? "DOCSTEST FAILED" : "DOCSTEST ALL PASS")
         exit(failed ? 1 : 0)
     }
@@ -2634,8 +2994,717 @@ extension SelfTest {
 }
 
 extension SelfTest {
+    #if DEBUG
+    /// W83: production state machine + W78 real SSH proofs, synthetic endpoints.
+    @MainActor static func primaryTransferChecks(root: URL) throws {
+        let fm = FileManager.default, env = ProcessInfo.processInfo.environment
+        guard let tmp = env["TMPDIR"], let live = env["TATWO2_LIVE_ROOT"],
+              DeviceIdentityStore.canonical(root).path.hasPrefix(DeviceIdentityStore.canonical(URL(fileURLWithPath: tmp)).path + "/"),
+              DeviceIdentityStore.canonical(URL(fileURLWithPath: live)).path.hasPrefix(DeviceIdentityStore.canonical(root).path + "/"),
+              fm.fileExists(atPath: root.appendingPathComponent("owned-fixture").path) else {
+            throw PrimaryTransfer.fail("isolated_fixture_and_live_root_required")
+        }
+        func check(_ label: String, _ value: Bool) throws {
+            guard value else { throw PrimaryTransfer.fail(label) }
+            print("W83TEST PASS \(label)")
+        }
+        func rejects(_ action: () throws -> Void) -> Bool {
+            do { try action(); return false } catch { return true }
+        }
+        func put(_ url: URL, _ text: String) throws {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: url, options: .atomic)
+        }
+        var ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"]
+        var entries: [TatwoEntry] = [], registries: [DeviceRegistry] = [], peers: [DeviceRecord] = []
+        var keys: [String] = []
+        for i in 0..<2 {
+            let base = root.appendingPathComponent("device-\(i)")
+            let entry = TatwoEntry(environment: ["TATWO_OS_ROOT": base.appendingPathComponent("entry").path], preference: nil)
+            try put(entry.constitution, "Synthetic constitution\n")
+            try put(entry.skillet, "Synthetic skills\n")
+            try put(entry.noteDir.appendingPathComponent("nested/note.md"), "Synthetic note\n")
+            try DeviceIdentity(deviceID: ids[i], name: "Synthetic \(i)", hardwareModel: "Synthetic",
+                               role: i == 0 ? .primary : .secondary, epoch: 7,
+                               primaryDeviceID: ids[0], updatedAt: Date()).encoded().write(to: entry.deviceJSON)
+            let key = base.appendingPathComponent("test-key").path
+            let result = try DeviceDispatch.run("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key])
+            try check("synthetic-key-\(i)", result.0 == 0)
+            let publicKey = try String(contentsOfFile: key + ".pub", encoding: .utf8)
+            let registry = DeviceRegistry(root: base.appendingPathComponent("live"),
+                                          authorizedKeysURL: base.appendingPathComponent("authorized_keys"))
+            peers.append(DeviceRecord(id: ids[i], name: "Synthetic \(i)", host: "192.0.2.\(10 + i)",
+                                      user: "fixture", sshPort: 22,
+                                      publicKeyFingerprint: try DeviceRegistry.fingerprint(publicKey: publicKey),
+                                      addedAt: Date(), lastSeenAt: Date(), workdirMap: [:]))
+            entries.append(entry); registries.append(registry); keys.append(key)
+        }
+        for i in 0..<2 {
+            let other = 1 - i
+            _ = try registries[i].add(peers[other])
+            _ = try registries[i].authorize(publicKey: String(contentsOfFile: keys[other] + ".pub", encoding: .utf8),
+                                            deviceID: ids[other])
+        }
+        var endpoints: [String: DeviceDispatch] = [:]
+        var offline = Set<String>(), loseACK = false, loseReply = false
+        var evidence = [
+            PrimaryTransfer.Evidence(signingNames: ["Synthetic Release"], brainMode: "pglite", brainHealthy: true, pages: 42),
+            PrimaryTransfer.Evidence(signingNames: ["Synthetic Release"], brainMode: "ssh-http", brainHealthy: true,
+                                     brainHostID: ids[0], pages: 42)
+        ]
+        func make(_ index: Int) -> DeviceDispatch {
+            DeviceDispatch(entry: entries[index], registry: registries[index],
+                           environment: ["TATWO2_SSH_KEY_PATH": keys[index]], retireBackup: { _ in },
+                           rpc: { peer, method, proof in
+                guard !offline.contains(peer.id), let endpoint = endpoints[peer.id] else {
+                    throw PrimaryTransfer.fail("現任主設備須在線才能移交")
+                }
+                if method == "device_status" {
+                    return try DeviceStatusReader.read(entry: endpoint.entry).jsonObject()
+                }
+                let (sender, payload) = try endpoint.authenticate(method: method, proof: proof)
+                if method == "dispatch_fetch" { return try DeviceDispatch.object(endpoint.offer(to: sender)) }
+                if method == "dispatch_ack" {
+                    if loseACK { loseACK = false; throw PrimaryTransfer.fail("synthetic_lost_ack") }
+                    try endpoint.recordACK(DeviceDispatch.decode(DeviceDispatch.Receipt.self, payload), sender: sender)
+                    if loseReply { loseReply = false; throw PrimaryTransfer.fail("synthetic_lost_reply_after_commit") }
+                    return ["recorded": true]
+                }
+                throw PrimaryTransfer.fail("unexpected_fixture_method")
+            }, evidence: {
+                var value = evidence[index]; value.acquiredAt = Date(); return value
+            })
+        }
+        let first = make(0), second = make(1)
+        endpoints[ids[0]] = first; endpoints[ids[1]] = second
+        func pump(_ destination: DeviceDispatch, _ source: DeviceRecord, count: Int = 3) throws {
+            for _ in 0..<count { try destination.pullTransfer(from: source) }
+        }
+        let staleBundle = try first.offer(to: ids[1])
+        offline.insert(ids[0])
+        try check("offline-primary-cannot-start", rejects { try second.beginTransfer(to: ids[0], signingName: "Synthetic Release") })
+        try check("offline-no-identity-write", try second.identity().epoch == 7 && second.identity().transfer == nil)
+        offline.remove(ids[0]); offline.insert(ids[1])
+        try check("offline-target-cannot-start", rejects { try first.beginTransfer(to: ids[1], signingName: "Synthetic Release") })
+        offline.remove(ids[1])
+        try first.beginTransfer(to: ids[1], signingName: "Synthetic Release")
+        loseACK = true
+        try check("prepare-ack-loss", rejects { try second.pullTransfer(from: peers[0]) })
+        try first.cancelPreparedTransfer()
+        try second.pullTransfer(from: peers[0])
+        try check("cancel-before-epoch-restores-normal-dispatch", try first.identity().transfer == nil
+                  && second.identity().transfer == nil && first.identity().epoch == 7 && second.identity().epoch == 7)
+        try first.beginTransfer(to: ids[1], signingName: "Synthetic Release")
+        try put(entries[1].noteDir.appendingPathComponent("nested/note.md"), "Mismatch")
+        try check("hash-mismatch-keeps-epoch", rejects { try second.pullTransfer(from: peers[0]) })
+        try check("hash-mismatch-no-partial-authority", try first.identity().epoch == 7 && second.identity().epoch == 7)
+        try put(entries[1].noteDir.appendingPathComponent("nested/note.md"), "Synthetic note\n")
+        loseReply = true
+        try check("lost-reply-after-commit", rejects { try second.pullTransfer(from: peers[0]) })
+        try check("old-primary-demoted-first", try first.identity().role == .secondary && first.identity().epoch == 8)
+        try check("committed-epoch-cannot-cancel", rejects { try first.cancelPreparedTransfer() })
+        loseACK = true
+        try check("interrupted-ack", rejects { try second.pullTransfer(from: peers[0]) })
+        try check("epoch-is-not-completion", try second.identity().role == .primary && first.identity().transfer?.complete == false)
+        // Recreate the destination: resume is entirely persisted, not in-memory state.
+        let restarted = make(1); endpoints[ids[1]] = restarted
+        try pump(restarted, peers[0])
+        try check("restart-retry-preserves-epoch", try restarted.identity().epoch == 8 && first.identity().transfer?.epochComplete == true)
+        try check("old-epoch-dispatch-rejected", rejects { _ = try restarted.apply(staleBundle, authenticatedPrimary: peers[0]) })
+        let copied = try first.identity().transfer!
+        var forged = staleBundle; forged.transfer = copied; forged.epoch = 8; forged.seq += 1000
+        forged.transfer?.epoch = 9
+        try check("forged-transfer-epoch-rejected", rejects { _ = try restarted.apply(forged, authenticatedPrimary: peers[0]) })
+        forged.transfer = copied; forged.epoch = 99
+        try check("bundle-record-epoch-mismatch-rejected", rejects { _ = try restarted.apply(forged, authenticatedPrimary: peers[0]) })
+        try first.updateTransfer(constitution: true)
+        try check("checkpoint-waits-for-readback", try first.identity().transfer?.constitutionComplete == false
+                  && first.identity().transfer?.epochComplete == true)
+        try pump(restarted, peers[0])
+        try check("constitution-source-switched", try restarted.identity().transfer?.sourceDeviceID == ids[1])
+        try put(entries[1].noteDir.appendingPathComponent("nested/note.md"), "New primary's legitimate edit\n")
+        let metadata = try first.offer(to: ids[1])
+        let metadataACK = try restarted.apply(metadata, authenticatedPrimary: peers[0])
+        first.synchronize() // A normal document receipt must not consume the metadata ACK.
+        try first.recordACK(metadataACK, sender: ids[1])
+        try pump(restarted, peers[0])
+        try check("post-switch-edits-preserved", try first.snapshot() == restarted.snapshot()
+                  && String(decoding: restarted.snapshot()["note/nested/note.md"]!, as: UTF8.self) == "New primary's legitimate edit\n")
+        try check("metadata-and-document-acks-independent", metadata.files.isEmpty && metadataACK.hashes.isEmpty)
+        evidence[1].pages = 41
+        try pump(restarted, peers[0])
+        try check("gbrain-page-mismatch-rejected", rejects { try first.updateTransfer(brain: .migrated) })
+        try check("failed-step-keeps-completed-items", try first.identity().transfer?.constitution == true && first.identity().transfer?.brain == .retained && first.identity().transfer?.brainVerified == false)
+        evidence[1].pages = 42
+        try pump(restarted, peers[0])
+        try first.updateTransfer(brain: .retained)
+        try pump(restarted, peers[0])
+        try check("retained-brain-explicitly-verified", try restarted.identity().transfer?.brain == .retained && restarted.identity().transfer?.brainVerified == true)
+        evidence[1].signingNames = []
+        try pump(restarted, peers[0]); try first.updateTransfer(release: true)
+        try check("missing-certificate", try first.identity().transfer?.release == .missingCertificate)
+        try check("completed-checkpoints-survive-next-step", try first.identity().transfer?.constitutionComplete == true
+                  && first.identity().transfer?.brainComplete == true)
+        evidence[1].signingNames = ["Synthetic Release"]; evidence[1].missingDependencies = ["node"]
+        try pump(restarted, peers[0]); try first.updateTransfer(release: true)
+        try check("missing-dependency", try first.identity().transfer?.release == .missingDependencies)
+        evidence[1].missingDependencies = []
+        try pump(restarted, peers[0]); try first.updateTransfer(release: true)
+        try pump(restarted, peers[0])
+        try check("four-items-mirrored-complete", try first.identity().transfer?.complete == true && restarted.identity().transfer?.complete == true)
+        let completed = try restarted.identity().transfer!
+        let host = NSHostingView(rootView: PrimaryTransferPanel(preview: try restarted.identity())
+            .padding(24).frame(width: 760, height: 620).background(Color.white).environment(\.colorScheme, .light))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 620),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = host; host.layoutSubtreeIfNeeded()
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { throw PrimaryTransfer.fail("snapshot_bitmap") }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw PrimaryTransfer.fail("snapshot_png") }
+        try png.write(to: root.appendingPathComponent("w83-four-statuses.png"))
+        print("W83TEST SNAPSHOT \(root.appendingPathComponent("w83-four-statuses.png").path)")
+        try restarted.beginTransfer(to: ids[0], signingName: "Synthetic Release")
+        try check("cannot-discard-prior-transfer-checkpoints", rejects { try restarted.cancelPreparedTransfer() })
+        try pump(first, peers[1])
+        try restarted.updateTransfer(constitution: true)
+        evidence[1].brainMode = "pglite"; evidence[1].brainHostID = nil
+        try pump(first, peers[1])
+        try restarted.updateTransfer(brain: .migrated, release: true)
+        try pump(first, peers[1])
+        try check("roundtrip-epoch-increments-twice", try first.identity().epoch == 9 && restarted.identity().epoch == 9)
+        try check("roundtrip-roles-restored", try first.identity().role == .primary && restarted.identity().role == .secondary)
+        try check("roundtrip-four-items-mirrored", try first.identity().transfer?.complete == true && restarted.identity().transfer?.complete == true)
+        try check("no-database-or-key-export", !fm.fileExists(atPath: entries[0].gbrainDir.path) && !fm.fileExists(atPath: entries[1].gbrainDir.path))
+        // Add a third paired observer only after the required two-device roundtrip.
+        // Epoch completion must wait for every registered device, not only the target.
+        ids.append("33333333-3333-4333-8333-333333333333")
+        let base = root.appendingPathComponent("device-2")
+        let observerEntry = TatwoEntry(environment: ["TATWO_OS_ROOT": base.appendingPathComponent("entry").path], preference: nil)
+        for (path, data) in try first.snapshot() {
+            try put(observerEntry.root.appendingPathComponent(path), String(decoding: data, as: UTF8.self))
+        }
+        try DeviceIdentity(deviceID: ids[2], name: "Synthetic observer", hardwareModel: "Synthetic",
+                           role: .secondary, epoch: 9, primaryDeviceID: ids[0], updatedAt: Date())
+            .encoded().write(to: observerEntry.deviceJSON)
+        let observerKey = base.appendingPathComponent("test-key").path
+        _ = try DeviceDispatch.run("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", observerKey])
+        let observerPublic = try String(contentsOfFile: observerKey + ".pub", encoding: .utf8)
+        let observerRegistry = DeviceRegistry(root: base.appendingPathComponent("live"),
+                                             authorizedKeysURL: base.appendingPathComponent("authorized_keys"))
+        peers.append(DeviceRecord(id: ids[2], name: "Synthetic observer", host: "192.0.2.12", user: "fixture",
+                                  sshPort: 22, publicKeyFingerprint: try DeviceRegistry.fingerprint(publicKey: observerPublic),
+                                  addedAt: Date(), lastSeenAt: Date(), workdirMap: [:]))
+        for i in 0..<2 {
+            _ = try registries[i].add(peers[2])
+            _ = try registries[i].authorize(publicKey: observerPublic, deviceID: ids[2])
+            _ = try observerRegistry.add(peers[i])
+            _ = try observerRegistry.authorize(publicKey: String(contentsOfFile: keys[i] + ".pub", encoding: .utf8), deviceID: ids[i])
+        }
+        entries.append(observerEntry); registries.append(observerRegistry); keys.append(observerKey)
+        evidence.append(.init(signingNames: [], brainMode: "ssh-http", brainHealthy: true, pages: 42))
+        let observer = make(2); endpoints[ids[2]] = observer
+        try first.beginTransfer(to: ids[1], signingName: "Synthetic Release")
+        try pump(restarted, peers[0])
+        try check("all-devices-ack-required", try first.identity().transfer?.epochComplete == false)
+        try check("no-stranded-observer-handback", rejects { try restarted.beginTransfer(to: ids[0], signingName: "Synthetic Release") })
+        try check("partial-epoch-blocks-source-switch", rejects { try first.updateTransfer(constitution: true) })
+        try pump(observer, peers[0]); try pump(restarted, peers[0])
+        try check("observer-receives-authority", try observer.identity().epoch == 10 && observer.identity().primaryDeviceID == ids[1])
+        try check("all-devices-epoch-converged", try first.identity().transfer?.epochComplete == true)
+        let oldProof = try observer.signed(method: "dispatch_fetch", payload: [:], recipient: ids[0])
+        var wrongRecord = try first.identity().transfer!
+        wrongRecord.participants = [ids[1]]
+        var wrongBundle = try first.offer(to: ids[1]); wrongBundle.transfer = wrongRecord
+        try check("participant-set-cannot-shrink", rejects { _ = try restarted.apply(wrongBundle, authenticatedPrimary: peers[0]) })
+        try restarted.beginTransfer(to: ids[0], signingName: "Synthetic Release")
+        try pump(first, peers[1]); try pump(observer, peers[1]); try pump(first, peers[1])
+        try check("incomplete-transfer-can-hand-back", try first.identity().role == .primary && first.identity().epoch == 11
+                  && restarted.identity().role == .secondary && observer.identity().epoch == 11)
+        try check("stale-rpc-after-handback-rejected", rejects { _ = try first.authenticate(method: "dispatch_fetch", proof: oldProof) })
+        try check("handback-does-not-fake-completion", try first.identity().transfer?.complete == false)
+        // Preserve a machine-readable two-device roundtrip artifact separately from
+        // the subsequent observer/recovery scenario.
+        try JSONEncoder().encode(completed).write(to: root.appendingPathComponent("two-device-completed.json"))
+    }
+
+    /// W78: two synthetic LIVE_ROOTs, real SSH signatures and real Git; the RPC
+    /// transport is injected in process (not a claim of a physical SSH E2E run).
+    @MainActor static func deviceDispatchChecks() throws {
+        let fm = FileManager.default
+        guard let raw = ProcessInfo.processInfo.environment["TATWO2_W78_TEST_ROOT"],
+              let tmp = ProcessInfo.processInfo.environment["TMPDIR"] else {
+            throw DeviceDispatch.Failure(reason: "missing_fixture_root")
+        }
+        let root = URL(fileURLWithPath: raw).resolvingSymlinksInPath()
+        guard root.path.hasPrefix(URL(fileURLWithPath: tmp).resolvingSymlinksInPath().path + "/"),
+              fm.fileExists(atPath: root.appendingPathComponent("owned-fixture").path) else {
+            throw DeviceDispatch.Failure(reason: "unsafe_fixture_root")
+        }
+        func check(_ name: String, _ value: Bool) throws {
+            guard value else { throw DeviceDispatch.Failure(reason: name) }
+            print("W78TEST PASS \(name)")
+        }
+        func rejects(_ action: () throws -> Void) -> Bool {
+            do { try action(); return false } catch { return true }
+        }
+        func put(_ url: URL, _ text: String) throws {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: url, options: .atomic)
+        }
+        func text(_ url: URL) throws -> String { try String(contentsOf: url, encoding: .utf8) }
+        func run(_ exe: String, _ args: [String], at directory: URL? = nil) throws -> String {
+            let (code, data) = try DeviceDispatch.run(exe, args, directory: directory)
+            guard code == 0 else { throw DeviceDispatch.Failure(reason: "fixture_process_failed") }
+            return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let pRoot = root.appendingPathComponent("primary"), sRoot = root.appendingPathComponent("secondary")
+        let pEntry = TatwoEntry(environment: ["TATWO_OS_ROOT": pRoot.appendingPathComponent("entry").path], preference: nil)
+        let sEntry = TatwoEntry(environment: ["TATWO_OS_ROOT": sRoot.appendingPathComponent("entry").path], preference: nil)
+        try put(pEntry.constitution, "constitution one"); try put(pEntry.skillet, "skillet one")
+        try put(pEntry.noteDir.appendingPathComponent("first.md"), "global note")
+        try put(sEntry.constitution, "old constitution"); try put(sEntry.skillet, "old skillet")
+        let pID = "11111111-1111-4111-8111-111111111111", sID = "22222222-2222-4222-8222-222222222222"
+        func identity(_ entry: TatwoEntry, _ id: String, _ role: DeviceRole, epoch: Int = 1) throws {
+            try DeviceIdentity(deviceID: id, name: "Fixture", hardwareModel: "Fixture",
+                role: role, epoch: epoch, primaryDeviceID: pID, updatedAt: Date()).encoded().write(to: entry.deviceJSON)
+        }
+        try identity(pEntry, pID, .primary); try identity(sEntry, sID, .secondary)
+        let key = root.appendingPathComponent("paired-key"), hostKey = root.appendingPathComponent("host-key")
+        _ = try run("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key.path])
+        _ = try run("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", hostKey.path])
+        let publicKey = try text(URL(fileURLWithPath: key.path + ".pub"))
+        let publicHost = try text(URL(fileURLWithPath: hostKey.path + ".pub"))
+        let pRegistry = DeviceRegistry(root: pRoot.appendingPathComponent("live"),
+            authorizedKeysURL: pRoot.appendingPathComponent("authorized_keys"))
+        let sRegistry = DeviceRegistry(root: sRoot.appendingPathComponent("live"),
+            authorizedKeysURL: sRoot.appendingPathComponent("authorized_keys"))
+        let fingerprint = try pRegistry.authorize(publicKey: publicKey, deviceID: sID)
+        let pPeer = DeviceRecord(id: pID, name: "Fixture", host: "127.0.0.1", user: "fixture", sshPort: 1,
+            publicKeyFingerprint: try DeviceRegistry.fingerprint(publicKey: publicHost),
+            addedAt: Date(), lastSeenAt: Date(), workdirMap: [:], role: .primary, epoch: 1)
+        let sPeer = DeviceRecord(id: sID, name: "Fixture", host: "127.0.0.1", user: "fixture", sshPort: 1,
+            publicKeyFingerprint: fingerprint, addedAt: Date(), lastSeenAt: Date(), workdirMap: [:], role: .secondary, epoch: 1)
+        _ = try pRegistry.add(sPeer); _ = try sRegistry.add(pPeer)
+        let primary = DeviceDispatch(entry: pEntry, registry: pRegistry, retireBackup: { _ in })
+        let linkedRoot = root.appendingPathComponent("linked-entry")
+        try fm.createSymbolicLink(at: linkedRoot, withDestinationURL: pEntry.root)
+        let linkedEntry = TatwoEntry(environment: ["TATWO_OS_ROOT": linkedRoot.path], preference: nil)
+        let linkedDispatch = DeviceDispatch(entry: linkedEntry, registry: pRegistry, retireBackup: { _ in })
+        try put(pEntry.noteDir.appendingPathComponent("nested/child.md"), "nested synthetic note")
+        let linkedSnapshot = try linkedDispatch.snapshot()
+        try check("symlink-entry-note-relative-paths",
+            linkedSnapshot["note/first.md"] == Data("global note".utf8)
+                && linkedSnapshot["note/nested/child.md"] == Data("nested synthetic note".utf8)
+                && linkedSnapshot == primary.snapshot())
+        var online = true, loseReply = false
+        var duringReply: (() throws -> Void)?
+        let secondary = DeviceDispatch(entry: sEntry, registry: sRegistry,
+            environment: ["TATWO2_SSH_KEY_PATH": key.path], retireBackup: { _ in },
+            rpc: { _, method, proof in
+                guard online else { throw DeviceDispatch.Failure(reason: "fixture_offline") }
+                let (sender, payload) = try primary.authenticate(method: method, proof: proof)
+                switch method {
+                case "dispatch_fetch": return try DeviceDispatch.object(primary.offer(to: sender))
+                case "dispatch_ack":
+                    try primary.recordACK(DeviceDispatch.decode(DeviceDispatch.Receipt.self, payload), sender: sender)
+                    return ["recorded": true]
+                case "document_propose":
+                    setenv("TATWO_OS_ROOT", pEntry.root.path, 1)
+                    defer { setenv("TATWO_OS_ROOT", sEntry.root.path, 1) }
+                    let result = try primary.inbox.receiveDocument(payload, sender: sender)
+                    if let hook = duringReply { duringReply = nil; try hook() }
+                    if loseReply { loseReply = false; throw DeviceDispatch.Failure(reason: "fixture_lost_reply") }
+                    return result
+                case "document_inspect": return ["text": try primary.inbox.inspectDocument(payload["id"] as! String)]
+                case "inbox_target": return ["repository": pEntry.repoRoot.path]
+                case "inbox_receive": return try primary.inbox.receiveBranch(payload, sender: sender)
+                default: throw DeviceDispatch.Failure(reason: "unexpected_fixture_rpc")
+                }
+            }, push: { repo, destination, commit, ref in
+                _ = try run("/usr/bin/git", ["-c", "core.hooksPath=/dev/null", "push", "--", destination, "\(commit):\(ref)"], at: repo)
+            })
+        let started = Date()
+        secondary.synchronize()
+        try check("dual-root-core-converged-under-60s", Date().timeIntervalSince(started) < 60
+            && secondary.receipts()[pID]?.phase == "converged" && primary.receipts()[sID]?.phase == "converged")
+        try check("readback-hashes", secondary.receipts()[pID]?.hashes == primary.receipts()[sID]?.hashes
+            && text(sEntry.constitution) == "constitution one"
+            && text(sEntry.noteDir.appendingPathComponent("first.md")) == "global note")
+        let attrs = try fm.attributesOfItem(atPath: sEntry.constitution.path)
+        try check("readonly-copies", (attrs[.posixPermissions] as? NSNumber)?.intValue == 0o444)
+        var bundle = try primary.offer(to: sID)
+        var rogue = pPeer; rogue.publicKeyFingerprint = fingerprint
+        try check("bad-primary-key", rejects { _ = try secondary.apply(bundle, authenticatedPrimary: rogue) })
+        bundle.epoch = 0
+        try check("old-epoch", rejects { _ = try secondary.apply(bundle, authenticatedPrimary: pPeer) })
+        bundle.epoch = 1; bundle.hashes["os.md"] = String(repeating: "0", count: 64)
+        try check("bad-content-hash", rejects { _ = try secondary.apply(bundle, authenticatedPrimary: pPeer) })
+        bundle = try primary.offer(to: sID)
+        let receipt = try secondary.apply(bundle, authenticatedPrimary: pPeer)
+        try primary.recordACK(receipt, sender: sID)
+        try check("replay-seq", rejects { _ = try secondary.apply(bundle, authenticatedPrimary: pPeer) })
+        let restarted = DeviceDispatch(entry: sEntry, registry: sRegistry, retireBackup: { _ in })
+        try check("replay-after-restart", rejects { _ = try restarted.apply(bundle, authenticatedPrimary: pPeer) })
+        let delayed = try primary.offer(to: sID)
+        let delayedACK = try secondary.apply(delayed, authenticatedPrimary: pPeer)
+        let ledgerURL = primary.root.appendingPathComponent("state.json")
+        var ledger = try JSONDecoder().decode(DeviceDispatch.State.self, from: Data(contentsOf: ledgerURL))
+        ledger.receipts[sID]?.attemptAt = Date().addingTimeInterval(-61)
+        ledger.receipts[sID]?.updated = Date().addingTimeInterval(-61)
+        try JSONEncoder().encode(ledger).write(to: ledgerURL, options: .atomic)
+        try check("late-ack-rejected", rejects { try primary.recordACK(delayedACK, sender: sID) }
+            && primary.receipts()[sID]?.phase == "timeout")
+        let proof = try secondary.signed(method: "dispatch_fetch", payload: [:])
+        var tampered = proof; tampered["signature"] = Data("not a signature".utf8).base64EncodedString()
+        try check("bad-client-proof", rejects { _ = try primary.authenticate(method: "dispatch_fetch", proof: tampered) })
+        _ = try primary.authenticate(method: "dispatch_fetch", proof: proof)
+        try check("replayed-client-proof", rejects { _ = try primary.authenticate(method: "dispatch_fetch", proof: proof) })
+        let revokedProof = try secondary.signed(method: "dispatch_fetch", payload: [:])
+        try pRegistry.removeAuthorizedKey(deviceID: sID)
+        try check("revoked-client-key", rejects { _ = try primary.authenticate(method: "dispatch_fetch", proof: revokedProof) })
+        _ = try pRegistry.authorize(publicKey: publicKey, deviceID: sID)
+        let known = root.appendingPathComponent("known_hosts")
+        try put(known, "[127.0.0.1]:1 " + publicKey)
+        try check("host-pin-mismatch", rejects {
+            _ = try RemoteHostLink(environment: ["TATWO2_KNOWN_HOSTS": known.path])
+                .callPinned(device: pPeer, method: "dispatch_fetch")
+        })
+        try put(pEntry.noteDir.appendingPathComponent("blocked/item.md"), "new note")
+        let outside = root.appendingPathComponent("outside")
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: sEntry.noteDir.appendingPathComponent("blocked"), withDestinationURL: outside)
+        bundle = try primary.offer(to: sID)
+        try check("interruption-not-converged", rejects { _ = try secondary.apply(bundle, authenticatedPrimary: pPeer) }
+            && secondary.receipts()[pID]?.phase != "converged")
+        try check("timeout-visible", secondary.receipts(now: Date().addingTimeInterval(61))[pID]?.phase == "timeout")
+        try fm.removeItem(at: sEntry.noteDir.appendingPathComponent("blocked")) // owned synthetic symlink only
+        secondary.synchronize()
+        try check("fresh-seq-retry-readback", secondary.receipts()[pID]?.phase == "converged"
+            && text(sEntry.noteDir.appendingPathComponent("blocked/item.md")) == "new note")
+        online = false; try put(pEntry.skillet, "offline change")
+        secondary.synchronize()
+        try check("offline-no-false-convergence", text(sEntry.skillet) == "skillet one"
+            && secondary.receipts()[pID]?.phase != "converged")
+        online = true; secondary.synchronize()
+        try check("reconnect-catches-up", text(sEntry.skillet) == "offline change"
+            && primary.receipts()[sID]?.phase == "converged")
+        try fm.moveItem(at: pEntry.noteDir.appendingPathComponent("first.md"), to: root.appendingPathComponent("retired-first.md"))
+        secondary.synchronize()
+        let archive = sEntry.root.appendingPathComponent("archive")
+        let archived = fm.enumerator(at: archive, includingPropertiesForKeys: nil)?.allObjects as? [URL] ?? []
+        try check("removed-note-archived-not-deleted", !fm.fileExists(atPath: sEntry.noteDir.appendingPathComponent("first.md").path)
+            && archived.contains(where: { $0.pathExtension == "note" && (try? text($0)) == "global note" })
+            && secondary.receipts()[pID]?.phase == "converged")
+        try fm.moveItem(at: archive, to: root.appendingPathComponent("held-archive"))
+        try fm.createSymbolicLink(at: archive, withDestinationURL: outside)
+        try fm.moveItem(at: pEntry.noteDir.appendingPathComponent("blocked/item.md"), to: root.appendingPathComponent("retired-item.md"))
+        secondary.synchronize()
+        try check("applied-is-not-converged", secondary.receipts()[pID]?.phase == "applied"
+            && text(sEntry.noteDir.appendingPathComponent("blocked/item.md")) == "new note")
+        try fm.removeItem(at: archive) // synthetic symlink
+        try fm.moveItem(at: root.appendingPathComponent("held-archive"), to: archive)
+        secondary.synchronize()
+        try check("archive-retry-full-manifest", secondary.receipts()[pID]?.phase == "converged"
+            && !fm.fileExists(atPath: sEntry.noteDir.appendingPathComponent("blocked/item.md").path))
+
+        // C document CAS, one-file commit, durable offline proposal and three-way conflict.
+        try put(pEntry.repoDocs.appendingPathComponent("todo.md"), "todo base")
+        try put(pEntry.repoDocs.appendingPathComponent("issue.md"), "issue base")
+        try put(pEntry.repoRoot.appendingPathComponent("other"), "other base")
+        try put(pEntry.repoRoot.appendingPathComponent("second"), "second base")
+        func git(_ repo: URL, _ args: [String]) throws -> String { try run("/usr/bin/git", args, at: repo) }
+        _ = try git(pEntry.repoRoot, ["init", "-b", "beta1/integration"])
+        _ = try git(pEntry.repoRoot, ["config", "user.email", "test@example.invalid"])
+        _ = try git(pEntry.repoRoot, ["config", "user.name", "Fixture"])
+        _ = try git(pEntry.repoRoot, ["add", "."]); _ = try git(pEntry.repoRoot, ["commit", "-m", "fixture"])
+        _ = try run("/usr/bin/git", ["clone", "--quiet", pEntry.repoRoot.path, sEntry.repoRoot.path])
+        _ = try git(sEntry.repoRoot, ["checkout", "-b", "fixture-branch"])
+        try put(pEntry.repoRoot.appendingPathComponent("other"), "other staged")
+        _ = try git(pEntry.repoRoot, ["add", "other"])
+        try put(pEntry.repoRoot.appendingPathComponent("other"), "other unstaged")
+        let staged = try git(pEntry.repoRoot, ["diff", "--cached", "--", "other"])
+        setenv("TATWO_OS_ROOT", sEntry.root.path, 1)
+        _ = try secondary.inbox.enqueue(id: "todo", text: "todo changed", base: "todo base")
+        secondary.inbox.flush()
+        try check("online-doc-source-commit", text(pEntry.repoDocs.appendingPathComponent("todo.md")) == "todo changed"
+            && text(sEntry.repoDocs.appendingPathComponent("todo.md")) == "todo changed"
+            && git(pEntry.repoRoot, ["log", "-1", "--format=%s", "--", "docs/todo.md"]).contains(sID))
+        try check("other-staged-and-worktree-unchanged", git(pEntry.repoRoot, ["diff", "--cached", "--", "other"]) == staged
+            && text(pEntry.repoRoot.appendingPathComponent("other")) == "other unstaged")
+        online = false
+        _ = try secondary.inbox.enqueue(id: "issue", text: "queued issue", base: "issue base")
+        secondary.inbox.flush()
+        try check("offline-doc-originals-unchanged", text(pEntry.repoDocs.appendingPathComponent("issue.md")) == "issue base"
+            && text(sEntry.repoDocs.appendingPathComponent("issue.md")) == "issue base")
+        online = true; loseReply = true; secondary.inbox.flush()
+        let count = try git(pEntry.repoRoot, ["rev-list", "--count", "HEAD"])
+        secondary.inbox.flush()
+        try check("lost-reply-idempotent-retry", git(pEntry.repoRoot, ["rev-list", "--count", "HEAD"]) == count
+            && text(sEntry.repoDocs.appendingPathComponent("issue.md")) == "queued issue")
+        _ = try secondary.inbox.enqueue(id: "todo", text: "proposed choice", base: "todo changed")
+        try put(pEntry.repoDocs.appendingPathComponent("todo.md"), "primary concurrent")
+        secondary.inbox.flush()
+        try check("conflict-both-originals-unchanged", text(pEntry.repoDocs.appendingPathComponent("todo.md")) == "primary concurrent"
+            && text(sEntry.repoDocs.appendingPathComponent("todo.md")) == "todo changed"
+            && secondary.inbox.proposals().last?.status == "conflict")
+        if let pending = secondary.inbox.proposals().last {
+            try secondary.inbox.resolve(id: pending.id, useProposal: false); secondary.inbox.flush()
+        }
+        try check("user-choice-required", text(sEntry.repoDocs.appendingPathComponent("todo.md")) == "primary concurrent")
+        _ = try secondary.inbox.enqueue(id: "issue", text: "new proposal", base: "queued issue")
+        try put(sEntry.repoDocs.appendingPathComponent("issue.md"), "local concurrent")
+        secondary.inbox.flush()
+        try check("local-conflict-before-primary-write", text(pEntry.repoDocs.appendingPathComponent("issue.md")) == "queued issue"
+            && text(sEntry.repoDocs.appendingPathComponent("issue.md")) == "local concurrent"
+            && secondary.inbox.proposals().last?.status == "conflict")
+        _ = try secondary.inbox.enqueue(id: "todo", text: "first flight", base: "primary concurrent")
+        let inFlightID = secondary.inbox.proposals().last?.id
+        duringReply = {
+            _ = try secondary.inbox.enqueue(id: "todo", text: "newer draft", base: "primary concurrent")
+        }
+        secondary.inbox.flush()
+        try check("inflight-draft-not-lost", secondary.inbox.proposals().last?.text == "newer draft"
+            && secondary.inbox.proposals().last?.id != inFlightID
+            && text(sEntry.repoDocs.appendingPathComponent("todo.md")) == "primary concurrent"
+            && text(pEntry.repoDocs.appendingPathComponent("todo.md")) == "first flight")
+
+        // The submission workflow executes a real local Git push as its injected
+        // transport; source HEAD/index/status bytes must be identical afterwards.
+        let head = try git(sEntry.repoRoot, ["rev-parse", "HEAD"])
+        let index = try Data(contentsOf: sEntry.repoRoot.appendingPathComponent(".git/index"))
+        let work = try git(sEntry.repoRoot, ["diff", "--binary"])
+        _ = try secondary.inbox.submit(message: "synthetic submission")
+        try check("submission-no-source-mutation", git(sEntry.repoRoot, ["rev-parse", "HEAD"]) == head
+            && Data(contentsOf: sEntry.repoRoot.appendingPathComponent(".git/index")) == index
+            && git(sEntry.repoRoot, ["diff", "--binary"]) == work)
+        try check("primary-inbox-receipt", primary.inbox.branches().last?.commit == head
+            && primary.inbox.branches().last?.sender == sID)
+
+        // W81 deliberately uses the review-only inbox, not document ACK mirroring.
+        let localSkillet = try text(sEntry.skillet), primarySkillet = try text(pEntry.skillet)
+        let distillText = " \n" + DistillCanvas.headings.map { "## \($0)\n合成蒸餾　內容  " }.joined(separator: "\n\n") + "\n"
+        _ = try DistillCanvas.writeSkillet(distillText, base: localSkillet, dispatch: secondary)
+        guard let receipt = primary.inbox.branches().last else { throw DeviceDispatch.Failure(reason: "w81_receipt_missing") }
+        let (distillCode, distillBytes) = try DeviceDispatch.run("/usr/bin/git",
+            ["show", "\(receipt.commit):skillet.md"], directory: pEntry.repoRoot)
+        try check("w81-proposal-in-primary-inbox", receipt.branch.contains("/distill/") && receipt.sender == sID)
+        try check("w81-proposal-byte-exact", distillCode == 0 && distillBytes == Data(distillText.utf8))
+        try check("w81-both-skillets-unchanged", text(sEntry.skillet) == localSkillet && text(pEntry.skillet) == primarySkillet)
+        try check("w81-source-worktree-unchanged", git(sEntry.repoRoot, ["rev-parse", "HEAD"]) == head
+            && Data(contentsOf: sEntry.repoRoot.appendingPathComponent(".git/index")) == index
+            && git(sEntry.repoRoot, ["diff", "--binary"]) == work)
+
+        // Use exactly the pull_thread production collector, then W72's atomic writer.
+        let thread = UUID(), artifacts = root.appendingPathComponent("artifacts")
+        let folder = artifacts.appendingPathComponent(thread.uuidString)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try put(pEntry.repoRoot.appendingPathComponent("second"), "second changed")
+        let artifact = TurnArtifact(path: "other", kind: "file", claimed: true, exists: true,
+            sha256: DeviceDispatch.hash(Data("other unstaged".utf8)))
+        let second = TurnArtifact(path: "second", kind: "file", claimed: true, exists: true,
+            sha256: DeviceDispatch.hash(Data("second changed".utf8)))
+        let turn = TurnArtifactIndex(threadID: thread, turnID: "fixture", messageID: nil,
+            endedAt: Date(), artifacts: [artifact, second], truncated: false)
+        try JSONEncoder().encode(turn).write(to: folder.appendingPathComponent("fixture.json"))
+        let files = try OSAgentBridge.pullThreadFiles(threadID: thread, artifactsRoot: artifacts, workdir: pEntry.repoRoot.path)
+        try check("pull-thread-provenance", files.map(\.relativePath) == ["other", "second"])
+        try put(sEntry.repoRoot.appendingPathComponent("other"), "local conflict")
+        try check("pull-conflict-no-overwrite", rejects {
+            try RemoteThreadTransfer.write(files, to: sEntry.repoRoot.path, retire: { _ in })
+        } && text(sEntry.repoRoot.appendingPathComponent("other")) == "local conflict")
+        try check("pull-batch-all-or-none", text(sEntry.repoRoot.appendingPathComponent("second")) == "second base")
+        // Source baseline is HEAD, as in the existing push/merge path.
+        let baseData = try DeviceDispatch.run("/usr/bin/git", ["show", "HEAD:other"], directory: pEntry.repoRoot).1
+        try baseData.write(to: sEntry.repoRoot.appendingPathComponent("other"))
+        try RemoteThreadTransfer.write(files, to: sEntry.repoRoot.path, retire: { _ in })
+        try check("pull-files-arrive", text(sEntry.repoRoot.appendingPathComponent("other")) == "other unstaged"
+            && text(sEntry.repoRoot.appendingPathComponent("second")) == "second changed")
+        let invalid = TurnArtifact(path: "../outside", kind: "file", claimed: true, exists: true,
+            sha256: DeviceDispatch.hash(Data("outside".utf8)))
+        let unsafe = TurnArtifactIndex(threadID: thread, turnID: "unsafe", messageID: nil,
+            endedAt: Date(), artifacts: [invalid], truncated: false)
+        try JSONEncoder().encode(unsafe).write(to: folder.appendingPathComponent("unsafe.json"))
+        try check("pull-source-boundary", rejects {
+            _ = try OSAgentBridge.pullThreadFiles(threadID: thread, artifactsRoot: artifacts, workdir: pEntry.repoRoot.path)
+        })
+    }
+
+    /// W72: synthetic TMPDIR-only fixtures. No device registry, home, SSH, or Trash I/O.
+    @MainActor static func runW72RemoteTest() {
+        let fm = FileManager.default
+        var failures = 0
+        func check(_ name: String, _ ok: Bool) {
+            print("W72TEST \(ok ? "PASS" : "FAIL") \(name)")
+            if !ok { failures += 1 }
+        }
+        func rejected(_ action: () throws -> Void) -> Bool {
+            do { try action(); return false } catch { return true }
+        }
+        do {
+            guard let raw = ProcessInfo.processInfo.environment["TATWO2_W72_TEST_ROOT"] else { exit(1) }
+            let root = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL
+            guard let tempPath = ProcessInfo.processInfo.environment["TMPDIR"] else { exit(1) }
+            let temp = URL(fileURLWithPath: tempPath).resolvingSymlinksInPath().standardizedFileURL
+            guard root.path.hasPrefix(temp.path + "/"), fm.fileExists(atPath: root.appendingPathComponent("owned-fixture").path) else {
+                print("W72TEST FAIL unsafe fixture root"); exit(1)
+            }
+            let sender = root.appendingPathComponent("sender"), receiver = root.appendingPathComponent("receiver")
+            try fm.createDirectory(at: sender, withIntermediateDirectories: true)
+            try fm.createDirectory(at: receiver, withIntermediateDirectories: true)
+            func put(_ root: URL, _ name: String, _ text: String) throws {
+                try Data(text.utf8).write(to: root.appendingPathComponent(name))
+            }
+            func get(_ root: URL, _ name: String) throws -> Data { try Data(contentsOf: root.appendingPathComponent(name)) }
+            func git(_ args: [String]) throws {
+                let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                p.arguments = ["-C", sender.path] + args
+                p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+                try p.run(); p.waitUntilExit()
+                guard p.terminationStatus == 0 else { throw RemoteThreadTransfer.TransferError.unreadableFile("fixture git") }
+            }
+            try git(["init"]); try git(["config", "user.email", "test@example.invalid"])
+            try git(["config", "user.name", "W72 fixture"])
+            try put(sender, "owned.txt", "base"); try put(sender, "unrelated.txt", "base unrelated")
+            try git(["add", "."]); try git(["commit", "-m", "fixture"])
+            try put(sender, "owned.txt", "edited"); try put(sender, "unrelated.txt", "unrelated dirty")
+            try put(sender, "new file.txt", "new content")
+            try put(receiver, "owned.txt", "base")
+            let thread = UUID(), other = UUID()
+            let artifacts = root.appendingPathComponent("artifacts")
+            func index(_ id: UUID, _ name: String, _ rows: [TurnArtifact], date: Date = Date()) throws {
+                let folder = artifacts.appendingPathComponent(id.uuidString)
+                try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+                let value = TurnArtifactIndex(threadID: id, turnID: name, messageID: nil, endedAt: date, artifacts: rows, truncated: false)
+                try JSONEncoder().encode(value).write(to: folder.appendingPathComponent(name + ".json"))
+            }
+            try index(thread, "first", [TurnArtifact(path: "owned.txt", kind: "file", claimed: true, exists: true,
+                sha256: RemoteThreadTransfer.digest(try get(sender, "owned.txt")))], date: Date(timeIntervalSince1970: 1))
+            try index(thread, "second", [TurnArtifact(path: "unrelated.txt", kind: "file", claimed: false, exists: true,
+                sha256: RemoteThreadTransfer.digest(try get(sender, "unrelated.txt")))])
+            try index(other, "other", [TurnArtifact(path: "new file.txt", kind: "file", claimed: true, exists: true,
+                sha256: RemoteThreadTransfer.digest(try get(sender, "new file.txt")))])
+            let candidates = try RemoteThreadTransfer.candidates(threadID: thread, artifactsRoot: artifacts, workdir: sender.path)
+            let paths = candidates.filter(\.automatic).map(\.path)
+            check("thread-scope", paths == ["owned.txt"] && candidates.filter { !$0.automatic }.map(\.path) == ["unrelated.txt"])
+            check("unknown-thread-empty", try RemoteThreadTransfer.candidates(threadID: UUID(), artifactsRoot: artifacts, workdir: sender.path).isEmpty)
+            let bases = try RemoteThreadTransfer.sourceBaselines(in: sender.path, paths: ["owned.txt", "new file.txt"])
+            check("source-baseline", bases["owned.txt"] == RemoteThreadTransfer.digest(Data("base".utf8)) && bases["new file.txt"] == RemoteThreadTransfer.missing)
+            let peer = try RemoteThreadTransfer.baselines(paths: paths, in: receiver.path)
+            let files = try RemoteThreadTransfer.changedFiles(in: sender.path, paths: paths, baselines: peer)
+            check("unrelated-not-packed", files.map(\.relativePath) == ["owned.txt"])
+            try put(sender, "owned.txt", "another thread edited after selection")
+            check("changed-source-not-automatic", try RemoteThreadTransfer.candidates(threadID: thread, artifactsRoot: artifacts, workdir: sender.path).allSatisfy { !$0.automatic })
+            check("selection-race-rejected", rejected {
+                _ = try RemoteThreadTransfer.changedFiles(in: sender.path, paths: paths, baselines: peer,
+                    observedHashes: ["owned.txt": RemoteThreadTransfer.digest(Data("edited".utf8))])
+            })
+            try put(sender, "owned.txt", "edited")
+            let subdir = sender.appendingPathComponent("sub")
+            try fm.createDirectory(at: subdir, withIntermediateDirectories: true)
+            try put(subdir, "literal[1].txt", "sub base")
+            try git(["add", "sub"]); try git(["commit", "-m", "subdir baseline"])
+            check("subdir-literal-baseline", try RemoteThreadTransfer.sourceBaselines(in: subdir.path, paths: ["literal[1].txt"])["literal[1].txt"] == RemoteThreadTransfer.digest(Data("sub base".utf8)))
+            // Keep synthetic receipts in TMPDIR, not the real user's Trash.
+            var backups: [URL] = []
+            let retire: (URL) -> Void = { backups.append($0) }
+            try put(receiver, "owned.txt", "peer concurrent edit")
+            let conflictBefore = try get(receiver, "owned.txt")
+            check("conflict-rejected", rejected { try RemoteThreadTransfer.write(files, to: receiver.path, backupDirectory: temp, retire: retire) })
+            check("conflict-unchanged", try get(receiver, "owned.txt") == conflictBefore)
+            try put(receiver, "owned.txt", "base")
+            func packet(_ path: String, _ value: String = "new", _ base: String? = RemoteThreadTransfer.missing) -> RemoteThreadTransferFile {
+                RemoteThreadTransferFile(relativePath: path, base64: Data(value.utf8).base64EncodedString(), baseSHA256: base)
+            }
+            check("legacy-baseline-rejected", rejected { try RemoteThreadTransfer.write([packet("owned.txt", "overwrite", nil)], to: receiver.path, backupDirectory: temp, retire: retire) })
+            for path in ["../outside", "/absolute", "nested/../../outside", "a//b", ".git/config"] {
+                check("unsafe-path-" + path, rejected { try RemoteThreadTransfer.write([packet(path)], to: receiver.path, backupDirectory: temp, retire: retire) })
+            }
+            let outside = root.appendingPathComponent("outside")
+            try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+            try put(outside, "secret", "untouched")
+            try fm.createSymbolicLink(at: receiver.appendingPathComponent("link"), withDestinationURL: outside)
+            try fm.createSymbolicLink(at: sender.appendingPathComponent("link"), withDestinationURL: outside)
+            check("symlink-receiver", rejected { try RemoteThreadTransfer.write([packet("link/secret")], to: receiver.path, backupDirectory: temp, retire: retire) })
+            check("symlink-sender", rejected { _ = try RemoteThreadTransfer.changedFiles(in: sender.path, paths: ["link/secret"], baselines: ["link/secret": RemoteThreadTransfer.missing]) })
+            check("symlink-unchanged", try get(outside, "secret") == Data("untouched".utf8))
+            let senderBefore = try get(sender, "owned.txt")
+            enum Injected: Error { case failure }
+            let batch = [files[0], packet("nested/new.txt"), packet("last.txt")]
+            check("midflight-rejected", rejected {
+                try RemoteThreadTransfer.write(batch, to: receiver.path, backupDirectory: temp, beforeWrite: { if $0 == 2 { throw Injected.failure } }, retire: retire)
+            })
+            check("rollback-both-ends", try get(receiver, "owned.txt") == Data("base".utf8) && get(sender, "owned.txt") == senderBefore
+                && !fm.fileExists(atPath: receiver.appendingPathComponent("nested").path)
+                && !fm.fileExists(atPath: receiver.appendingPathComponent("last.txt").path))
+            check("receipt-outside-project", !backups.isEmpty && backups.allSatisfy { !$0.path.hasPrefix(receiver.path + "/") && fm.fileExists(atPath: $0.appendingPathComponent("MANIFEST.md").path) })
+            check("invalid-base64-preflight", rejected {
+                try RemoteThreadTransfer.write([files[0], RemoteThreadTransferFile(relativePath: "bad", base64: "!", baseSHA256: RemoteThreadTransfer.missing)], to: receiver.path, backupDirectory: temp, retire: retire)
+            })
+            check("invalid-preflight-unchanged", try get(receiver, "owned.txt") == Data("base".utf8))
+            check("duplicate-path-rejected", rejected {
+                try RemoteThreadTransfer.write([packet("alias"), packet("ALIAS")], to: receiver.path, backupDirectory: temp, retire: retire)
+            })
+            check("late-symlink-rejected", rejected {
+                try RemoteThreadTransfer.write([files[0], packet("late/secret")], to: receiver.path, backupDirectory: temp, beforeWrite: {
+                    if $0 == 1 { try fm.createSymbolicLink(at: receiver.appendingPathComponent("late"), withDestinationURL: outside) }
+                }, retire: retire)
+            })
+            check("late-symlink-rollback", try get(receiver, "owned.txt") == Data("base".utf8) && get(outside, "secret") == Data("untouched".utf8))
+            try RemoteThreadTransfer.write(batch, to: receiver.path, backupDirectory: temp, retire: retire)
+            check("successful-batch", try get(receiver, "owned.txt") == senderBefore && get(receiver, "nested/new.txt") == Data("new".utf8))
+            try put(receiver, "owned.txt", "base")
+            var recoveryFolder: String?
+            do {
+                try RemoteThreadTransfer.write([files[0], packet("roll-new.txt"), packet("never.txt")], to: receiver.path, backupDirectory: temp,
+                    beforeWrite: { if $0 == 2 { try put(receiver, "owned.txt", "third-party write"); throw Injected.failure } }, retire: retire)
+            } catch RemoteThreadTransfer.TransferError.recoveryRequired(let folder) { recoveryFolder = folder }
+            let afterRecoveryConflict = try get(receiver, "owned.txt")
+            check("rollback-conflict-not-overwritten", recoveryFolder != nil && afterRecoveryConflict == Data("third-party write".utf8)
+                && !fm.fileExists(atPath: receiver.appendingPathComponent("roll-new.txt").path))
+            if let recoveryFolder {
+                let retained = temp.appendingPathComponent(recoveryFolder)
+                check("rollback-conflict-backup-retained", try get(retained, "0.original") == Data("base".utf8)
+                    && String(decoding: get(retained, "MANIFEST.md"), as: UTF8.self).contains("NOT safe to remove"))
+            } else { check("rollback-conflict-backup-retained", false) }
+            let engines = root.appendingPathComponent("Engines")
+            try fm.createDirectory(at: engines, withIntermediateDirectories: true)
+            try put(engines, "engine.js", "v1")
+            let mtime = try fm.attributesOfItem(atPath: engines.appendingPathComponent("engine.js").path)[.modificationDate] as! Date
+            var deployments = 0, deployed = Data()
+            func deploy() throws { deployments += 1; deployed = try get(engines, "engine.js") }
+            let first = try RemoteEngineSync.deployIfNeeded(source: engines, previousHash: nil, deploy: deploy)
+            let same = try RemoteEngineSync.deployIfNeeded(source: engines, previousHash: first, deploy: deploy)
+            check("engine-unchanged-skips", deployments == 1 && same == first)
+            try put(root, "outside-engine-tree", "not hashed")
+            check("engine-only-tree", try RemoteEngineSync.contentHash(engines) == same)
+            try fm.createSymbolicLink(at: engines.appendingPathComponent("link"), withDestinationURL: outside)
+            let linkedHash = try RemoteEngineSync.contentHash(engines)
+            try put(outside, "secret", "outside changed")
+            check("engine-symlink-not-followed", try RemoteEngineSync.contentHash(engines) == linkedHash)
+            try put(engines, "engine.js", "v2")
+            try fm.setAttributes([.modificationDate: mtime], ofItemAtPath: engines.appendingPathComponent("engine.js").path)
+            let changed = try RemoteEngineSync.deployIfNeeded(source: engines, previousHash: same, deploy: deploy)
+            check("engine-within-24h-redeploys", deployments == 2 && changed != same && deployed == Data("v2".utf8))
+            try fm.moveItem(at: engines.appendingPathComponent("engine.js"), to: engines.appendingPathComponent("renamed.js"))
+            check("engine-path-hashed", try RemoteEngineSync.contentHash(engines) != changed)
+            check("engine-failure-no-stamp", rejected { _ = try RemoteEngineSync.deployIfNeeded(source: engines, previousHash: changed) { throw Injected.failure } })
+            check("engine-mutating-source-no-stamp", rejected {
+                _ = try RemoteEngineSync.deployIfNeeded(source: engines, previousHash: nil) { try put(engines, "during", "mutation") }
+            })
+        } catch {
+            print("W72TEST FAIL unexpected: \(error)"); failures += 1
+        }
+        print("W72TEST SUMMARY failures=\(failures)")
+        exit(failures == 0 ? 0 : 1)
+    }
+    #endif
+
     /// TATWO2_REMOTETEST=1：用 localhost 驗 R3 Engines 同步、遠端 worktree、ssh sidecar 與 system/init。
     @MainActor static func runRemoteTest() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["TATWO2_W72_TEST_ROOT"] != nil { runW72RemoteTest(); return }
+        #endif
         let fm = FileManager.default
         let runID = UUID().uuidString
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -2977,45 +4046,42 @@ extension SelfTest {
         let hostRoot = base.appendingPathComponent("host-live", isDirectory: true)
         let clientRoot = base.appendingPathComponent("client-live", isDirectory: true)
         let authorizedKeys = base.appendingPathComponent("host-authorized_keys")
-        let clientKey = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/id_ed25519")
+        let clientKey = base.appendingPathComponent("client-ssh/id_ed25519")
         let generatedClientKey = base.appendingPathComponent("generated-client-ssh/id_ed25519")
         let knownHosts = base.appendingPathComponent("known_hosts")
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let preservedLine = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPRESERVEDPAIRTESTLINE keep-this-line"
         try? (preservedLine + "\n").write(to: authorizedKeys, atomically: true, encoding: .utf8)
-        let keyscan = Process()
-        let keyscanPipe = Pipe()
-        keyscan.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keyscan")
-        keyscan.arguments = ["-T", "5", "127.0.0.1"]
-        keyscan.standardOutput = keyscanPipe
-        keyscan.standardError = FileHandle.nullDevice
-        try? keyscan.run()
-        keyscan.waitUntilExit()
-        try? keyscanPipe.fileHandleForReading.readDataToEndOfFile().write(to: knownHosts, options: .atomic)
-
         let hostEnvironment = [
+            "TATWO_OS_ROOT": base.appendingPathComponent("host-entry").path,
             "TATWO2_LIVE_ROOT": hostRoot.path,
             "TATWO2_AUTHORIZED_KEYS": authorizedKeys.path,
             "TATWO2_PAIRING_HOST": "127.0.0.1",
         ]
         let clientEnvironment = [
+            "TATWO_OS_ROOT": base.appendingPathComponent("client-entry").path,
             "TATWO2_LIVE_ROOT": clientRoot.path,
             "TATWO2_SSH_KEY_PATH": clientKey.path,
             "TATWO2_SSH_KNOWN_HOSTS": knownHosts.path,
         ]
         var generatedKeyEnvironment = clientEnvironment
         generatedKeyEnvironment["TATWO2_SSH_KEY_PATH"] = generatedClientKey.path
+        generatedKeyEnvironment["TATWO_OS_ROOT"] = base.appendingPathComponent("generated-entry").path
         let hostRegistry = DeviceRegistry(environment: hostEnvironment)
         let clientRegistry = DeviceRegistry(environment: clientEnvironment)
         let host = DevicePairingHost(registry: hostRegistry, environment: hostEnvironment)
         let client = DevicePairingClient(
             registry: clientRegistry,
             privateKeyURL: clientKey,
-            environment: clientEnvironment)
+            environment: clientEnvironment,
+            sshVerifier: { _ in true },
+            hostFingerprintResolver: { _ in "SHA256:synthetic-host" })
         let generatedKeyClient = DevicePairingClient(
             registry: clientRegistry,
             privateKeyURL: generatedClientKey,
-            environment: generatedKeyEnvironment)
+            environment: generatedKeyEnvironment,
+            sshVerifier: { _ in true },
+            hostFingerprintResolver: { _ in "SHA256:synthetic-host" })
         var failed = false
         func check(_ item: String, _ passed: Bool, _ evidence: String) {
             print("PAIRTEST \(passed ? "PASS" : "FAIL") \(item) — \(evidence)")
@@ -3054,11 +4120,15 @@ extension SelfTest {
             let hostRows = hostRegistry.list()
             let clientRows = clientRegistry.list()
             let authorizedText = (try? String(contentsOf: authorizedKeys, encoding: .utf8)) ?? ""
-            let marker = "tatwo2-device:\(paired.id)"
+            let clientIdentity = try DeviceIdentityStore.readLocal(entry: TatwoEntry(environment: clientEnvironment))
+            let hostIdentity = try DeviceIdentityStore.readLocal(entry: TatwoEntry(environment: hostEnvironment))
+            let clientID = clientIdentity?.deviceID ?? ""
+            let marker = "tatwo2-device:\(clientID)"
             check(
                 "對碼成功",
-                hostRows.count == 1 && clientRows.count == 1 && hostRows.first?.id == paired.id,
-                "deviceID=\(paired.id) sshBatchMode=passed hostDevices=\(hostRows.count) clientDevices=\(clientRows.count)")
+                hostRows.count == 1 && clientRows.count == 1 && hostRows.first?.id == clientID
+                    && paired.id == hostIdentity?.deviceID && paired.id != clientID,
+                "distinct UUIDs; SSH verifier injected; hostDevices=\(hostRows.count) clientDevices=\(clientRows.count)")
             check(
                 "authorized_keys 新增一行",
                 authorizedText.split(whereSeparator: \.isNewline).filter { $0.contains(marker) }.count == 1,
@@ -3084,7 +4154,7 @@ extension SelfTest {
             var modelEnvironment = hostEnvironment
             modelEnvironment["TATWO2_SELFTEST"] = "1"
             let model = ChatPageModel(environment: modelEnvironment)
-            model.removeDevice(id: paired.id)
+            model.removeDevice(id: clientID)
             let afterRemove = (try? String(contentsOf: authorizedKeys, encoding: .utf8)) ?? ""
             check(
                 "removeDevice 只移除自己的行",
@@ -3862,5 +4932,185 @@ extension SelfTest {
             } catch { print("BOTCORETEST FAIL \(error)"); exit(1) }
         }
         NSApplication.shared.run()
+    }
+}
+
+
+extension SelfTest {
+    /// Invoke the real RPC dispatcher against a new TMPDIR fixture, not a status-reader mock.
+    static func deviceStatusReadOnlyChecks() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let base = env["TATWO2_DEVICE_STATUS_FIXTURE_ROOT"] else {
+            throw NSError(domain: "missing_fixture_root", code: 1)
+        }
+        let root = URL(fileURLWithPath: base).resolvingSymlinksInPath()
+        let temporary = URL(fileURLWithPath: env["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        guard root.pathComponents.starts(with: temporary.pathComponents),
+              root.pathComponents.count > temporary.pathComponents.count,
+              root.deletingLastPathComponent().lastPathComponent.hasPrefix("w77-rpc-"),
+              env["TATWO_OS_ROOT"] == base + "/entry",
+              env["TATWO2_LIVE_ROOT"] == base + "/live",
+              env["TATWO2_OS_UPSTREAM_PATH"] == base + "/runtime/os-upstream.md",
+              !FileManager.default.fileExists(atPath: base) else {
+            throw NSError(domain: "fixture_must_be_new_and_isolated", code: 1)
+        }
+        let fm = FileManager.default
+        for directory in ["entry", "live", "runtime"] {
+            try fm.createDirectory(at: root.appendingPathComponent(directory), withIntermediateDirectories: true)
+        }
+        let document = root.appendingPathComponent("live/document.json")
+        try Data("{\"synthetic\":true,\"threads\":[]}".utf8).write(to: document)
+        try Data("# synthetic constitution\n".utf8).write(to: root.appendingPathComponent("entry/os.md"))
+        try Data("# synthetic runtime\n".utf8).write(to: root.appendingPathComponent("runtime/os-upstream.md"))
+        let identity = DeviceIdentity(deviceID: "11111111-1111-4111-8111-111111111111",
+            name: "Fixture Mac", hardwareModel: try DeviceIdentityStore.hardwareModel(), role: .primary,
+            epoch: 1, primaryDeviceID: "11111111-1111-4111-8111-111111111111", updatedAt: Date(timeIntervalSince1970: 1_789_603_200))
+        try identity.encoded().write(to: root.appendingPathComponent("entry/device.json"))
+        let before = DeviceStatusReader.digest(try Data(contentsOf: document))
+        func fixtureHashes() throws -> [String: String] {
+            var hashes: [String: String] = [:]
+            for case let url as URL in fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])! {
+                if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                    hashes[url.path] = DeviceStatusReader.digest(try Data(contentsOf: url))
+                }
+            }
+            return hashes
+        }
+        let filesBefore = try fixtureHashes()
+        let bridge = OSAgentBridge.shared
+        for _ in 0..<3 {
+            let snapshot = try DeviceStatusSnapshot.decode(bridge.callForSelfTest(method: "device_status", params: [:]))
+            guard snapshot.identity.value == identity,
+                  snapshot.skillet.reason == "missing", snapshot.gbrain.reason == "not_configured" else {
+                throw NSError(domain: "unexpected_device_status", code: 1)
+            }
+        }
+        guard before == DeviceStatusReader.digest(try Data(contentsOf: document)) else {
+            throw NSError(domain: "document_changed", code: 1)
+        }
+        guard try filesBefore == fixtureHashes() else {
+            throw NSError(domain: "fixture_files_changed", code: 1)
+        }
+        do {
+            _ = try bridge.callForSelfTest(method: "device_status", params: ["path": "/ignored"])
+            throw NSError(domain: "unexpected_parameter_accepted", code: 1)
+        } catch let error as NSError where error.domain == "unexpected_parameter_accepted" { throw error }
+        catch { }
+        print("DEVICESTATUSTEST PASS real RPC repeated three times; live/document.json SHA256 unchanged")
+        print("DEVICESTATUSTEST SHA256 before=after=\(before); all fixture files unchanged")
+        print("DEVICESTATUSTEST PASS device.json identity, hardware model, missing files, not_configured, parameter rejection")
+    }
+}
+
+// MARK: - W90 乾淨基線：空 library／空 registry／空入口的空狀態（TATWO2_EMPTYSTATETEST=1）
+
+extension SelfTest {
+    /// 乾淨（全新安裝）狀態是基線：第一屏不得出現 fixture 假技能、假私訊，
+    /// 設定每個 section 與 Bot 頁在什麼都沒有的情況下也不得渲染「未就緒」「錯誤」。
+    @MainActor static func emptyStateChecks() async throws -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["TATWO2_EMPTYSTATE_ROOT"], env["TATWO2_LIVE_ROOT"] == path,
+              path.hasPrefix("/"), !FileManager.default.fileExists(atPath: path) else {
+            print("EMPTYSTATETEST FAIL new isolated TATWO2_EMPTYSTATE_ROOT must equal TATWO2_LIVE_ROOT")
+            return false
+        }
+        let root = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var failures = 0
+        func check(_ name: String, _ ok: Bool) {
+            if !ok { failures += 1 }
+            print("EMPTYSTATETEST \(ok ? "PASS" : "FAIL") \(name)")
+        }
+
+        // 空 registry：沒有快取、沒有技能目錄，第一次 load 不得補 fixture。
+        let fixtureIDs = Set(PluginsFixture.entries.map(\.id))
+        let firstLoad = PluginsSource.load(environment: env)
+        check("first load has zero fixture entries", firstLoad.allSatisfy { !fixtureIDs.contains($0.id) })
+        check("first load has zero skills", firstLoad.filter { $0.kind == .skill }.isEmpty)
+        let scanned = PluginsSource.scanNow(environment: env)
+        check("scan has zero fixture entries", scanned.allSatisfy { !fixtureIDs.contains($0.id) })
+
+        // 移除失敗不得回 fixture 第一筆冒充成功。
+        do {
+            let entry = try TatwoPluginRegistryStore.defaultStore().remove(id: "not-an-mcp-registration")
+            check("remove of unknown id throws instead of returning \(entry.id)", false)
+        } catch {
+            check("remove of unknown id throws", true)
+        }
+
+        // 空 library：live bot 頁沒有 principal、沒有 thread、沒有登記技能。
+        let store = BotStore(root: root)
+        await store.library.ready()
+        let liveStore = ChatLiveStore(root: root)
+        let live = ChatLiveEngine(store: liveStore, environment: env)
+        let model = ChatPageModel(environment: env, botCoreFixture: (live, store))
+        CLISessionsTermination.model = model
+        defer { CLISessionsTermination.model = nil }
+        check("empty library lists no bots", store.library.list().isEmpty)
+        let page = BotPageState(sceneID: "thread")
+        check("bot page runs live", page.usesLiveBots && !page.unknownScene)
+        check("live bot page has no principals", page.fixture.principals.isEmpty)
+        check("live bot page has no thread", page.currentThread.isEmpty)
+        check("live bot page has no registered skills", page.registeredSkills.isEmpty)
+        check("live model offers no thread plugins skills",
+              model.availableThreadPluginEntries.filter { $0.kind == .skill }.isEmpty)
+
+        // 設定每個 section＋Bot 頁：空狀態渲染不得出現紅字。
+        let banned = ["未就緒", "錯誤"]
+        func renderedText(_ view: some View, label: String) -> [String] {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: view.frame(width: 1280, height: 860))
+            window.orderFrontRegardless()
+            defer { window.close() }
+            var texts: [String] = []
+            func walk(_ node: Any, depth: Int) {
+                guard depth < 60, let element = node as? NSObject else { return }
+                func attribute(_ name: String) -> Any? {
+                    let selector = NSSelectorFromString(name)
+                    let modern = element.responds(to: selector)
+                        ? element.perform(selector)?.takeUnretainedValue() : nil
+                    if let modern, (modern as? [Any])?.isEmpty != true { return modern }
+                    let legacy = NSSelectorFromString("accessibilityAttributeValue:")
+                    let keys = ["accessibilityLabel": "AXDescription", "accessibilityValue": "AXValue",
+                                "accessibilityChildren": "AXChildren"]
+                    guard element.responds(to: legacy), let key = keys[name] else { return modern }
+                    return element.perform(legacy, with: key)?.takeUnretainedValue() ?? modern
+                }
+                for key in ["accessibilityLabel", "accessibilityValue"] {
+                    if let text = attribute(key) as? String, !text.isEmpty { texts.append(text) }
+                }
+                for child in attribute("accessibilityChildren") as? [Any] ?? [] { walk(child, depth: depth + 1) }
+            }
+            for _ in 0..<10 {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                window.contentView?.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                texts = []
+                walk(window, depth: 0)
+                if !texts.isEmpty { break }
+            }
+            print("EMPTYSTATETEST NOTE \(label) rendered \(texts.count) accessible strings")
+            return texts
+        }
+        for section in TatwoSettingsPage.Section.allCases {
+            let texts = renderedText(
+                TatwoSettingsPage(model: model, initialSection: section, onClose: {}),
+                label: "settings." + section.rawValue)
+            let offenders = texts.filter { text in banned.contains { text.contains($0) } }
+            check("settings section \(section.rawValue) renders without red state \(offenders.prefix(3))",
+                  offenders.isEmpty)
+        }
+        let botTexts = renderedText(BotPageRootView.forScene("thread"), label: "bot-page")
+        let botOffenders = botTexts.filter { text in banned.contains { text.contains($0) } }
+        check("bot page renders without red state \(botOffenders.prefix(3))", botOffenders.isEmpty)
+        let fixtureSkillNames = Set(BotPageFixture.allSkills.map(\.name))
+        check("bot page shows no fixture skill names",
+              botTexts.allSatisfy { !fixtureSkillNames.contains($0) })
+
+        print("EMPTYSTATETEST RESULT failed=\(failures)")
+        return failures == 0
     }
 }

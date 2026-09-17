@@ -371,8 +371,8 @@ final class ChatPageModel: ObservableObject {
             subtitle: "主題保留為草稿，送出後才開始工作", icon: "bubble.left.and.bubble.right"),
         SlashCommandItem(id: "/顯示討論串", cmd: "/顯示討論串", title: "/顯示討論串 — 叫回討論串列",
             subtitle: "顯示目前對話的討論串，不啟動或中斷工作", icon: "chevron.up"),
-        SlashCommandItem(id: "/蒸餾", cmd: "/蒸餾", title: "/蒸餾 — 把這串的經驗蒸餾進 GBrain",
-            subtitle: "需要 gbrain MCP；沒掛就會直說工具不可用", icon: "drop.triangle"),
+        SlashCommandItem(id: "/蒸餾", cmd: "/蒸餾", title: "/蒸餾 — 整理草稿，確認後選去處",
+            subtitle: "可編輯草稿；選 GBrain／skillet，按送出才寫入", icon: "drop.triangle"),
     ]
 
     var matchingSlashCommands: [SlashCommandItem] {
@@ -1026,22 +1026,33 @@ final class ChatPageModel: ObservableObject {
         refreshIssueLists()
         refreshEngineLogins()
     }
+    @Published var osDocumentSaveStatus: [String: String] = [:]
+    @Published var osDocumentReadErrors: [String: String] = [:]
+
     func loadOSDocument(id: String) {
         osDocuments = OSDocuments.list()
         do {
             osDocumentText[id] = try OSDocuments.read(id: id)
+            osDocumentReadErrors[id] = nil
         } catch {
+            osDocumentText[id] = nil
+            osDocumentPending[id] = nil
+            osDocumentReadErrors[id] = error.localizedDescription
             flashComposerHint("讀取文件失敗：\(error.localizedDescription)")
         }
     }
     func saveOSDocument(id: String, text: String) {
         do {
-            try OSDocuments.write(id: id, text: text)
+            let outcome = try OSDocuments.write(id: id, text: text)
             osDocumentText[id] = text
             osDocumentPending[id] = nil
+            osDocumentReadErrors[id] = nil
+            osDocumentSaveStatus[id] = outcome.message
             osDocuments = OSDocuments.list()
-            flashComposerHint("已儲存 \(osDocuments.first(where: { $0.id == id })?.title ?? id)，舊版已備份")
+            flashComposerHint(outcome.message)
         } catch {
+            osDocumentSaveStatus[id] = "儲存失敗：\(error.localizedDescription)"
+            loadOSDocument(id: id)
             flashComposerHint("儲存文件失敗：\(error.localizedDescription)")
         }
     }
@@ -1379,7 +1390,7 @@ final class ChatPageModel: ObservableObject {
         }
     }
     func confirmActivePlan() {
-        guard selectedRemote == nil, var plan = activePlanArtifact, plan.kind != "feedback", plan.state == .discussing,
+        guard selectedRemote == nil, var plan = activePlanArtifact, plan.kind != "feedback", plan.kind != "distill", plan.state == .discussing,
               localLive?.isRunning(plan.threadID) == false, !preparingPR, !pendingPR.contains(plan.threadID) else { return }
         if plan.kind == "pr" {
             do { _ = try PullRequestCoordinator.shared.identity() }
@@ -1416,6 +1427,18 @@ final class ChatPageModel: ObservableObject {
         _ = persistPlanCanvas(plan)
     }
     func editablePlanTextForCanvas() -> String? { activePlanArtifact?.editableText() }
+    /// Persist the human submission boundary before starting either destination.
+    func saveDistillSubmission(_ id: UUID, _ submission: DistillSubmission) -> Bool {
+        guard selectedRemote == nil, let engine = localLive,
+              var plan = try? engine.loadPlanArtifact(submission.threadID),
+              plan.planID == id, plan.kind == "distill",
+              (plan.distillSubmission != nil || !engine.isRunning(plan.threadID)),
+              DistillCanvas.byteEqual(plan.editableText(), submission.content) else { return false }
+        if let previous = plan.distillSubmission, previous.id != submission.id { return false }
+        plan.distillSubmission = submission
+        plan.confirm()
+        return persistPlanCanvas(plan)
+    }
     func finishFeedbackPlan(_ id: UUID) {
         guard var plan = activePlanArtifact, plan.planID == id, plan.kind == "feedback", plan.state == .discussing else { return }
         plan.confirm()
@@ -1430,6 +1453,7 @@ final class ChatPageModel: ObservableObject {
     @discardableResult
     func saveEditedPlanCanvasText(_ text: String) -> Bool {
         guard selectedRemote == nil, var plan = activePlanArtifact, !pendingPR.contains(plan.threadID),
+              plan.kind != "distill" || plan.distillSubmission == nil,
               plan.kind != "pr" || plan.state == .discussing else { return false }
         guard localLive?.isRunning(plan.threadID) == false else {
             flashComposerHint("請等回覆完成再編輯計畫"); return false
@@ -1939,9 +1963,44 @@ final class ChatPageModel: ObservableObject {
             role: "system",
             text: systemText,
             createdAt: Date()))
-        let files = RemoteThreadTransfer.changedFiles(
-            in: source.cwdOverride ?? project.workdir)
         do {
+            let workdir = source.cwdOverride ?? project.workdir
+            let candidates = try RemoteThreadTransfer.candidates(
+                threadID: threadID, artifactsRoot: localLive.turnArtifacts.root, workdir: workdir)
+            var paths = candidates.filter(\.automatic).map(\.path)
+            let uncertain = candidates.filter { !$0.automatic }
+            if !uncertain.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "選擇要併回的檔案"
+                alert.informativeText = "以下檔案無法確定屬於本討論串，預設不勾選。"
+                alert.addButton(withTitle: "繼續")
+                alert.addButton(withTitle: "取消")
+                let buttons = uncertain.map { NSButton(checkboxWithTitle: $0.path, target: nil, action: nil) }
+                let stack = NSStackView(views: buttons)
+                stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
+                stack.frame = NSRect(x: 0, y: 0, width: 460, height: CGFloat(buttons.count * 26))
+                let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: min(300, stack.frame.height)))
+                scroll.hasVerticalScroller = true; scroll.documentView = stack
+                alert.accessoryView = scroll
+                guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+                paths += zip(uncertain, buttons).filter { $0.1.state == .on }.map { $0.0.path }
+            }
+            var baselines: [String: String] = [:]
+            if !paths.isEmpty {
+                let original = try RemoteThreadTransfer.sourceBaselines(in: workdir, paths: paths)
+                let response = try session.link.call(method: "push_thread", params: [
+                    "phase": "baseline", "projectName": project.name, "paths": paths,
+                ])
+                guard let peer = response["baselines"] as? [String: String] else { throw RemoteHostLinkError.invalidResponse }
+                let conflicts = paths.filter { peer[$0] == nil || peer[$0] != original[$0] }
+                guard conflicts.isEmpty else { throw RemoteThreadTransfer.TransferError.conflicts(conflicts) }
+                baselines = peer
+            }
+            let observed = Dictionary(uniqueKeysWithValues: candidates.compactMap { candidate in
+                candidate.observedSHA256.map { (candidate.path, $0) }
+            })
+            let files = try RemoteThreadTransfer.changedFiles(
+                in: workdir, paths: paths, baselines: baselines, observedHashes: observed)
             let remoteThreadID = try remote.pushThread(
                 projectName: project.name,
                 title: source.title,
@@ -2021,6 +2080,18 @@ final class ChatPageModel: ObservableObject {
 
     func send() {
         if handleFeedbackCommand() { return }
+        if DistillCanvas.argument(in: prompt) != nil {
+            guard !rejectRemoteWrite("/蒸餾"), let id = selectedThreadID, let engine = localLive else {
+                flashComposerHint("請先開啟本機討論串"); return
+            }
+            guard !engine.isRunning(id), !pendingPR.contains(id) else {
+                flashComposerHint("請等目前回合結束再蒸餾"); return
+            }
+            let plan = DistillCanvas.newPlan(threadID: id, argument: DistillCanvas.argument(in: prompt) ?? "")
+            guard persistPlanCanvas(plan) else { return }
+            planInspectorRequest = UUID()
+            // Both bare and parameterized commands go to the current lead engine.
+        }
         let planCommand = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if planCommand.split(whereSeparator: \.isWhitespace).first == "/plan" {
             guard !rejectRemoteWrite("/plan"), let id = selectedThreadID, let engine = localLive else {

@@ -316,3 +316,201 @@ struct DevicePressureMetricChip: View {
         )
     }
 }
+
+
+// MARK: - W77 consistency table (read-only)
+
+struct DeviceConsistencyPanel: View {
+    @StateObject private var model = DeviceConsistencyModel()
+    @State private var diff: DeviceConsistencyDiffSheet?
+    @State private var endpointDevices: [DeviceRecord] = []
+    @State private var dispatchReceipts: [String: DeviceDispatch.Receipt] = [:]
+    @State private var inbox: [DeviceInbox.Branch] = []
+    @State private var submissionMessage = ""
+    @State private var submissionStatus = ""
+    @State private var submitting = false
+    private let columns: [(DeviceStatusColumn, String, CGFloat)] = [
+        (.identity, "設備／角色", 190), (.connection, "連線", 132), (.app, "App 版本", 144),
+        (.code, "程式碼", 180), (.constitution, "憲法", 152), (.rules, "規則產物", 154), (.gbrain, "GBrain", 112),
+    ]
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("一致性面板").font(.headline)
+                    Spacer()
+                    if model.refreshing { ProgressView().controlSize(.small) }
+                    Button("重新檢查") { Task { await model.refresh() } }
+                        .disabled(model.refreshing)
+                }
+                TimelineView(.periodic(from: .now, by: 5)) { context in
+                    table(now: context.date)
+                }
+                ForEach(model.rows) { row in
+                    if let transfer = row.probe.snapshot?.identity.value?.transfer {
+                        DisclosureGroup("\(row.probe.snapshot?.identity.value?.name ?? row.addressLabel) · \(transfer.summary)") {
+                            PrimaryTransferStatusView(record: transfer)
+                        }
+                    }
+                }
+                ForEach(dispatchReceipts.keys.sorted(), id: \.self) { id in
+                    if let receipt = dispatchReceipts[id] {
+                        Text("\(id.prefix(8)) · \(receipt.phase == "timeout" ? "逾時" : receipt.phase) · 讀回 \(receipt.hashes.count) 檔"
+                             + (receipt.detail.map { " · \($0)" } ?? ""))
+                            .font(.caption).foregroundStyle(receipt.phase == "converged" ? Color.green : Color.orange)
+                            .textSelection(.enabled)
+                    }
+                }
+                if OSDocuments.isPrimary {
+                    Text("收件箱").font(.headline)
+                    if inbox.isEmpty { Text("沒有待整合分支").foregroundStyle(.secondary) }
+                    ForEach(inbox) { item in
+                        VStack(alignment: .leading) {
+                            Text(item.branch).font(.caption.monospaced())
+                            Text(item.message).font(.callout)
+                            Text("來源 \(item.sender) · \(item.commit.prefix(12))").font(.caption)
+                        }.textSelection(.enabled)
+                    }
+                } else {
+                    HStack {
+                        TextField("提交說明（只送已提交的目前分支，不送 GitHub）", text: $submissionMessage)
+                        Button("提交給主設備") {
+                            submitting = true
+                            let message = submissionMessage
+                            Task {
+                                let result = await Task.detached {
+                                    do { return try DeviceInbox.shared.submit(message: message) }
+                                    catch { return error.localizedDescription }
+                                }.value
+                                submissionStatus = result; submitting = false
+                            }
+                        }.disabled(submitting || submissionMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                if !submissionStatus.isEmpty { Text(submissionStatus).font(.caption).textSelection(.enabled) }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                await model.refresh()
+                let dispatchState = await Task.detached {
+                    (DeviceDispatch.shared.receipts(), DeviceInbox.shared.branches(), DeviceRegistry().list())
+                }.value
+                dispatchReceipts = dispatchState.0
+                inbox = dispatchState.1
+                endpointDevices = dispatchState.2
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+            }
+        }
+        .sheet(item: $diff) { sheet in
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(sheet.title).font(.headline)
+                    Spacer()
+                    Button("關閉") { diff = nil }
+                }
+                ScrollView([.vertical, .horizontal]) {
+                    Text(sheet.text).font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(20).frame(minWidth: 700, idealWidth: 900, minHeight: 460, idealHeight: 650)
+        }
+    }
+
+    private func table(now: Date) -> some View {
+        let local = model.rows.first(where: \.local)?.probe.snapshot
+        let primary = DeviceStatusPolicy.primary(local: local, probes: model.rows.map(\.probe), now: now)
+        return ScrollView(.horizontal) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .top, spacing: 16) {
+                    ForEach(columns, id: \.0) { column in
+                        Text(column.1).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .frame(width: column.2, alignment: .leading)
+                    }
+                }.padding(.vertical, 8)
+                ForEach(model.rows) { row in
+                    Divider()
+                    HStack(alignment: .top, spacing: 16) {
+                        ForEach(columns, id: \.0) { column in
+                            let cell = DeviceConsistencyPresentation.cell(column: column.0, row: row, primary: primary, now: now)
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                                    Circle().fill(color(cell.light)).frame(width: 7, height: 7)
+                                        .accessibilityLabel(label(cell.light))
+                                    Text(cell.title).font(.callout.weight(column.0 == .identity ? .semibold : .regular))
+                                }
+                                if row.local && column.0 == .identity {
+                                    Text("本機").font(.caption2).foregroundStyle(.secondary)
+                                }
+                                if !cell.detail.isEmpty {
+                                    Text(cell.detail).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text(cell.acquiredAt, style: .time).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                                if column.0 == .constitution || column.0 == .rules {
+                                    Button("看差異") { showDiff(column: column.0, local: local, primary: primary) }
+                                        .buttonStyle(.link)
+                                        .disabled(!canDiff(column: column.0, local: local, primary: primary, now: now))
+                                }
+                                if cell.light == .yellow {
+                                    Button("對齊") {
+                                        DeviceDispatch.shared.align(
+                                            targetDeviceID: row.local ? nil : row.probe.snapshot?.identity.value?.deviceID,
+                                            regenerateRules: !OSDocuments.isPrimary)
+                                        submissionStatus = "已要求派發／拉取；讀回一致後依 W68 檢查規則產物並保留手改，App 更新請到更新頁檢查。"
+                                    }.buttonStyle(.link)
+                                }
+                            }
+                            .frame(width: column.2, alignment: .leading)
+                            .help(cell.reason.map(DeviceConsistencyPresentation.reason) ?? "取得時間：\(cell.acquiredAt.formatted())")
+                        }
+                    }.padding(.vertical, 14)
+                    if !row.local, let device = endpointDevices.first(where: {
+                        "\($0.user)@\($0.host):\($0.sshPort)" == row.id
+                    }) {
+                        DeviceEndpointsRow(device: device)
+                    }
+                }
+            }
+        }
+    }
+
+    private func canDiff(column: DeviceStatusColumn, local: DeviceStatusSnapshot?, primary: DeviceStatusSnapshot?, now: Date) -> Bool {
+        guard let local, let primary else { return false }
+        if column == .rules {
+            return local.rules.value?.runtime.value?.text != nil && primary.rules.value?.runtime.value?.text != nil
+                && DeviceStatusPolicy.fresh(local.rules.acquiredAt, now: now)
+                && DeviceStatusPolicy.fresh(primary.rules.acquiredAt, now: now)
+        }
+        return (local.constitution.value?.text != nil && primary.constitution.value?.text != nil
+                || local.skillet.value?.text != nil && primary.skillet.value?.text != nil)
+            && DeviceStatusPolicy.fresh(local.constitution.acquiredAt, now: now)
+            && DeviceStatusPolicy.fresh(primary.constitution.acquiredAt, now: now)
+    }
+
+    private func showDiff(column: DeviceStatusColumn, local: DeviceStatusSnapshot?, primary: DeviceStatusSnapshot?) {
+        let text: String
+        if column == .rules {
+            text = DeviceStatusDiff.text(local: local?.rules.value?.runtime.value?.text,
+                                         primary: primary?.rules.value?.runtime.value?.text)
+        } else {
+            text = "os.md\n" + DeviceStatusDiff.text(local: local?.constitution.value?.text, primary: primary?.constitution.value?.text)
+                + "\n\nskillet.md\n" + DeviceStatusDiff.text(local: local?.skillet.value?.text, primary: primary?.skillet.value?.text)
+        }
+        diff = .init(title: "\(column == .rules ? "規則產物" : "憲法") · 本機與主設備（唯讀）", text: text)
+    }
+
+    private func color(_ light: DeviceStatusLight) -> Color {
+        switch light { case .green: return .green; case .yellow: return .orange; case .red: return .red; case .gray: return .gray }
+    }
+    private func label(_ light: DeviceStatusLight) -> String {
+        switch light { case .green: return "符合政策"; case .yellow: return "待確認"; case .red: return "不符合政策"; case .gray: return "未知或過期" }
+    }
+}
+
+private struct DeviceConsistencyDiffSheet: Identifiable {
+    let id = UUID()
+    let title: String
+    let text: String
+}

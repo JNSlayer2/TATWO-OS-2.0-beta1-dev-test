@@ -239,7 +239,6 @@ let package = Package(
             path: "App/Sources/Tatwo2",
             resources: [
                 .process("Resources/ProviderIcons"),
-                .copy("Resources/os-architecture-standard.md"),
                 .copy("Resources/os-upstream.md"),
                 .copy("Resources/os.md"),
                 .copy("Resources/tatwo2-git-credential")

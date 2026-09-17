@@ -61,7 +61,12 @@ test('swiftc: settings round-trip, engine URLs, policy reload, metadata and Nets
   ${read('Browser/BrowserShortcuts.swift')}
   ${read('Browser/BrowserGeneralSettings.swift')}
   ${registryTypes}
-  @MainActor final class BrowserTabRegistry { var spaces: [BrowserSpace] = [] }
+  @MainActor final class BrowserTabRegistry {
+    var spaces: [BrowserSpace] = []
+    // W86: export/import now cover favorites; keep the fixture stub minimal but complete.
+    var favorites: [BrowserFavorite] = []
+    @discardableResult func importFavorites(_ incoming: [BrowserFavorite]) -> Int { favorites = incoming; return incoming.count }
+  }
   ${read('Browser/BrowserBookmarkExport.swift')}
   @main struct Fixture {
     @MainActor static func main() throws {

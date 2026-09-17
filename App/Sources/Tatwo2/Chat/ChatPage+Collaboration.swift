@@ -866,6 +866,7 @@ extension ChatPage {
         case "gpt-5.6-terra": return "terra"
         case "gpt-5.6-luna": return "luna"
         case "fable-5": return "fable5"
+        case "fable-5.1": return "fable5.1"
         case "sonnet-5": return "sonnet5"
         case "grok-build": return "grok"
         case "gpt-5.4": return "gpt5.4"

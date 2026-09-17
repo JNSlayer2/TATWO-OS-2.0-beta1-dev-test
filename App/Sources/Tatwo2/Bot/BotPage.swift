@@ -1054,10 +1054,51 @@ struct BotPageRootView: View {
     private var pocketSearchMatches: [BotFixtureSkill] {
         let query = pocketQuery.trimmingCharacters(in: .whitespaces)
         guard !query.isEmpty else { return [] }
-        return BotPageFixture.skilletRegistry.filter {
+        return pocketSkillCatalog.filter {
             $0.name.localizedCaseInsensitiveContains(query)
                 || $0.detail.localizedCaseInsensitiveContains(query)
         }
+    }
+
+    // MARK: - W90：Bot’s Bag 的真技能來源（live 不得顯示 fixture 假技能）
+
+    /// live＝PluginsSource 掃到的本機技能；匯出／UI 預覽才用展示 fixture。
+    private var pocketSkillCatalog: [BotFixtureSkill] {
+        guard state.usesLiveBots else { return BotPageFixture.skilletRegistry }
+        guard let model = CLISessionsTermination.model else { return [] }
+        return model.availableThreadPluginEntries
+            .filter { $0.kind == .skill }
+            .map { .init(id: $0.id, name: $0.name, detail: $0.purpose, source: "skillet 主根") }
+    }
+
+    /// live＝這隻 bot 的 bot.json `skills`（真的已連結進 bot 目錄）；否則用展示登記。
+    private var pocketRegisteredSkills: [BotFixtureSkill] {
+        guard state.usesLiveBots else { return state.registeredSkills }
+        guard let id = state.pocketBotKey,
+              let bot = CLISessionsTermination.model?.botLibraryForBridge?.bot(id: id) else { return [] }
+        let catalog = pocketSkillCatalog
+        return bot.skills.map { name in
+            catalog.first { $0.id == name }
+                ?? .init(id: name, name: name, detail: "bot 目錄內已連結的技能", source: "bot 目錄")
+        }
+    }
+
+    private func pocketIsRegistered(_ skillID: String) -> Bool {
+        state.usesLiveBots
+            ? pocketRegisteredSkills.contains { $0.id == skillID }
+            : state.isSkillRegistered(skillID)
+    }
+
+    /// live 的登記／取消登記要寫 bot.json＋連結技能目錄，這條路還沒接；先只讀，不假裝能改。
+    private var pocketRegistrationEditable: Bool { !state.usesLiveBots }
+
+    /// 對話中搭建的 skills 目前沒有真實儲存；live 一律空清單。
+    private var pocketChatBuiltSkills: [BotFixtureSkill] {
+        state.usesLiveBots ? [] : BotPageFixture.chatBuiltSkills
+    }
+
+    private var pocketEmptyCatalogHint: String {
+        state.usesLiveBots ? "正在掃描技能…" : "沒有可登記的技能"
     }
 
     @State private var infoCardPage = 0
@@ -1412,8 +1453,14 @@ struct BotPageRootView: View {
                         .buttonStyle(.plain)
                         .help("開Bot’s Bag（第 2 頁：搜尋 skillet 登記）")
                     }
-                    ForEach(BotPageFixture.skilletRegistry.prefix(7)) { skill in
-                        botPluginToggle(skill)
+                    if pocketSkillCatalog.isEmpty {
+                        Text(pocketEmptyCatalogHint)
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(pocketSkillCatalog.prefix(7)) { skill in
+                            botPluginToggle(skill)
+                        }
                     }
                 }
                 .padding(.top, 2)
@@ -1425,10 +1472,13 @@ struct BotPageRootView: View {
     }
 
     private func botPluginToggle(_ skill: BotFixtureSkill) -> some View {
-        let enabled = state.isSkillRegistered(skill.id)
+        let enabled = pocketIsRegistered(skill.id)
         return Toggle(isOn: Binding(
-            get: { state.isSkillRegistered(skill.id) },
-            set: { on in on ? state.registerSkill(skill.id) : state.unregisterSkill(skill.id) }
+            get: { pocketIsRegistered(skill.id) },
+            set: { on in
+                guard pocketRegistrationEditable else { return }
+                on ? state.registerSkill(skill.id) : state.unregisterSkill(skill.id)
+            }
         )) {
             HStack(spacing: 7) {
                 Image(systemName: enabled ? "puzzlepiece.extension.fill" : "puzzlepiece.extension")
@@ -1448,6 +1498,8 @@ struct BotPageRootView: View {
         }
         .toggleStyle(.switch)
         .controlSize(.mini)
+        .disabled(!pocketRegistrationEditable)
+        .help(pocketRegistrationEditable ? "登記／取消登記" : "live 只讀：技能安裝在 bot 目錄，請到設定 › Plugin 管理")
     }
 
     // issueListSection 克隆（展示列）。
@@ -1500,35 +1552,43 @@ struct BotPageRootView: View {
                             .font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text("展示").font(.system(size: 8))
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(.primary.opacity(0.10), in: Capsule())
-                        .foregroundStyle(.secondary)
+                    if !state.usesLiveBots {
+                        Text("展示").font(.system(size: 8))
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(.primary.opacity(0.10), in: Capsule())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 // plugins：skillet 登記——搜尋並 enter 即登記到卡上。
                 Text("PLUGINS・SKILLET 登記")
                     .font(.system(size: 9, weight: .black)).foregroundStyle(.tertiary)
-                TextField("搜尋 skillet，Enter 登記", text: $pocketQuery)
+                TextField(pocketRegistrationEditable ? "搜尋 skillet，Enter 登記" : "搜尋本機技能", text: $pocketQuery)
                 .accessibilityLabel("搜尋 skillet")
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12))
                     .onSubmit {
+                        guard pocketRegistrationEditable else { return }
                         if let top = pocketSearchMatches.first {
                             state.registerSkill(top.id)
                             pocketQuery = ""
                         }
                     }
+                if pocketSkillCatalog.isEmpty {
+                    Text(pocketEmptyCatalogHint)
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
                 if !pocketSearchMatches.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(pocketSearchMatches.prefix(5)) { skill in
                             Button {
+                                guard pocketRegistrationEditable else { return }
                                 state.registerSkill(skill.id)
                                 pocketQuery = ""
                             } label: {
                                 HStack(spacing: 6) {
-                                    Image(systemName: state.isSkillRegistered(skill.id) ? "checkmark.circle.fill" : "plus.circle")
+                                    Image(systemName: pocketIsRegistered(skill.id) ? "checkmark.circle.fill" : (pocketRegistrationEditable ? "plus.circle" : "circle.dashed"))
                                         .font(.system(size: 10))
-                                        .foregroundStyle(state.isSkillRegistered(skill.id) ? Color.green.opacity(0.7) : Color.secondary)
+                                        .foregroundStyle(pocketIsRegistered(skill.id) ? Color.green.opacity(0.7) : Color.secondary)
                                     VStack(alignment: .leading, spacing: 0) {
                                         Text(skill.name).font(.system(size: 11.5, weight: .semibold))
                                         Text(skill.detail).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
@@ -1547,12 +1607,14 @@ struct BotPageRootView: View {
                 // 已登記：chat 輸入框 /skill 會列這些。
                 Text("已登記（/skill 可用）")
                     .font(.system(size: 9, weight: .black)).foregroundStyle(.tertiary)
-                if state.registeredSkills.isEmpty {
-                    Text("尚未登記——上方搜尋 skillet 並 Enter")
+                if pocketRegisteredSkills.isEmpty {
+                    Text(pocketRegistrationEditable
+                         ? "尚未登記——上方搜尋 skillet 並 Enter"
+                         : "這隻 bot 還沒有連結任何技能")
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
                 } else {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(state.registeredSkills) { skill in
+                        ForEach(pocketRegisteredSkills) { skill in
                             HStack(spacing: 6) {
                                 Image(systemName: "wand.and.stars").font(.system(size: 9)).foregroundStyle(.secondary)
                                 Text(skill.name).font(.system(size: 11.5, weight: .medium))
@@ -1560,12 +1622,14 @@ struct BotPageRootView: View {
                                     Text(skill.source).font(.system(size: 8)).foregroundStyle(.tertiary)
                                 }
                                 Spacer(minLength: 0)
-                                Button { state.unregisterSkill(skill.id) } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                                if pocketRegistrationEditable {
+                                    Button { state.unregisterSkill(skill.id) } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("取消登記")
                                 }
-                                .buttonStyle(.plain)
-                                .help("取消登記")
                             }
                             .padding(.horizontal, 6).padding(.vertical, 4)
                             .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
@@ -1576,7 +1640,11 @@ struct BotPageRootView: View {
                 // 反向：對話中搭建的 skills → 回傳 skillet 主根。
                 Text("對話中搭建的 SKILLS")
                     .font(.system(size: 9, weight: .black)).foregroundStyle(.tertiary)
-                ForEach(BotPageFixture.chatBuiltSkills) { skill in
+                if pocketChatBuiltSkills.isEmpty {
+                    Text("還沒有在對話中搭建的技能")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+                ForEach(pocketChatBuiltSkills) { skill in
                     HStack(spacing: 6) {
                         Image(systemName: "hammer").font(.system(size: 9)).foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 0) {
@@ -1598,8 +1666,15 @@ struct BotPageRootView: View {
                     .padding(.horizontal, 6).padding(.vertical, 4)
                     .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
-                Text("登記＝授權引用 skillet 主根，不複製；回傳＝入庫主根（展示）")
+                Text(pocketRegistrationEditable
+                     ? "登記＝授權引用 skillet 主根，不複製；回傳＝入庫主根（展示）"
+                     : "登記＝授權引用 skillet 主根，不複製；這裡列的是本機掃到的技能與這隻 bot 已連結的技能")
                     .font(.system(size: 8.5)).foregroundStyle(.tertiary)
+            }
+            // W90：live 首屏沒有技能就先掃一次，讓「正在掃描技能…」有結果可換，而不是補假資料。
+            .onAppear {
+                guard state.usesLiveBots, pocketSkillCatalog.isEmpty else { return }
+                _ = CLISessionsTermination.model?.reloadPluginRegistry(ifOlderThan: 30)
             }
     }
 
@@ -1921,7 +1996,7 @@ struct BotPageRootView: View {
         VStack(spacing: 24) {
             Text("搭建工作平台")
                 .font(.title2.weight(.semibold))
-            Text("使用者工作平台搭建：為當前 space 加一個書籤工作空間（展示流程，不會建立任何東西）")
+            Text(state.usesLiveBots ? "使用者工作平台搭建：為當前 space 建立一個領域（按「生效」會真的建立）" : "使用者工作平台搭建：為當前 space 加一個書籤工作空間（展示流程，不會建立任何東西）")
                 .font(.callout).foregroundStyle(.secondary)
             switch state.addSpaceStep {
             case .chooseDensity:
@@ -1964,7 +2039,7 @@ struct BotPageRootView: View {
                         .accessibilityLabel("工作空間搭建指示")
                             .textFieldStyle(.roundedBorder)
                     }
-                    Text("按「生效」後交由 AI 帶入資料（展示，不會實際執行）")
+                    Text(state.usesLiveBots ? "按「生效」後以這個路徑最後一段為名建立領域" : "按「生效」後交由 AI 帶入資料（展示，不會實際執行）")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 .padding(18)
@@ -1973,7 +2048,10 @@ struct BotPageRootView: View {
                 HStack {
                     Button("返回") { state.addSpaceBack() }.buttonStyle(.plain).foregroundStyle(.secondary)
                     Spacer().frame(width: 24)
-                    Button("生效") { state.addSpaceComplete() }
+                    Button("生效") {
+                        state.addSpaceComplete(name: SpaceCreation.nameFromPath(addSpacePath) ?? addSpacePath,
+                                               density: state.addSpaceDensity?.rawValue)
+                    }
                         .buttonStyle(.borderedProminent)
                         .disabled(addSpacePath.isEmpty)
                         .help(addSpacePath.isEmpty ? "先貼上資料路徑" : "交由 agent 搭建（展示）")
@@ -1982,16 +2060,24 @@ struct BotPageRootView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 40)).foregroundStyle(.secondary)
-                    Text("已交由 agent 搭建（展示）")
+                    // live：真的建立領域（W89）；fixture：維持展示文案。
+                    Text(state.addSpaceCreatedName.map(SpaceCreation.successText(name:))
+                         ?? "已交由 agent 搭建（展示）")
                         .font(.headline)
+                    if let failure = state.addSpaceFailure {
+                        Text(failure).font(.caption).foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    }
                     if !addSpacePath.isEmpty {
                         Text(addSpacePath)
                             .font(.caption.monospaced()).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                             .frame(maxWidth: 340)
                     }
-                    Text("agent 會把資料帶入這個工作空間——本代不落盤、不實際執行")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if state.addSpaceCreatedName == nil && state.addSpaceFailure == nil {
+                        Text("agent 會把資料帶入這個工作空間——本代不落盤、不實際執行")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 .frame(width: 420, height: 220)
                 .liquidGlassSurface(cornerRadius: LiquidGlassTokens.radiusCard)
@@ -3086,9 +3172,20 @@ struct BotMessagesPanel: View {
         .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
     }
 
+    /// W90：live 私訊頁讀真 transcript（botTranscriptForUI），只有匯出／預覽才用展示 thread。
+    private func dmThread(_ target: (title: String, emoji: String, principalID: String?, subID: String?)) -> [BotFixtureMessage] {
+        guard state.usesLiveBots else { return BotPageFixture.thread(principalID: target.principalID, subID: target.subID) ?? [] }
+        guard let id = target.subID ?? target.principalID,
+              let model = CLISessionsTermination.model,
+              let bot = model.botLibraryForBridge?.bot(id: id) else { return [] }
+        return model.botTranscriptForUI(botID: id).map {
+            .init(id: $0.id, author: $0.role == .user ? .user : .bot(name: bot.name), text: $0.text)
+        }
+    }
+
     /// 窗內私訊頁：返回鍵＋對話＋唯讀輸入示意。
     private func dmView(_ target: (title: String, emoji: String, principalID: String?, subID: String?)) -> some View {
-        let thread = BotPageFixture.thread(principalID: target.principalID, subID: target.subID) ?? []
+        let thread = dmThread(target)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 // 上一頁：加大可點面積（2026-08-22 使用者：不好按）。
@@ -3111,7 +3208,8 @@ struct BotMessagesPanel: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if thread.isEmpty {
-                        Text("（展示）尚無私訊").font(.system(size: 12)).foregroundStyle(.tertiary)
+                        Text(state.usesLiveBots ? "還沒有訊息" : "（展示）尚無私訊")
+                            .font(.system(size: 12)).foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 24)
                     }
@@ -3122,7 +3220,7 @@ struct BotMessagesPanel: View {
                 .padding(12)
             }
             HStack(spacing: 8) {
-                Text("私訊（展示・未接入）")
+                Text(state.usesLiveBots ? "私訊輸入尚未接入；這裡顯示的是這隻 bot 的真實對話紀錄" : "私訊（展示・未接入）")
                     .font(.system(size: 12)).foregroundStyle(.tertiary)
                 Spacer()
                 Image(systemName: "paperplane")

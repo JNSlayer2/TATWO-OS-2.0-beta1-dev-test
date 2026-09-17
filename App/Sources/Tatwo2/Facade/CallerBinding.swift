@@ -72,7 +72,7 @@ enum CallerUpstream {
         if let bundle = TatwoResources.url(forResource: "os-upstream", withExtension: "md") {
             candidates.append(("bundle", bundle.path))
         }
-        candidates.append(("entry", "\(NSHomeDirectory())/Library/Application Support/tatwo2/docs/os-upstream.md"))
+        candidates.append(("entry", TatwoEntry().repoDocs.appendingPathComponent("os-upstream.md").path))
         for (source, path) in candidates {
             guard let file = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { continue }
             defer { try? file.close() }

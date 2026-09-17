@@ -1,5 +1,6 @@
 // 照搬自 Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/DevicesComposition.swift；改動 4 行（原因：新增來源標頭；移除三個舊水電 module import，改用同名 Facade 假資料）
 import Foundation
+import Combine
 
 /// Interactive Devices wiring: a live Device Sync core (append transport +
 /// persistence), the authority coordinator port for lease commands, and the
@@ -1193,5 +1194,194 @@ enum DevicesPagePresentation {
             }
         }
         return latest
+    }
+}
+
+
+// MARK: - W77 read-only consistency panel
+
+struct DeviceConsistencyRow: Identifiable, Sendable {
+    // This is a transport/UI key, never a device identity. Legacy registry IDs can be wrong.
+    let id: String
+    let addressLabel: String
+    let local: Bool
+    var probe: DeviceStatusProbe
+}
+
+@MainActor final class DeviceConsistencyModel: ObservableObject {
+    @Published private(set) var rows: [DeviceConsistencyRow] = []
+    @Published private(set) var refreshing = false
+
+    func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
+        let local = await Task.detached(priority: .utility) { DeviceStatusReader.read() }.value
+        guard !Task.isCancelled else { return }
+        rows = [.init(id: "local", addressLabel: "本機", local: true,
+                      probe: .init(connection: .local, snapshot: local, acquiredAt: Date(), reason: nil))]
+        let records = await Task.detached(priority: .utility) { DeviceStatusReader.registry() }.value
+        var seen = Set<String>()
+        for record in records {
+            guard !Task.isCancelled else { return }
+            let key = "\(record.user)@\(record.host):\(record.sshPort)"
+            guard seen.insert(key).inserted else { continue }
+            let probe = await Task.detached(priority: .utility) {
+                RemoteHostLink().queryDeviceStatus(device: record)
+            }.value
+            guard !Task.isCancelled else { return }
+            rows.append(.init(id: key, addressLabel: record.host, local: false, probe: probe))
+        }
+        guard let primary = DeviceStatusPolicy.primary(local: local, probes: rows.map(\.probe), now: Date()),
+              let primaryCommit = primary.code.value?.integrationCommit else { return }
+        // Ask the owning repo for graph distance: no fetch and no assumption that local objects exist.
+        for index in rows.indices {
+            guard !Task.isCancelled else { return }
+            guard let code = rows[index].probe.snapshot?.code.value,
+                  code.integrationCommit != primaryCommit else { continue }
+            if rows[index].local {
+                let snapshot = await Task.detached(priority: .utility) {
+                    DeviceStatusReader.read(primaryCommit: primaryCommit)
+                }.value
+                rows[index].probe.snapshot = snapshot
+                rows[index].probe.acquiredAt = Date()
+            } else if let record = records.first(where: {
+                "\($0.user)@\($0.host):\($0.sshPort)" == rows[index].id
+            }) {
+                rows[index].probe = await Task.detached(priority: .utility) {
+                    RemoteHostLink().queryDeviceStatus(device: record, primaryCommit: primaryCommit)
+                }.value
+            }
+        }
+    }
+}
+
+struct DeviceConsistencyCell {
+    var title: String
+    var detail: String
+    var light: DeviceStatusLight
+    var acquiredAt: Date
+    var reason: String?
+}
+
+enum DeviceConsistencyPresentation {
+    static func reason(_ value: String?) -> String {
+        switch value {
+        case "missing": return "缺檔"
+        case "broken_link": return "連結已斷"
+        case "unreadable": return "無法讀取"
+        case "invalid_identity": return "身份檔無效"
+        case "not_configured": return "尚未設定"
+        case "provenance_unavailable": return "產生來源雜湊未記錄"
+        case "bundled_missing": return "內建上游缺失"
+        case "integration_unavailable": return "integration 尚無資料"
+        case "worktree_status_unavailable": return "工作樹狀態未知"
+        case "work_branch_distance_unavailable": return "工作分支距離未知"
+        case "comparison_objects_unavailable": return "缺少比較所需 commit，未執行 fetch"
+        case "info_plist_missing": return "Info.plist 版本未知"
+        default: return value ?? "未知"
+        }
+    }
+
+    static func cell(column: DeviceStatusColumn, row: DeviceConsistencyRow,
+                     primary: DeviceStatusSnapshot?, now: Date,
+                     targetAppVersion: String? = ProcessInfo.processInfo.environment["TATWO2_DEVICE_TARGET_APP_VERSION"])
+        -> DeviceConsistencyCell {
+        let probe = row.probe, snapshot = probe.snapshot
+        var title = "未知", detail = "", known = false, matches: Bool?
+        var acquiredAt = probe.acquiredAt, failure = probe.reason, userKept = false
+        switch column {
+        case .connection:
+            known = true; matches = probe.connection.online
+            switch probe.connection {
+            case .local: title = "本機"
+            case .reachable: title = "可達"; detail = "SSH · App RPC"
+            case .sshUnavailable: title = "SSH 不可達"
+            case .appUnavailable: title = "App RPC 不可達"; detail = "SSH 可達 · App 未開或不支援"
+            }
+        case .identity:
+            if let field = snapshot?.identity {
+                acquiredAt = field.acquiredAt; failure = field.reason
+                if let value = field.value {
+                    known = true; title = value.name
+                    detail = "\(value.role == .primary ? "主設備" : "副設備")／epoch \(value.epoch.map(String.init) ?? "未知")\n\(value.hardwareModel)"
+                    // The v2 registry is address-only (W76 legacy UUID corruption). Without a
+                    // verified primary roster we can flag conflict but cannot certify membership.
+                    if let primaryID = primary?.identity.value {
+                        if value.primaryDeviceID?.lowercased() != primaryID.deviceID.lowercased()
+                            || value.epoch != primaryID.epoch { matches = false }
+                    }
+                    failure = matches == false ? "主設備或 epoch 不符" : "身份已讀取；主設備名單尚未驗證"
+                }
+            } else { title = row.addressLabel; detail = "身份未回報" }
+        case .app:
+            if let field = snapshot?.appVersion {
+                acquiredAt = field.acquiredAt; failure = field.reason
+                known = field.value != nil; title = field.value ?? reason(field.reason)
+                if let targetAppVersion, !targetAppVersion.isEmpty { matches = field.value == targetAppVersion }
+                detail = targetAppVersion.map { "指定版 \($0)" } ?? "候選版目標未知"
+            }
+        case .code:
+            if let field = snapshot?.code {
+                acquiredAt = field.acquiredAt; failure = field.reason
+                title = reason(field.reason)
+                if let code = field.value {
+                    known = true; title = String(code.integrationCommit.prefix(8))
+                    if let reference = primary?.code, DeviceStatusPolicy.fresh(reference.acquiredAt, now: now),
+                       let commit = reference.value?.integrationCommit {
+                        matches = code.integrationCommit == commit && code.clean == true
+                            && code.branchAhead != nil && code.branchBehind == 0
+                        if code.integrationCommit == commit { detail = "integration 相同" }
+                        else if code.comparisonPrimaryCommit == commit, let behind = code.behind, let ahead = code.ahead {
+                            detail = "落後 \(behind) · 領先 \(ahead)"
+                        } else { detail = "commit 不同 · 距離未知" }
+                    } else { detail = "主設備基準未知" }
+                    let work = code.branchAhead.map { "工作分支 +\($0) / −\(code.branchBehind ?? 0)" } ?? "工作分支距離未知"
+                    detail += "\n\(code.branch ?? "detached") · \(work)\n\(code.clean.map { $0 ? "乾淨" : "有未提交變更" } ?? "乾淨狀態未知")"
+                }
+            }
+        case .constitution:
+            if let os = snapshot?.constitution, let skillet = snapshot?.skillet {
+                acquiredAt = min(os.acquiredAt, skillet.acquiredAt); failure = os.reason ?? skillet.reason
+                known = os.value != nil && skillet.value != nil
+                title = os.value.map { "os " + String($0.sha256.prefix(8)) } ?? "os " + reason(os.reason)
+                detail = skillet.value.map { "skillet " + String($0.sha256.prefix(8)) } ?? "skillet " + reason(skillet.reason)
+                if known, let reference = primary, let hash = reference.constitution.value?.sha256,
+                   let skilletHash = reference.skillet.value?.sha256,
+                   DeviceStatusPolicy.fresh(reference.constitution.acquiredAt, now: now),
+                   DeviceStatusPolicy.fresh(reference.skillet.acquiredAt, now: now) {
+                    matches = os.value?.sha256 == hash && skillet.value?.sha256 == skilletHash
+                    detail += matches == true ? "\n與主設備相同" : "\n與主設備不同"
+                } else { detail += "\n主設備基準或文件缺失" }
+            }
+        case .rules:
+            if let field = snapshot?.rules {
+                acquiredAt = field.acquiredAt; failure = field.reason
+                if let value = field.value {
+                    acquiredAt = min(acquiredAt, value.runtime.acquiredAt)
+                    known = value.runtime.value != nil; userKept = value.state == "user_kept"
+                    title = ["aligned": "已對齊", "pending": "待套用", "user_kept": "使用者保留", "unknown": "未知"][value.state] ?? "未知"
+                    detail = value.runtime.value.map { String($0.sha256.prefix(8)) } ?? reason(value.runtime.reason)
+                    if let hash = value.generatedFromConstitutionHash, let source = snapshot?.constitution,
+                       let current = source.value?.sha256, DeviceStatusPolicy.fresh(source.acquiredAt, now: now) {
+                        matches = hash == current && value.state == "aligned"
+                        detail += "\n來源 " + String(hash.prefix(8))
+                    } else { detail += "\n來源雜湊未知" }
+                    if userKept { detail += "\n保留自訂，不算已收斂" }
+                }
+            }
+        case .gbrain:
+            if let field = snapshot?.gbrain {
+                acquiredAt = field.acquiredAt; failure = field.reason
+                known = field.value != nil; title = field.value ?? reason(field.reason)
+                matches = field.value.map { $0 == "healthy" }
+            }
+        }
+        let probeFresh = DeviceStatusPolicy.fresh(probe.acquiredAt, now: now)
+        let light = DeviceStatusPolicy.light(column: column, known: known, online: probe.connection.online,
+            acquiredAt: probeFresh ? acquiredAt : probe.acquiredAt, now: now,
+            matches: matches, reason: failure, userKept: userKept)
+        if !probeFresh || !DeviceStatusPolicy.fresh(acquiredAt, now: now) { detail += "\n資料已過期" }
+        return .init(title: title, detail: detail, light: light, acquiredAt: acquiredAt, reason: failure)
     }
 }

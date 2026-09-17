@@ -1,6 +1,11 @@
 {
-  "catalogRevision": "2026-07-29.1",
+  "catalogRevision": "2026-09-17.w78",
   "deferredSystemPullItemIDs": [
+    "os.constitution",
+    "os.issue",
+    "os.todo",
+    "skills.skillet",
+    "memory.global-notes",
     "work.goal-state",
     "work.plan-state",
     "work.loop-state",
@@ -40,35 +45,38 @@
       "id": "os.constitution",
       "kind": "osDocument",
       "mergePolicy": "markdownSections",
-      "relativePath": "os/os.md",
+      "relativePath": "os.md",
       "requiredOnDevices": [
         "all-enrolled-devices"
       ],
-      "scope": "shared"
+      "scope": "shared",
+      "transportAdapter": "RemoteHostLink"
     },
     {
-      "activationPolicy": "automaticAfterValidation",
+      "activationPolicy": "stagedHumanApproval",
       "displayName": "Work OS issue blueprint",
       "id": "os.issue",
       "kind": "osDocument",
       "mergePolicy": "markdownSections",
-      "relativePath": "os/issue.md",
+      "relativePath": "tatwo2/docs/issue.md",
       "requiredOnDevices": [
         "all-enrolled-devices"
       ],
-      "scope": "shared"
+      "scope": "shared",
+      "transportAdapter": "git"
     },
     {
-      "activationPolicy": "automaticAfterValidation",
+      "activationPolicy": "stagedHumanApproval",
       "displayName": "Work OS implementation backlog",
       "id": "os.todo",
       "kind": "osDocument",
       "mergePolicy": "markdownSections",
-      "relativePath": "os/TODO.md",
+      "relativePath": "tatwo2/docs/todo.md",
       "requiredOnDevices": [
         "all-enrolled-devices"
       ],
-      "scope": "shared"
+      "scope": "shared",
+      "transportAdapter": "git"
     },
     {
       "activationPolicy": "automaticAfterValidation",
@@ -167,16 +175,17 @@
       "scope": "shared"
     },
     {
-      "activationPolicy": "canaryThenStable",
-      "displayName": "Skillet private skill repositories",
+      "activationPolicy": "automaticAfterValidation",
+      "displayName": "Entrance skillet document",
       "id": "skills.skillet",
-      "kind": "skillRepository",
-      "mergePolicy": "repositoryRevision",
-      "relativePath": "skillet/repositories",
+      "kind": "osDocument",
+      "mergePolicy": "markdownSections",
+      "relativePath": "skillet.md",
       "requiredOnDevices": [
         "all-enrolled-devices"
       ],
-      "scope": "shared"
+      "scope": "shared",
+      "transportAdapter": "RemoteHostLink"
     },
     {
       "activationPolicy": "stagedHumanApproval",
@@ -525,6 +534,19 @@
       "mergePolicy": "never",
       "activationPolicy": "never",
       "requiredOnDevices": []
+    },
+    {
+      "id": "memory.global-notes",
+      "displayName": "Entrance global notes",
+      "kind": "osDocument",
+      "scope": "shared",
+      "relativePath": "note/",
+      "mergePolicy": "markdownSections",
+      "activationPolicy": "automaticAfterValidation",
+      "requiredOnDevices": [
+        "all-enrolled-devices"
+      ],
+      "transportAdapter": "RemoteHostLink"
     }
   ],
   "persistentSurfaceIDs": [
@@ -570,13 +592,15 @@
     "device.update-plans",
     "device.native-md-bindings",
     "app.source-version",
-    "app.installed-runtime"
+    "app.installed-runtime",
+    "memory.global-notes"
   ],
   "schemaVersion": 1,
-  "systemPullItemIDs": [
+  "systemPullItemIDs": [],
+  "dispatchTransport": "RemoteHostLink",
+  "dispatchItemIDs": [
     "os.constitution",
-    "os.issue",
-    "os.todo",
-    "skills.skillet"
+    "skills.skillet",
+    "memory.global-notes"
   ]
 }

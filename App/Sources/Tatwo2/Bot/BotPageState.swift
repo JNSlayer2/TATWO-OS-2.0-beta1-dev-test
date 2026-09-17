@@ -29,6 +29,9 @@ final class BotPageState: ObservableObject {
     @Published private(set) var quickCardOpen: Bool
     @Published private(set) var addSpaceStep: BotAddSpaceStep = .chooseDensity
     @Published private(set) var addSpaceDensity: BotFixtureDensity?
+    /// live 建立領域的結果（W89）：成功的領域名稱／失敗訊息。fixture 展示維持 nil。
+    @Published private(set) var addSpaceCreatedName: String?
+    @Published private(set) var addSpaceFailure: String?
     @Published var settingsSelection: String?
     @Published var pinnedBotIDs: [String] = []
     @Published var pinnedExpandedIDs: Set<String> = []
@@ -645,10 +648,23 @@ final class BotPageState: ObservableObject {
         }
     }
 
-    func addSpaceComplete() {
+    /// live 模式走與設定 › Space 空狀態同一條建立函式（SpaceWorkspaceController.createDomain）；
+    /// fixture 模式維持原本的展示文案，不落盤。
+    func addSpaceComplete(name rawName: String = "", density: String? = nil) {
         guard contentMode == .addSpace, addSpaceStep == .staticPreview,
               addSpaceDensity != nil else { return }
         addSpaceStep = .completionMock
+        addSpaceCreatedName = nil
+        addSpaceFailure = nil
+        guard usesLiveBots else { return }
+        let owner = selectedSubID ?? selectedPrincipalID
+        Task { @MainActor in
+            switch await SpaceWorkspaceController.shared.createDomain(name: rawName, ownerBotID: owner, density: density) {
+            case .created(_, let created): addSpaceCreatedName = created
+            case .blocked(let outcome): addSpaceFailure = SpaceCreation.guidance(for: outcome)
+            case .failed(let message): addSpaceFailure = message
+            }
+        }
     }
 
     /// 取消/Esc：丟棄 view-local 輸入、恢復進入前模式與 selection。
@@ -656,6 +672,8 @@ final class BotPageState: ObservableObject {
         guard contentMode == .addSpace else { return }
         addSpaceDensity = nil
         addSpaceStep = .chooseDensity
+        addSpaceCreatedName = nil
+        addSpaceFailure = nil
         contentMode = previousMode
     }
 

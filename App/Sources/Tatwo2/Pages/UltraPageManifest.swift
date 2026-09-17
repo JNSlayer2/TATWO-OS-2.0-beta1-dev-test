@@ -1,6 +1,7 @@
 // 照搬自 Apps/TatwoUltraworkMac/Sources/TatwoUltraworkMac/UltraPageManifest.swift；改動 3 行（原因：B2 移除文件架構卡的模式字樣）
 import Foundation
 import SwiftUI
+import CryptoKit
 
 struct TatwoOsManifestV1: Codable, Equatable {
     struct Section: Codable, Equatable, Identifiable {
@@ -34,7 +35,8 @@ enum UltraArchitectureManifestLoadState: Equatable {
 }
 
 enum UltraArchitectureManifestLoader {
-    static let resourceName = "os-architecture-standard"
+    // W75: project the public installation template, never the retired 1.0 manifest.
+    static let resourceName = "os"
     static let resourceExtension = "md"
 
     static func loadBundledManifest() -> UltraArchitectureManifestLoadState {
@@ -53,12 +55,47 @@ enum UltraArchitectureManifestLoader {
             return .missing
         }
 
-        do {
-            let manifest = try JSONDecoder().decode(TatwoOsManifestV1.self, from: data)
-            return .loaded(manifest: manifest, rawText: contents)
-        } catch {
-            return .invalid("manifest JSON 無法解析：\(error.localizedDescription)")
+        return projectConstitution(contents)
+    }
+
+    static func projectConstitution(_ contents: String) -> UltraArchitectureManifestLoadState {
+        var sections: [TatwoOsManifestV1.Section] = []
+        var sectionID: String?
+        var title = ""
+        var items: [String] = []
+        func finishSection() {
+            guard let id = sectionID else { return }
+            sections.append(.init(id: id, title: title, items: items))
         }
+        for line in contents.components(separatedBy: .newlines) {
+            if line.hasPrefix("## ") {
+                finishSection()
+                let heading = String(line.dropFirst(3))
+                guard let separator = heading.range(of: ". "),
+                      let number = Int(heading[..<separator.lowerBound]) else {
+                    return .invalid("憲法範本章節標題無法解析")
+                }
+                sectionID = String(number)
+                title = String(heading[separator.upperBound...])
+                items = []
+            } else if sectionID != nil, !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                items.append(line)
+            }
+        }
+        finishSection()
+        guard sections.map(\.id) == (0...11).map({ String($0) }),
+              sections.allSatisfy({ !$0.title.isEmpty && !$0.items.isEmpty }),
+              contents.hasPrefix("# TATWO OS 憲法（v4") else {
+            return .invalid("憲法範本須包含 v4 的 §0–§11")
+        }
+        let manifest = TatwoOsManifestV1(
+            schema: "TatwoConstitutionTemplateV4",
+            sourceId: "App/Resources/os.md",
+            sourceSHA256: SHA256.hash(data: Data(contents.utf8)).map { String(format: "%02x", $0) }.joined(),
+            generatedAt: "",
+            sections: sections
+        )
+        return .loaded(manifest: manifest, rawText: contents)
     }
 }
 
@@ -87,10 +124,10 @@ struct UltraArchitectureManifestSourceCard: View {
                         .foregroundStyle(.cyan)
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("架構標準來源：os.md §9")
+                        Text("憲法 v4 安裝範本")
                             .font(compact ? .subheadline.weight(.black) : .headline.weight(.black))
                             .foregroundStyle(.primary)
-                        Text("此 manifest 由 os.md §9 於 build 時打包；單一真相源＝os.md。")
+                        Text("內建公開範本；生效規則以入口憲法為準。")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -98,14 +135,14 @@ struct UltraArchitectureManifestSourceCard: View {
 
                     Spacer(minLength: 8)
 
-                    Badge(manifest.manifest == nil ? "manifest 未打包" : "bundled manifest")
+                    Badge(manifest.manifest == nil ? "範本不可用" : "內建範本")
                 }
                 .contentShape(Rectangle())
             }
             .tint(.cyan)
 
             if manifest.text == nil {
-                Label("manifest 未打包", systemImage: "exclamationmark.triangle.fill")
+                Label("範本不可用", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.orange)
                     .padding(.top, 8)
@@ -131,7 +168,7 @@ struct UltraArchitectureManifestSourceCard: View {
                     .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
             )
         } else {
-            Text("manifest 未打包")
+            Text("範本不可用")
                 .font(.callout.weight(.bold))
                 .foregroundStyle(.orange)
                 .frame(maxWidth: .infinity, alignment: .leading)

@@ -93,6 +93,7 @@ tatwo_cef_initialize_runtime_configuration() {
   CEF_CHANNEL=""
   CEF_ARCHIVE=""
   CEF_DOWNLOAD_URL=""
+  CEF_LOCAL_ARCHIVE=""
   CEF_OFFICIAL_INDEX_URL=""
   CEF_OFFICIAL_INDEX_SHA1=""
   CEF_ARCHIVE_SHA256=""
@@ -137,12 +138,92 @@ tatwo_cef_initialize_runtime_configuration() {
   CEF_ARCHIVE_SHA256="$(json_string "$CEF_PIN_FILE" sha256)"
   CEF_ARCHIVE_SIZE="$(json_scalar "$CEF_PIN_FILE" size)"
   CEF_LICENSE_SHA256="$(json_string "$CEF_PIN_FILE" licenseSHA256)"
+  configure_cef_local_archive || return 1
   CEF_ARCHIVE_PATH="$CEF_CACHE_ROOT/vendor/cef/$CEF_ARCHIVE"
+  if [[ -n "$CEF_LOCAL_ARCHIVE" ]]; then
+    # Never replace (or reuse) Spotify's archive under its official cache name.
+    CEF_ARCHIVE_PATH="$CEF_CACHE_ROOT/vendor/cef/local-$CEF_ARCHIVE_SHA256/$CEF_ARCHIVE"
+  fi
   CEF_EXTRACTED_NAME="${CEF_ARCHIVE%.tar.bz2}"
   CEF_RUNTIME_CACHE_DIR="$CEF_CACHE_ROOT/vendor/cef/runtime/$CEF_ARCHIVE_SHA256"
   CEF_RUNTIME_ROOT="$CEF_RUNTIME_CACHE_DIR/$CEF_EXTRACTED_NAME"
   CEF_RUNTIME_MANIFEST="$CEF_RUNTIME_CACHE_DIR/manifest.sha256"
   CEF_INDEX_RECEIPT="$CEF_CACHE_ROOT/vendor/cef/index-verified-$CEF_OFFICIAL_INDEX_SHA1.receipt"
+  if [[ -n "$CEF_LOCAL_ARCHIVE" ]]; then
+    CEF_INDEX_RECEIPT="$CEF_CACHE_ROOT/vendor/cef/local-$CEF_ARCHIVE_SHA256.receipt"
+  fi
+}
+
+configure_cef_local_archive() {
+  local archive="${TATWO2_CEF_LOCAL_ARCHIVE:-}"
+  local expected="${TATWO2_CEF_LOCAL_SHA256:-}"
+  local actual
+  [[ -n "$archive" || -n "$expected" ]] || return 0
+  if [[ ! -f "$archive" || ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    printf '%s\n' 'warning: ignoring local CEF: requires an existing archive AND a 64-hex SHA256; using verified official source' >&2
+    return 0
+  fi
+  expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
+  actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+  if [[ "$actual" != "$expected" ]]; then
+    printf '%s\n' 'warning: ignoring local CEF SHA256 mismatch; using verified official source' >&2
+    return 0
+  fi
+  CEF_LOCAL_ARCHIVE="$(cd "$(dirname "$archive")" && pwd -P)/$(basename "$archive")"
+  CEF_ARCHIVE_SHA256="$expected"
+  CEF_ARCHIVE_SIZE="$(stat -f %z "$archive")"
+}
+
+prepare_cef_local_archive() {
+  local actual cache_directory
+  cache_directory="$(dirname "$CEF_ARCHIVE_PATH")"
+  if [[ -L "$cache_directory" || -L "$CEF_ARCHIVE_PATH" ]]; then
+    printf '%s\n' 'error: local CEF cache contains a symbolic link' >&2
+    return 1
+  fi
+  mkdir -p "$cache_directory" || return 1
+  if [[ ! -f "$CEF_ARCHIVE_PATH" ]]; then
+    CEF_DOWNLOAD_TEMP="$CEF_ARCHIVE_PATH.part-$STAMP-$SHORT_TOKEN"
+    if [[ -e "$CEF_DOWNLOAD_TEMP" || -L "$CEF_DOWNLOAD_TEMP" ]]; then
+      printf '%s\n' 'error: local CEF temporary copy already exists' >&2
+      CEF_DOWNLOAD_TEMP=""
+      return 1
+    fi
+    cp "$CEF_LOCAL_ARCHIVE" "$CEF_DOWNLOAD_TEMP" || return 1
+    actual="$(shasum -a 256 "$CEF_DOWNLOAD_TEMP" | awk '{print $1}')"
+    if [[ "$actual" != "$CEF_ARCHIVE_SHA256" ]]; then
+      printf '%s\n' 'error: local CEF archive changed while copying' >&2
+      return 1
+    fi
+    mv "$CEF_DOWNLOAD_TEMP" "$CEF_ARCHIVE_PATH" || return 1
+    CEF_DOWNLOAD_TEMP=""
+  fi
+}
+
+write_cef_local_receipt() {
+  CEF_INDEX_RECEIPT_TEMP="$CEF_INDEX_RECEIPT.tmp-$STAMP-$SHORT_TOKEN"
+  /usr/bin/python3 - "$CEF_INDEX_RECEIPT_TEMP" "$STAMP" "$CEF_LOCAL_ARCHIVE" \
+    "$CEF_ARCHIVE" "$CEF_ARCHIVE_SHA256" "$CEF_VERSION" <<'PY'
+import json
+import os
+import sys
+path, stamp, source, archive, sha256, version = sys.argv[1:]
+with open(path, "x", encoding="utf-8") as handle:
+    json.dump({
+        "schema": "TatwoCEFLocalArchiveReceiptV1",
+        "sourceKind": "local",
+        "sourcePath": source,
+        "verifiedAt": stamp,
+        "archive": archive,
+        "archiveSHA256": sha256,
+        "cefVersion": version,
+    }, handle, sort_keys=True)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+PY
+  mv "$CEF_INDEX_RECEIPT_TEMP" "$CEF_INDEX_RECEIPT"
+  CEF_INDEX_RECEIPT_TEMP=""
 }
 
 remove_generated_cef_work_path() {
@@ -647,7 +728,10 @@ prepare_cef_runtime() {
     "$CEF_CACHE_ROOT/runtime/cef-logs"
 
   validate_cef_distribution_pin
-  if [[ "$REFRESH_CEF_INDEX" != "true" \
+  if [[ -n "$CEF_LOCAL_ARCHIVE" ]]; then
+    prepare_cef_local_archive || return 1
+    printf '%s\n' 'CEF_SOURCE=local'
+  elif [[ "$REFRESH_CEF_INDEX" != "true" \
     && -f "$CEF_INDEX_RECEIPT" ]] \
     && cef_index_receipt_matches_pin "$CEF_INDEX_RECEIPT"
   then
@@ -688,6 +772,9 @@ prepare_cef_runtime() {
     printf 'error: cached CEF archive verification failed closed: sha256=%s size=%s\n' \
       "$actual_sha256" "$actual_size" >&2
     exit 1
+  fi
+  if [[ -n "$CEF_LOCAL_ARCHIVE" ]]; then
+    write_cef_local_receipt
   fi
 
   printf -v cef_runtime_cache_shell_quoted '%q' "$CEF_RUNTIME_CACHE_DIR"

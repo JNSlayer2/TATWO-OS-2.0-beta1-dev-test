@@ -16,6 +16,8 @@ struct DevicesCard: View {
             Text("設備")
                 .font(.title3.bold())
 
+            PrimaryTransferPanel()
+
             // 主機端：出一組碼
             VStack(alignment: .leading, spacing: 8) {
                 Text("讓另一台加入這台（這台當主機）")
@@ -116,6 +118,11 @@ struct DevicesCard: View {
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
+                                DeviceEndpointsRow(device: device) { updated in
+                                    if let index = model.devices.firstIndex(where: { $0.id == updated.id }) {
+                                        model.devices[index] = updated
+                                    }
+                                }
                                 Text("加入 \(Self.stamp(device.addedAt))・最近 \(Self.stamp(device.lastSeenAt))")
                                     .font(.footnote)
                                     .foregroundStyle(.tertiary)
@@ -151,5 +158,75 @@ struct DevicesCard: View {
 
     private static func stamp(_ date: Date) -> String {
         let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"; return f.string(from: date)
+    }
+}
+
+/// Shared by both device surfaces; editing only changes routes, never pairing trust.
+struct DeviceEndpointsRow: View {
+    let device: DeviceRecord
+    var changed: (DeviceRecord) -> Void = { _ in }
+    @State private var current: DeviceRecord?
+    @State private var input = ""
+    @State private var kind: DeviceEndpoint.Kind = .lan
+    @State private var message = ""
+    @State private var busy = false
+
+    var body: some View {
+        let record = current ?? device
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(record.endpoints, id: \.self) { endpoint in
+                    HStack {
+                        Text("\(endpoint.kind.rawValue) · \(endpoint.label)").textSelection(.enabled)
+                        Button("刪除端點（封存）") { update(endpoint, retire: true) }.disabled(busy)
+                    }
+                }
+                ForEach(record.retiredEndpoints, id: \.self) { endpoint in
+                    Text("已封存 · \(endpoint.label)").foregroundStyle(.secondary)
+                }
+                HStack {
+                    Picker("類型", selection: $kind) {
+                        Text("LAN").tag(DeviceEndpoint.Kind.lan)
+                        Text("隧道").tag(DeviceEndpoint.Kind.tunnel)
+                    }.frame(maxWidth: 120)
+                    TextField("host[:port] 或 alias:名稱", text: $input)
+                    Button("新增端點") {
+                        do { update(try DeviceEndpoint.parse(input, kind: kind), retire: false) }
+                        catch { message = error.localizedDescription }
+                    }.disabled(busy || input.isEmpty)
+                }
+                if !message.isEmpty { Text(message).foregroundStyle(.orange) }
+            }
+        } label: {
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                let fresh = (0...60).contains(context.date.timeIntervalSince(record.lastSeenAt))
+                Text("端點 \(record.endpoints.count) · " + (record.lastEndpoint.map {
+                    fresh ? "最近可用 \($0.label)" : "目前未知（上次 \($0.label)）"
+                } ?? "目前未知"))
+            }
+        }
+        .font(.caption)
+        .task(id: device.id) {
+            while !Task.isCancelled {
+                let id = device.id
+                current = await Task.detached { DeviceRegistry().list().first { $0.id == id } }.value
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    private func update(_ endpoint: DeviceEndpoint, retire: Bool) {
+        busy = true
+        let id = device.id
+        Task {
+            let result = await Task.detached { () -> Result<DeviceRecord, Error> in
+                Result { try DeviceRegistry().updateEndpoint(id: id, endpoint: endpoint, retire: retire) }
+            }.value
+            switch result {
+            case .success(let record): current = record; changed(record); input = ""; message = ""
+            case .failure(let error): message = error.localizedDescription
+            }
+            busy = false
+        }
     }
 }

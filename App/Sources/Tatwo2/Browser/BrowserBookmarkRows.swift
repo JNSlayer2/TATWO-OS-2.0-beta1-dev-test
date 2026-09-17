@@ -32,6 +32,7 @@ struct BrowserBookmarkRow: View {
         .padding(.leading, BrowserSidebarMetrics.workspaceFaviconSize)
         .help(bookmark.url)
         .onHover { hovering = $0 }
+        .onDrag { NSItemProvider(object: "tatwo-browser-bookmark:\(bookmark.id)" as NSString) }
     }
 }
 

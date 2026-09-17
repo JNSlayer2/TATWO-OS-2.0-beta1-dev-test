@@ -4,6 +4,7 @@ import SwiftUI
 
 struct OSOverviewPage: View {
     @ObservedObject var model: ChatPageModel
+    @ObservedObject private var gbrain = GBrainService.shared
     /// 點方塊要開設定頁的哪一分頁（由外面接到設定視窗）
     var openSettings: (String) -> Void = { _ in }
 
@@ -112,9 +113,9 @@ struct OSOverviewPage: View {
         return .orange
     }
     private var gbrainLine: String {
-        model.registeredPluginIDs.contains { $0.lowercased().contains("gbrain") } ? "已登記為 MCP" : "MCP 清單裡沒有 GBrain"
+        gbrain.status
     }
-    private var gbrainLamp: Color { model.registeredPluginIDs.contains { $0.lowercased().contains("gbrain") } ? .green : .clear }
+    private var gbrainLamp: Color { gbrain.healthy ? .green : .orange }
     private var deviceLines: [String] {
         let online = model.remoteSidebarSections.filter(\.isOnline).count
         return ["這台：主機", "已配對 \(model.devices.count) 台・在線 \(online) 台", "並行：點遠端對話就在那台跑；右鍵併回／拉到"]

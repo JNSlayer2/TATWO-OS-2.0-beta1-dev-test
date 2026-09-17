@@ -495,7 +495,7 @@ function auditSourceImplementation(repoRoot) {
   const optional = [
     "Packages/TatwoUltraworkCore/Sources/TatwoUltraworkCore/TatwoCapabilityForge.swift",
     "tests/tatwo-skillet-cli-merge.test.sh",
-    "docs/tatwo/SKILLET_AND_HOT_SYNC.md",
+    "archive/governance-legacy-20260917/docs/tatwo/SKILLET_AND_HOT_SYNC.md",
   ];
   for (const relativePath of optional) {
     const absolute = path.join(repoRoot, relativePath);

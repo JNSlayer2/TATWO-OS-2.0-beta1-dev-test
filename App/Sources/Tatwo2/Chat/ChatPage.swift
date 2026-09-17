@@ -473,6 +473,7 @@ struct ChatPage: View {
                 onExecute: model.confirmActivePlan,
                 onStart: model.startActivePlan,
                 onFeedbackSubmitted: model.finishFeedbackPlan,
+                onDistillSubmission: model.saveDistillSubmission,
                 onPRSubmit: model.submitActivePRPlan,
                 onPRDiscuss: model.returnActivePRToDiscussion)
                 .id(model.activePlanArtifact?.planID)

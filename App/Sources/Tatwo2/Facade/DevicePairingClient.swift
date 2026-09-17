@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Network
 
 final class DevicePairingClient: @unchecked Sendable {
@@ -7,6 +8,7 @@ final class DevicePairingClient: @unchecked Sendable {
         let publicKey: String
         let name: String
         var user: String?      // 副機自己的登入名，主機記名單用（2026-09-05 真雙機抓到兩邊都記成自己）
+        var deviceID: String?
     }
 
     private struct PairResponse: Codable {
@@ -15,6 +17,7 @@ final class DevicePairingClient: @unchecked Sendable {
         var hostName: String?
         var hostUser: String?   // 主機的登入名，副機之後 ssh 要用
         var reason: String?
+        var hostDeviceID: String?
     }
 
     private final class ReplyBox: @unchecked Sendable {
@@ -60,6 +63,7 @@ final class DevicePairingClient: @unchecked Sendable {
     }
 
     private let registry: DeviceRegistry
+    private let entry: TatwoEntry
     private let privateKeyURL: URL
     private let sshVerifier: (String) -> Bool
     private let hostFingerprintResolver: (String) -> String?
@@ -73,6 +77,7 @@ final class DevicePairingClient: @unchecked Sendable {
         hostFingerprintResolver: ((String) -> String?)? = nil
     ) {
         self.registry = registry ?? DeviceRegistry(environment: environment)
+        self.entry = TatwoEntry(environment: environment)
         let resolvedPrivateKeyURL = privateKeyURL
             ?? environment["TATWO2_SSH_KEY_PATH"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/id_ed25519")
@@ -93,7 +98,11 @@ final class DevicePairingClient: @unchecked Sendable {
             throw ClientError.invalidPort
         }
         let publicKey = try ensurePublicKey()
-        let request = PairRequest(code: code.uppercased(), publicKey: publicKey, name: name, user: NSUserName())
+        // A first pairing adopts the host-issued UUID; an already identified device keeps it.
+        let local = try DeviceIdentityStore.readLocal(entry: entry)
+        let request = PairRequest(
+            code: code.uppercased(), publicKey: publicKey, name: name, user: NSUserName(),
+            deviceID: local?.deviceID)
         var payload = try JSONEncoder().encode(request)
         payload.append(0x0A)
 
@@ -137,7 +146,18 @@ final class DevicePairingClient: @unchecked Sendable {
         guard response.ok else {
             throw ClientError.pairingRejected(response.reason ?? "unknown")
         }
+        // Older hosts (before W76) do not return hostDeviceID. Accept that during the
+        // two-device upgrade window: derive a stable per-host ID instead of failing pairing.
         guard let deviceID = response.deviceID, let hostName = response.hostName else {
+            throw ClientError.responseInvalid
+        }
+        let hostDeviceID = response.hostDeviceID
+            ?? UUID(uuidString: Self.legacyHostID(host: cleanHost, name: hostName))?.uuidString
+            ?? UUID().uuidString
+        guard UUID(uuidString: deviceID) != nil, UUID(uuidString: hostDeviceID) != nil,
+              deviceID.lowercased() != hostDeviceID.lowercased(),
+              local.map({ $0.deviceID.lowercased() == deviceID.lowercased() }) ?? true
+        else {
             throw ClientError.responseInvalid
         }
         let hostUser = response.hostUser ?? NSUserName()
@@ -147,13 +167,25 @@ final class DevicePairingClient: @unchecked Sendable {
         guard let fingerprint = hostFingerprintResolver(cleanHost) else {
             throw ClientError.hostFingerprintUnavailable
         }
-        return try registry.add(
-            id: deviceID,
+        _ = try DeviceIdentityStore.forLocalDevice(entry: entry, pairedDeviceID: deviceID, name: name)
+        let now = Date()
+        return try registry.recordPairedHost(DeviceRecord(
+            id: hostDeviceID.lowercased(),
             name: hostName,
             host: cleanHost,
             user: hostUser,
             sshPort: 22,
-            publicKeyFingerprint: fingerprint)
+            publicKeyFingerprint: fingerprint,
+            addedAt: now, lastSeenAt: now, workdirMap: [:]),
+            localDeviceID: deviceID)
+    }
+
+    /// Deterministic UUID-shaped ID for a pre-W76 host (name-based, lowercase hex).
+    static func legacyHostID(host: String, name: String) -> String {
+        let digest = Array(SHA256.hash(data: Data("tatwo-legacy-host:\(host.lowercased()):\(name)".utf8)))
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+        let c = Array(hex)
+        return "\(String(c[0..<8]))-\(String(c[8..<12]))-5\(String(c[13..<16]))-a\(String(c[17..<20]))-\(String(c[20..<32]))"
     }
 
     private func ensurePublicKey() throws -> String {

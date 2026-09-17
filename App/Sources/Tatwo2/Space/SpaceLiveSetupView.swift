@@ -13,10 +13,74 @@ struct SpaceLiveSetupView: View {
             if let state = controller.state {
                 SpaceSetupPreviewView(preview: state, opensSettings: opensSettings,
                                       onOpenBuilder: onOpenBuilder)
+            } else if controller.isEmptyWorkspace {
+                SpaceEmptyDomainView()
             } else {
-                Text(controller.error == nil ? "正在讀取 work space…" : "Work Space 資料未就緒")
+                Text(controller.error == nil ? SpaceCreation.loadingText : "Work Space 資料未就緒")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
+/// 公開版全新安裝：一個領域都沒有。不是錯誤，給說明與建立入口（W89）。
+struct SpaceEmptyDomainView: View {
+    @ObservedObject private var controller = SpaceWorkspaceController.shared
+    @State private var name = ""
+    @State private var failure: String?
+    @State private var creating = false
+
+    private var outcome: SpaceCreationOutcome { controller.creationOutcome() }
+    private var canCreate: Bool {
+        !creating && SpaceCreation.normalizedName(name) != nil
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text(SpaceCreation.emptyExplanation)
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            switch outcome {
+            case .ready:
+                TextField(SpaceCreation.namePlaceholder, text: $name)
+                    .accessibilityLabel(SpaceCreation.namePlaceholder)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+                    .onSubmit(create)
+                Button(SpaceCreation.createTitle, action: create)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canCreate)
+            case .needsBot:
+                Text(SpaceCreation.guidance(for: .needsBot))
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(SpaceCreation.needsBotTitle) { controller.openBotPage() }
+                    .buttonStyle(.borderedProminent)
+            case .needsProject:
+                Text(SpaceCreation.guidance(for: .needsProject))
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(SpaceCreation.needsProjectTitle)
+                    .font(.callout.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            if let failure {
+                Text(failure).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
+    }
+
+    private func create() {
+        guard canCreate else { return }
+        let requested = name
+        creating = true
+        failure = nil
+        Task {
+            defer { creating = false }
+            switch await controller.createDomain(name: requested) {
+            case .created: name = ""
+            case .blocked(let outcome): failure = SpaceCreation.guidance(for: outcome)
+            case .failed(let message): failure = message
             }
         }
     }

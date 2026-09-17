@@ -228,6 +228,10 @@ check(!resistant.isRunning && kill(-ownedGroup,0) != 0,"TERM-resistant owned gro
 print("W62 \(checks) production checks PASS")
 `);
   const files=['Facade/PluginLiveness.swift','Facade/PluginServerConfiguration.swift','Facade/PluginsSource.swift',
+    // W80b: compile the real managed-service dependency closure; do not stub its availability.
+    'Facade/GBrainService.swift','Facade/GBrainKeychain.swift','Facade/TatwoEntry.swift',
+    'Facade/DeviceIdentity.swift','Facade/DeviceStatus.swift','Facade/DeviceRegistry.swift',
+    'Facade/OSUpstream.swift','Facade/OSUpstreamRefresh.swift','Facade/TatwoResources.swift',
     'Facade/PluginsBuiltinSource.swift','Facade/PluginsRemoval.swift','Facade/EnginePaths.swift','Engine/NativeStagingIsolation.swift',
     'Browser/Diagnostics/BrowserDiagnosticsAudit.swift','Browser/Diagnostics/BrowserDiagnosticsPrivacy.swift'].map(p=>path.join(root,app+p));
   run('swiftc',['-num-threads','2',...files,path.join(dir,'stubs.swift'),path.join(dir,'main.swift'),'-o',path.join(dir,'fixture')]);

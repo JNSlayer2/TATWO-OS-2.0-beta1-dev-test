@@ -18,6 +18,10 @@ struct UpdateAvailableCard: View {
             }
             Text("目前版本 v\(currentVersion)（build \(currentBuild)）")
                 .font(.footnote).foregroundStyle(.secondary)
+            if !updater.lastPhases.isEmpty {
+                Text(updater.lastPhases).font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let release = checker.availableRelease {
                 Text("\(checker.isPrivateChannel ? "私人通道 · " : "")目前 v\(currentVersion) → 可更新到 \(release.tag_name.hasPrefix("v") ? release.tag_name : "v" + release.tag_name)")
                     .font(.headline)
@@ -69,6 +73,7 @@ struct UpdateAvailableCard: View {
                 .font(.footnote)
             }
         }
+        .task(id: updater.lastResult) { await updater.refreshPhaseSummary() }
         .padding(16)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
     }

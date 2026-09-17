@@ -7,7 +7,7 @@ description: Use when the user invokes TATWO Ultrawork, asks how to split work b
 
 一份技能，一套工作邏輯。舊版的 contract、receipt、S/M/L/XL 分級、Loop Governor 全部退役，
 不再作為現行規矩；本檔是現行分工說明。
-上游規矩仍是 TATWO OS 的 `os.md` 與 `os-upstream.md`；本技能只講「怎麼分工、怎麼驗收」。
+上游規矩是入口憲法 `~/AI/TATWO OS/os.md`（角色表見憲法 §4；本技能 §2 表必須與它一致）；本技能只講「怎麼分工、怎麼驗收」。
 
 ## 1. 一句話
 
@@ -24,7 +24,7 @@ description: Use when the user invokes TATWO Ultrawork, asks how to split work b
 | 機械工 | Grok 4.6 | 搬檔、轉檔、批次替換、跑既定腳本 | 不做需要判斷的事；不開 high effort |
 | 審查 | 另一家引擎（GPT 系優先） | 高風險 diff 的一輪唯讀審查 | 不自審：Claude 系不審 Claude 系 |
 
-GPT-5.6 系列不在預設名單。模型換代時只改這張表，不改流程。
+GPT-5.6 系列不在預設名單。模型換代時先由主設備更新入口憲法 §4，再同步本技能 §2 表，不另訂預設。
 
 ## 3. 何時派、何時自己做、何時審
 

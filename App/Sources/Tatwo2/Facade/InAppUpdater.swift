@@ -14,6 +14,7 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
     private var cancelled = false
     private var savedBytes: Int64 = 0
     private var authenticated = false
+    private var requestedRange: String?
     private let rebase: @Sendable (Int64, Int64) -> Void
     private var resumeURL: URL { destination.appendingPathExtension("resume") }
     // Only the serial session delegate queue accesses fileResult.
@@ -28,6 +29,7 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
 
     func download(request: URLRequest) async throws -> URL {
         authenticated = request.value(forHTTPHeaderField: "Authorization") != nil
+        requestedRange = request.value(forHTTPHeaderField: "Range")
         try Task.checkCancellation()
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
         let resume = authenticated ? nil : try? Data(contentsOf: resumeURL)
@@ -107,8 +109,24 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
         pending?.resume(with: result)
     }
 
+    private func acceptsRangeResponse(_ response: URLResponse?, written: Int64 = 0) -> Bool {
+        guard let requestedRange else { return true }
+        let bounds = requestedRange.replacingOccurrences(of: "bytes=", with: "").split(separator: "-").compactMap { Int64($0) }
+        guard bounds.count == 2, bounds[1] >= bounds[0],
+              let response = response as? HTTPURLResponse, response.statusCode == 206,
+              let range = response.value(forHTTPHeaderField: "Content-Range"), range.hasPrefix("bytes "),
+              range.split(separator: "/").first?.split(separator: "-").last == requestedRange.split(separator: "-").last
+        else { return false }
+        let length = bounds[1] - bounds[0] + 1
+        return written <= length && response.expectedContentLength <= length
+    }
+
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        // Reject ignored/oversized ranges while streaming, not after six full archives hit disk.
+        guard acceptsRangeResponse(downloadTask.response, written: totalBytesWritten) else {
+            fileResult = .failure(URLError(.badServerResponse)); downloadTask.cancel(); return
+        }
         lock.withLock { savedBytes = totalBytesWritten }
         report(totalBytesWritten, totalBytesExpectedToWrite)
     }
@@ -123,6 +141,7 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
             try lock.withLock {
                 guard outcome == nil, !cancelled else { throw CancellationError() }
                 try Self.check(downloadTask.response, resumed: true)
+                guard acceptsRangeResponse(downloadTask.response) else { throw URLError(.badServerResponse) }
                 // location expires when this callback returns: move synchronously, fenced against cancellation.
                 try FileManager.default.moveItem(at: location, to: destination)
                 report(downloadTask.countOfBytesReceived, downloadTask.countOfBytesExpectedToReceive)
@@ -132,6 +151,12 @@ private final class UpdateDownloadProgress: NSObject, URLSessionDownloadDelegate
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard !lock.withLock({ cancelled }) else { return } // Cancellation finishes only after resume data is durable.
+        if requestedRange != nil, let fileResult, case .failure = fileResult {
+            // Wait for didComplete before retrying: an invalid response must not race a
+            // subsequent attempt by publishing inappropriate whole-file resume data.
+            try? Data().write(to: resumeURL, options: .atomic)
+            finish(fileResult); return
+        }
         do {
             try saveResume((error as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
             if error == nil && !authenticated { try Data().write(to: resumeURL, options: .atomic) } // A completed HTTP response consumes the old resume request.
@@ -201,6 +226,34 @@ final class InAppUpdater: ObservableObject {
     @Published private(set) var confirmingRestart = false
     /// 上一次更新的結果（由 helper 寫、本次啟動讀到），給更新卡顯示。
     @Published private(set) var lastResult: String?
+    @Published private(set) var lastPhases = ""
+
+    func refreshPhaseSummary() async {
+        let folder = directory.appendingPathComponent("results")
+        let summary = await Task.detached(priority: .utility) {
+            let files = ((try? FileManager.default.contentsOfDirectory(at: folder,
+                includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+                .filter { $0.pathExtension == "json" }
+                .sorted { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                    > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
+            if let latest = files.first,
+               let data = try? Data(contentsOf: latest),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let phases = object["phases"] as? [String: Any] {
+                let downloads = phases["download"] as? [[String: Any]] ?? []
+                let download = downloads.map { item in
+                    String(format: "%@ %.1f 秒", item["name"] as? String ?? "附件", (item["seconds"] as? NSNumber)?.doubleValue ?? 0)
+                }.joined(separator: "、")
+                return "下載：" + download + " · " + ["verify", "extract", "switch"].map { key in
+                    let title = ["verify": "校驗", "extract": "解壓", "switch": "切換"][key]!
+                    return String(format: "%@ %.1f 秒", title, ((phases[key] as? NSNumber)?.doubleValue ?? 0) + (key == "verify" ? (phases["prefetchVerify"] as? NSNumber)?.doubleValue ?? 0 : 0))
+                }.joined(separator: " · ")
+            }
+            return ""
+        }.value
+        guard !Task.isCancelled else { return }
+        lastPhases = summary
+    }
 
     @Published private(set) var downloadProgress: Double?
     @Published private(set) var downloadedBytes: Int64 = 0
@@ -259,13 +312,19 @@ final class InAppUpdater: ObservableObject {
     private func checkSpace() throws {
         // 待接 todo #25 治理器的磁碟保留額。
         let minimumFreeBytes: Int64 = 2_000_000_000
+        // candidateBytes bounds both selected archives and the expanded App.
+        // W64 named safety budget: 2× for staging/switch. W87a adds 2× for range parts + joining.
         let archiveSafetyMultiplier: Int64 = 2
+        let rangePeakMultiplier: Int64 = 2
         do {
-            guard candidateBytes >= 0, candidateBytes <= Int64.max / archiveSafetyMultiplier else {
+            guard candidateBytes >= 0,
+                  candidateBytes <= Int64.max / (archiveSafetyMultiplier + rangePeakMultiplier) else {
                 throw NSError(domain: "Updater", code: 2, userInfo: [NSLocalizedDescriptionKey: "無法確認更新所需空間"])
             }
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            // W24 gate (named budget) plus the W87a range-parts peak on top of it.
             let required = max(minimumFreeBytes, candidateBytes * archiveSafetyMultiplier)
+                + candidateBytes * rangePeakMultiplier
             for volume in [directory, URL(fileURLWithPath: Self.destinationApp).deletingLastPathComponent()] {
                 guard let free = try fileManager.attributesOfFileSystem(forPath: volume.path)[.systemFreeSize] as? NSNumber,
                       free.int64Value >= 0 else {
@@ -810,14 +869,36 @@ final class InAppUpdater: ObservableObject {
         downloadSource = "詢問已配對設備…"
         let offers = await PeerUpdateSource.discover(DeviceRegistry().list())
         try Task.checkCancellation()
+        var attachmentProgress: [String: Int64] = [:]
+        var downloadPhases: [[String: Any]] = []
+        var verifySeconds: Double = 0
         func fetch(_ archive: Asset, offset: Int64) async throws -> URL {
-            defer { Self.removeInvalidDownloads(in: folder) }
+            let started = ProcessInfo.processInfo.systemUptime
+            var source = "github", parts = 0
+            let verification = UpdateVerificationTiming()
+            defer {
+                verifySeconds += verification.seconds
+                downloadPhases.append(["name": archive.name, "source": source, "bytes": archive.size,
+                    "seconds": max(0, ProcessInfo.processInfo.systemUptime - started - verification.seconds), "parts": parts])
+            }
             let expected = expectedHashes[archive.name]!
             let zip = folder.appendingPathComponent(archive.name)
+            var verified = false
+            defer {
+                // A sibling can fail after this download completes but before its SHA gate.
+                if !verified { try? fileManager.removeItem(at: zip) }
+                Self.removeInvalidDownloads(in: folder)
+            }
             if fileManager.fileExists(atPath: zip.path) {
-                if try await Self.digest(zip) == expected.lowercased() {
+                let verifyStarted = ProcessInfo.processInfo.systemUptime
+                let actual = try await Self.digest(zip)
+                verification.add(ProcessInfo.processInfo.systemUptime - verifyStarted)
+                if actual == expected.lowercased() {
+                    verified = true
+                    source = "prefetched"
                     downloadSource = deltaProgress + "使用已校驗快取"
-                    recordDownloadProgress(offset + archive.size, total: plannedBytes); return zip
+                    attachmentProgress[archive.name] = archive.size
+                    recordDownloadProgress(attachmentProgress.values.reduce(0, +), total: plannedBytes); return zip
                 }
                 try fileManager.moveItem(at: zip, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
             }
@@ -825,8 +906,13 @@ final class InAppUpdater: ObservableObject {
                 try Task.checkCancellation()
                 downloadSource = deltaProgress + "從『\(offer.device.name)』取得…"
                 if let candidate = try? await PeerUpdateSource.pull(offer, tag: tag, name: archive.name, folder: folder) {
+                    let verifyStarted = ProcessInfo.processInfo.systemUptime
+                    defer { verification.add(ProcessInfo.processInfo.systemUptime - verifyStarted) }
                     if let actual = try? await Self.digest(candidate), actual == expected {
                         try Task.checkCancellation()
+                        verified = true
+                        source = "peer"
+                        attachmentProgress[archive.name] = archive.size
                         try fileManager.moveItem(at: candidate, to: zip)
                         downloadSource = deltaProgress + String(format: "從『%@』取得 %.1f MB", offer.device.name, Double(archive.size) / 1_000_000)
                         return zip
@@ -837,32 +923,60 @@ final class InAppUpdater: ObservableObject {
                 // Interrupted candidates stay in peer-key; checksum-rejected downloads are removed on exit.
             }
             try Task.checkCancellation()
-            downloadSource = deltaProgress + "從 GitHub 下載…"
-            _ = try await retryDownload {
-                let progress = UpdateDownloadProgress(destination: zip, rebase: { [weak self] written, _ in
-                    Task { @MainActor in
-                        guard let self, self.downloadID == id, self.phase == .starting else { return }
-                        self.downloadedBytes = offset + written; self.speedSamples = []
-                    }
-                }) { [weak self] written, total in
-                    Task { @MainActor in
-                        guard let self, self.downloadID == id, self.phase == .starting else { return }
-                        self.recordDownloadProgress(offset + written, total: max(plannedBytes, offset + max(0, total)))
-                    }
+            let report: @Sendable (Int64, Int64) -> Void = { [weak self] written, total in
+                Task { @MainActor in
+                    guard let self, self.downloadID == id, self.phase == .starting else { return }
+                    let written = max(0, min(archive.size, written))
+                    attachmentProgress[archive.name] = written
+                    let offset = attachmentProgress.values.reduce(0, +) - written
+                    self.recordDownloadProgress(offset + written, total: max(plannedBytes, offset + max(0, total)))
                 }
-                return try await progress.download(request: try assetRequest(archive))
+            }
+            let mirror = UserDefaults.standard.string(forKey: "update-mirror-base")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let base = URL(string: mirror), base.scheme == "https", base.host != nil,
+               base.user == nil, base.password == nil, base.query == nil, base.fragment == nil {
+                let candidate = zip.appendingPathExtension("mirror")
+                downloadSource = deltaProgress + "從鏡像下載…"
+                do {
+                    let mirrorRequest = URLRequest(url: base.appendingPathComponent(archive.name))
+                    parts = try await UpdateParallelDownload.download(request: mirrorRequest, destination: candidate,
+                        size: archive.size, expected: expected, verification: { verification.add($0) }, report: report)
+                    try fileManager.moveItem(at: candidate, to: zip)
+                    verified = true
+                    source = "mirror"
+                    return zip
+                } catch {
+                    try Task.checkCancellation()
+                    try? fileManager.removeItem(at: candidate)
+                }
             }
             try Task.checkCancellation()
+            downloadSource = deltaProgress + "從 GitHub 下載…"
+            parts = try await retryDownload {
+                if archive.size < 20_000_000 {
+                    let progress = UpdateDownloadProgress(destination: zip, rebase: { _, _ in }, report: report)
+                    _ = try await progress.download(request: try assetRequest(archive))
+                    return 1
+                }
+                return try await UpdateParallelDownload.download(request: try assetRequest(archive), destination: zip,
+                    size: archive.size, expected: expected, verification: { verification.add($0) }, report: report)
+            }
+            try Task.checkCancellation()
+            let verifyStarted = ProcessInfo.processInfo.systemUptime
             guard try await Self.digest(zip) == expected.lowercased() else {
                 try fileManager.moveItem(at: zip, to: folder.appendingPathComponent("invalid-\(UUID().uuidString).zip"))
                 throw failure("校驗失敗：SHA-256 不符，請重新下載")
             }
+            verification.add(ProcessInfo.processInfo.systemUptime - verifyStarted)
+            verified = true
             return zip
         }
         var result = UpdateArchives(), completed: Int64 = 0
         result.route = useDelta ? "delta" : "layered"
+        // Verify each layer before requesting the next; ranges within a layer stay parallel.
         for archive in archives {
             let zip = try await fetch(archive, offset: completed)
+            attachmentProgress[archive.name] = archive.size
             try? PeerUpdateSource.publish(directory, tag: tag) {
                 if useDelta { $0.files[archive.name] = zip.path }
                 else if archive.name.hasPrefix("TATWO-OS-runtime-") { $0.runtime = zip.path } else { $0.app = zip.path }
@@ -877,6 +991,8 @@ final class InAppUpdater: ObservableObject {
             else if archive.name == deltaName { result.deltaZip = zip }
             else { result.runtimeZip = zip }
         }
+        try JSONSerialization.data(withJSONObject: ["download": downloadPhases, "verify": verifySeconds,
+            "extract": 0, "switch": 0]).write(to: folder.appendingPathComponent("download-phases.json"), options: .atomic)
         // Cache the shared, tag-pinned installer too; restart never fetches a control script.
         var scriptRequest = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/contents/install.sh?ref=\(tag)")!)
         scriptRequest.setValue("application/vnd.github.raw+json", forHTTPHeaderField: "Accept")
@@ -902,6 +1018,156 @@ final class InAppUpdater: ObservableObject {
             try? fm.removeItem(at: file) // Our own checksum-rejected download, never user work.
         }
     }
+
+    // PARALLEL-DOWNLOAD-BEGIN
+    /// Bounded, disk-backed ranges: never materialize a runtime archive in RAM.
+    private enum UpdateParallelDownload {
+        static func digest(_ file: URL) throws -> String {
+            let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
+            var hash = SHA256()
+            while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty { hash.update(data: data) }
+            return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        }
+
+        static func download(request: URLRequest, destination: URL, size: Int64, expected: String,
+                             verification: @escaping @Sendable (TimeInterval) -> Void = { _ in },
+                             report: @escaping @Sendable (Int64, Int64) -> Void) async throws -> Int {
+            func checkedDigest() throws -> String {
+                let started = ProcessInfo.processInfo.systemUptime
+                defer { verification(ProcessInfo.processInfo.systemUptime - started) }
+                return try digest(destination)
+            }
+            let configured = Int(ProcessInfo.processInfo.environment["TATWO_OS_DOWNLOAD_PARTS"] ?? "24") ?? 24
+            let count = (1...32).contains(configured) ? configured : 24
+            if size >= 20_000_000, count > 1 {
+                var joined = false
+                do {
+                    try await ranges(request: request, destination: destination, size: size, count: count, report: report)
+                    joined = true
+                } catch {
+                    try Task.checkCancellation()
+                    try? FileManager.default.removeItem(at: destination)
+                    // Unsupported/failed ranges may fall back, but checksum failure must not.
+                }
+                if joined {
+                    do {
+                        guard try checkedDigest() == expected else { throw URLError(.cannotDecodeContentData) }
+                        return count
+                    } catch {
+                        try? FileManager.default.removeItem(at: destination)
+                        try? FileManager.default.removeItem(at: partsFolder(request, destination, size, count))
+                        throw error
+                    }
+                }
+            }
+            _ = try await UpdateDownloadProgress(destination: destination, rebase: { _, _ in }, report: report).download(request: request)
+            guard try checkedDigest() == expected else {
+                try? FileManager.default.removeItem(at: destination)
+                throw URLError(.cannotDecodeContentData)
+            }
+            try? FileManager.default.removeItem(at: partsFolder(request, destination, size, count))
+            return 1
+        }
+
+        private static func partsFolder(_ request: URLRequest, _ destination: URL, _ size: Int64, _ count: Int) -> URL {
+            let identity = SHA256.hash(data: Data((request.url?.absoluteString ?? "").utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+            return destination.appendingPathExtension("parts-\(identity)-\(size)-\(count)")
+        }
+
+        private static func ranges(request: URLRequest, destination: URL, size: Int64, count: Int,
+                                   report: @escaping @Sendable (Int64, Int64) -> Void) async throws {
+            let session = URLSession(configuration: .ephemeral)
+            defer { session.invalidateAndCancel() }
+            var head = request; head.httpMethod = "HEAD"; head.timeoutInterval = 60
+            head.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            let (_, response) = try await session.data(for: head, delegate: UpdateRedirectDelegate.shared)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  http.expectedContentLength == size else { throw URLError(.badServerResponse) }
+            var transport = request
+            if let resolved = response.url, resolved != request.url {
+                guard resolved.scheme == "https" else { throw URLError(.badURL) }
+                transport.url = resolved
+                if resolved.host != request.url?.host || resolved.port != request.url?.port {
+                    transport.setValue(nil, forHTTPHeaderField: "Authorization")
+                }
+            }
+            let rangeRequest = transport
+            let fm = FileManager.default
+            // Source identity prevents a mirror's partial bytes/resume data crossing into GitHub.
+            let folder = partsFolder(request, destination, size, count)
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            let progress = UpdateRangeProgress(count: count, total: size, report: report)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for index in 0..<count {
+                    let start = size * Int64(index) / Int64(count), end = size * Int64(index + 1) / Int64(count) - 1
+                    group.addTask {
+                        let part = folder.appendingPathComponent(String(index))
+                        if (try? fm.attributesOfItem(atPath: part.path)[.size] as? NSNumber)?.int64Value == end - start + 1 {
+                            progress.update(index, bytes: end - start + 1); return
+                        }
+                        try? fm.removeItem(at: part)
+                        var ranged = rangeRequest
+                        ranged.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+                        ranged.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                        for attempt in 0..<3 {
+                            do {
+                                _ = try await UpdateDownloadProgress(destination: part, rebase: { _, _ in }) { bytes, _ in
+                                    progress.update(index, bytes: min(end - start + 1, max(0, bytes)))
+                                }.download(request: ranged)
+                                guard (try fm.attributesOfItem(atPath: part.path)[.size] as? NSNumber)?.int64Value == end - start + 1
+                                else { throw URLError(.badServerResponse) }
+                                return
+                            } catch {
+                                try Task.checkCancellation()
+                                try? fm.removeItem(at: part)
+                                if attempt == 2 { throw error }
+                            }
+                        }
+                    }
+                }
+                try await group.waitForAll()
+            }
+            let joining = destination.appendingPathExtension("joining")
+            fm.createFile(atPath: joining.path, contents: nil)
+            let writer = try FileHandle(forWritingTo: joining)
+            defer { try? writer.close(); try? fm.removeItem(at: joining) }
+            try writer.truncate(atOffset: 0)
+            for index in 0..<count {
+                try Task.checkCancellation()
+                let reader = try FileHandle(forReadingFrom: folder.appendingPathComponent(String(index)))
+                do {
+                    defer { try? reader.close() }
+                    while let data = try reader.read(upToCount: 1_048_576), !data.isEmpty { try writer.write(contentsOf: data) }
+                }
+            }
+            try writer.close()
+            try Task.checkCancellation()
+            try fm.moveItem(at: joining, to: destination)
+            try? fm.removeItem(at: folder)
+        }
+    }
+
+    private final class UpdateVerificationTiming: @unchecked Sendable {
+        private let lock = NSLock()
+        private var elapsed: TimeInterval = 0
+        var seconds: TimeInterval { lock.withLock { elapsed } }
+        func add(_ seconds: TimeInterval) { lock.withLock { elapsed += seconds } }
+    }
+
+    private final class UpdateRangeProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private var bytes: [Int64]
+        private let total: Int64
+        private let report: @Sendable (Int64, Int64) -> Void
+        init(count: Int, total: Int64, report: @escaping @Sendable (Int64, Int64) -> Void) {
+            bytes = Array(repeating: 0, count: count); self.total = total; self.report = report
+        }
+        func update(_ index: Int, bytes value: Int64) {
+            let written = lock.withLock { bytes[index] = value; return bytes.reduce(0, +) }
+            report(written, total)
+        }
+    }
+    // PARALLEL-DOWNLOAD-END
 
     private func recordDownloadProgress(_ written: Int64, total: Int64,
                                         now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
@@ -1067,7 +1333,19 @@ final class InAppUpdater: ObservableObject {
           [[ "$install_seconds" =~ ^[0-9]+$ ]] || install_seconds=0
           # Canonicalize leading zeroes without arithmetic overflow; JSON numbers cannot start with 00.
           install_seconds="$(printf '%s' "$install_seconds" | sed 's/^0*//')"; install_seconds="${install_seconds:-0}"
-          printf '{"ok":%s,"tag":"%s","message":"%s","runID":"%s","installSeconds":%s}\\n' "$1" "$TAG" "$2" "$RUN_ID" "$install_seconds" > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
+          printf '{"ok":%s,"tag":"%s","message":"%s","runID":"%s","installSeconds":%s}\\n' "$1" "$TAG" "$2" "$RUN_ID" "$install_seconds" > "$RESULT.tmp"
+          local phases='{"download":[],"verify":0,"extract":0,"switch":0}'
+          if [ -f "$RESULT.phases" ]; then phases="$(cat "$RESULT.phases")"; fi
+          if [ -f "$RESULT.phases" ]; then plutil -insert phases -json "$phases" "$RESULT.tmp"; fi
+          local prefetch_phases="$(dirname "$PRIVATE_INSTALLER")/download-phases.json"
+          if [ -f "$prefetch_phases" ]; then
+            if [ ! -f "$RESULT.phases" ]; then plutil -insert phases -json "$phases" "$RESULT.tmp"; fi
+            local downloads
+            downloads="$(plutil -extract download json -o - "$prefetch_phases")"
+            plutil -replace phases.download -json "$downloads" "$RESULT.tmp"
+            plutil -insert phases.prefetchVerify -float "$(plutil -extract verify raw -o - "$prefetch_phases")" "$RESULT.tmp"
+          fi
+          mv "$RESULT.tmp" "$RESULT"
         }
         abnormal_exit() {
           trap - EXIT INT TERM
@@ -1097,6 +1375,7 @@ final class InAppUpdater: ObservableObject {
         START_SECONDS=$SECONDS
         export TATWO_OS_INSTALL_STARTED_AT="$(date +%s)"
         export TATWO_OS_TIMING_FILE="$RESULT.seconds"
+        export TATWO_OS_PHASES_FILE="$RESULT.phases"
         if pgrep -x tatwo2 >/dev/null; then
           write_result false app_relaunched
           finish

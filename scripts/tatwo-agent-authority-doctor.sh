@@ -17,8 +17,8 @@ while [ "$#" -gt 0 ]; do
 Usage: scripts/tatwo-agent-authority-doctor.sh [--repo PATH] [--json] [--no-grok-inspect]
 
 Checks:
-  - WORK_OS.md carries the canonical anti-revoke lane contract.
-  - AGENTS.md and CLAUDE.md distinguish reviewer / sandbox_builder / host_delegate.
+  - AGENTS.md and CLAUDE.md point to the entrance constitution and its §4 roles.
+  - Repository pointers do not reinstall the retired 1.0 lane contract.
   - codex-claude-bridge and grok-isolated wrappers contain route-scope language.
   - Grok inspect sees the project instructions from an isolated HOME, so the
     instructions themselves must be lane-safe.
@@ -53,14 +53,15 @@ check_contains() {
   fi
 }
 
-check_contains "work_os_anti_revoke" "$repo/docs/tatwo/WORK_OS.md" "Agent authority / anti-revoke invariant" "canonical Work OS lane contract present"
-check_contains "work_os_host_delegate" "$repo/docs/tatwo/WORK_OS.md" "\`host_delegate\`" "host_delegate lane documented"
-check_contains "agents_lanes" "$repo/AGENTS.md" "Agent authority lanes" "AGENTS.md has short lane contract"
-check_contains "agents_no_model_revoke" "$repo/AGENTS.md" "must not claim another model \"revoked\" them" "AGENTS.md blocks false revoke language"
-check_contains "agents_blocker_schema" "$repo/AGENTS.md" "blocker_class=tool_unavailable" "AGENTS.md requires structured blocker_class"
-check_contains "claude_lane_contract" "$repo/CLAUDE.md" "It is a lane contract, not a global revocation rule" "CLAUDE.md no longer acts as global revocation"
-check_contains "claude_host_delegate" "$repo/CLAUDE.md" "### \`host_delegate\`" "CLAUDE.md allows explicit scoped host delegate work"
-check_contains "claude_blocker_classes" "$repo/CLAUDE.md" "blocker_class=tool_unavailable" "CLAUDE.md requires structured blocker classes"
+for pointer in AGENTS.md CLAUDE.md; do
+  check_contains "${pointer}_constitution" "$repo/$pointer" '~/AI/TATWO OS/os.md' "points to entrance constitution"
+  check_contains "${pointer}_roles" "$repo/$pointer" '憲法 §4' "roles follow constitution section 4"
+  if grep -Eq 'host_delegate|sandbox_builder|blocker_class|S/M/L/XL' "$repo/$pointer"; then
+    add_check "${pointer}_legacy_absent" false "retired governance remains in pointer"
+  else
+    add_check "${pointer}_legacy_absent" true "retired governance absent from pointer"
+  fi
+done
 
 bridge="${CODEX_CLAUDE_BRIDGE:-$HOME/.codex/bin/codex-claude-bridge}"
 if [ -x "$bridge" ]; then
