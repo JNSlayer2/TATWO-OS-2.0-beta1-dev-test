@@ -188,5 +188,5 @@ test('both scripts parse; diagnostics name common affected sites', () => {
   success(spawnSync('bash', ['-n', bundle], { encoding: 'utf8' }));
   assert.match(fs.readFileSync(path.join(root,
     'App/Sources/Tatwo2/Browser/Diagnostics/BrowserDiagnosticsReport.swift'), 'utf8'),
-  /常見：X／Twitter、部分新聞站影片/);
+  /自建 CEF（含 H.264／AAC）|常見：X／Twitter、部分新聞站影片/);
 });

@@ -184,6 +184,10 @@ enum SelfTest {
             catch { print("W78TEST FAIL \(error)"); exit(1) }
         }
         #endif
+        if ProcessInfo.processInfo.environment["TATWO2_W95_TEST_ROOT"] != nil {
+            do { try jobQueueChecks(); print("W95TEST SUMMARY failures=0"); exit(0) }
+            catch { print("W95TEST FAIL \(error)"); exit(1) }
+        }
         if ProcessInfo.processInfo.environment["TATWO2_DEVICESTATUSTEST"] == "1" {
             do { try deviceStatusReadOnlyChecks(); exit(0) }
             catch { print("DEVICESTATUSTEST FAIL \(error)"); exit(1) }
@@ -207,6 +211,9 @@ enum SelfTest {
         }
         if ProcessInfo.processInfo.environment["TATWO2_OSUPSTREAMREFRESHTEST"] == "1" {
             exit(runOSUpstreamRefreshTest() ? 0 : 1)
+        }
+        if ProcessInfo.processInfo.environment["TATWO2_W96SKILLSTEST"] == "1" {
+            exit(runManagedSkillsTest() ? 0 : 1)
         }
         if let root = ProcessInfo.processInfo.environment["TATWO2_W89_TEST_ROOT"] {
             guard let live = ProcessInfo.processInfo.environment["TATWO2_LIVE_ROOT"],
@@ -837,6 +844,76 @@ extension SelfTest {
         } catch { check("filesystem scenarios", false) }
         // Retain synthetic temporary fixtures for inspection; never delete user artifacts.
         print(failed ? "OSUPSTREAMREFRESHTEST FAILED" : "OSUPSTREAMREFRESHTEST ALL PASS")
+        return !failed
+    }
+}
+
+extension SelfTest {
+    /// TATWO2_W96SKILLSTEST=1：只在暫存目錄驗「技能隨 App 出貨」的種檔三態
+    /// （全新／未手改更新／手改保留），不碰真實的 Application Support。
+    static func runManagedSkillsTest() -> Bool {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("tatwo2-w96-\(UUID().uuidString)")
+        let bundle = base.appendingPathComponent("bundle")
+        let root = base.appendingPathComponent("skills")
+        let skill = root.appendingPathComponent(ManagedSkills.skillID)
+        let manifest = skill.appendingPathComponent("SKILL.md")
+        let agent = skill.appendingPathComponent("agents/openai.yaml")
+        let marker = skill.appendingPathComponent("SKILL.installed.sha256")
+        let notice = skill.appendingPathComponent("SKILL.update-available.md")
+        var failed = false
+        func check(_ item: String, _ passed: Bool) {
+            print("W96SKILLSTEST \(passed ? "PASS" : "FAIL") \(item)")
+            if !passed { failed = true }
+        }
+        func seed(_ text: String) throws {
+            try Data(text.utf8).write(to: bundle.appendingPathComponent("SKILL.md"))
+        }
+        do {
+            try fm.createDirectory(at: bundle.appendingPathComponent("agents"), withIntermediateDirectories: true)
+            try seed("v1 skill\n")
+            try Data("agents: v1\n".utf8).write(to: bundle.appendingPathComponent("agents/openai.yaml"))
+            check("App 內建資源找得到", ManagedSkills.files.allSatisfy { ManagedSkills.bundledURL(for: $0) != nil })
+            check("沒有種入前來源是 missing", ManagedSkills.source(root: root) == .missing)
+
+            var outcomes = ManagedSkills.applyOnLaunch(root: root, bundle: bundle)
+            check("全新安裝種下 SKILL.md 與 agents", try outcomes["SKILL.md"] == .installed
+                  && outcomes["agents/openai.yaml"] == .installed
+                  && Data(contentsOf: manifest) == Data("v1 skill\n".utf8)
+                  && Data(contentsOf: agent) == Data("agents: v1\n".utf8))
+            check("種下後是 App 內建（受管）", ManagedSkills.source(root: root) == .managed)
+            check("不種 references", !fm.fileExists(atPath: skill.appendingPathComponent("references").path))
+
+            outcomes = ManagedSkills.applyOnLaunch(root: root, bundle: bundle)
+            check("第二次啟動不動檔", outcomes["SKILL.md"] == .unchanged && outcomes["agents/openai.yaml"] == .unchanged)
+
+            try seed("v2 skill\n")
+            outcomes = ManagedSkills.applyOnLaunch(root: root, bundle: bundle)
+            check("未手改就自動更新", try outcomes["SKILL.md"] == .updated
+                  && Data(contentsOf: manifest) == Data("v2 skill\n".utf8)
+                  && !fm.fileExists(atPath: notice.path))
+
+            try Data("我自己改的技能\n".utf8).write(to: manifest)
+            let markerBefore = try Data(contentsOf: marker)
+            try seed("v3 skill\n")
+            outcomes = ManagedSkills.applyOnLaunch(root: root, bundle: bundle)
+            check("手改保留並留下提示", try outcomes["SKILL.md"] == .keptUserEdited
+                  && Data(contentsOf: manifest) == Data("我自己改的技能\n".utf8)
+                  && Data(contentsOf: marker) == markerBefore
+                  && fm.fileExists(atPath: notice.path))
+            check("手改後來源是已手改（保留）", ManagedSkills.source(root: root) == .userEdited)
+            let text = try String(contentsOf: notice, encoding: .utf8)
+            check("提示一行且不含使用者路徑", text.split(separator: "\n").count == 1 && !text.contains(base.path))
+            check("設定列來源標籤", ManagedSkills.sourceLabel(forSkillManifestPath: manifest.path, root: root) == "已手改（保留）"
+                  && ManagedSkills.sourceLabel(forSkillManifestPath: agent.path, root: root) == nil)
+
+            let missing = base.appendingPathComponent("no-bundle")
+            check("沒有內建資源就不動使用者目錄",
+                  try ManagedSkills.applyOnLaunch(root: root, bundle: missing)["SKILL.md"] == .failed("bundle_missing")
+                  && Data(contentsOf: manifest) == Data("我自己改的技能\n".utf8))
+        } catch { check("filesystem scenarios", false) }
+        // 合成暫存資料保留供檢查；不刪任何檔案。
+        print(failed ? "W96SKILLSTEST FAILED" : "W96SKILLSTEST ALL PASS")
         return !failed
     }
 }
@@ -3370,6 +3447,40 @@ extension SelfTest {
             _ = try RemoteHostLink(environment: ["TATWO2_KNOWN_HOSTS": known.path])
                 .callPinned(device: pPeer, method: "dispatch_fetch")
         })
+        // W91b：兩把指紋要分流。產生配對碼端存的是對方的客戶端金鑰，
+        // 就算那把也躺在 known_hosts 裡，也不准拿來 pin 隧道。
+        let pairedS = pRegistry.list().first { $0.id == sID }!
+        try check("w91b-legacy-client-key-classified", pairedS.clientKeyFingerprint == fingerprint
+            && pairedS.hostKeyFingerprint == nil && pairedS.pinnedHostKeyFingerprint == nil)
+        try check("w91b-rpc-success-records-client-source",
+            pairedS.clientKeyFingerprintSource?.source == "rpc_proof")
+        try check("w91b-client-key-never-pins-tunnel", rejects {
+            _ = try RemoteHostLink(environment: ["TATWO2_KNOWN_HOSTS": known.path])
+                .callPinned(device: pairedS, method: "dispatch_fetch")
+        })
+        // 加入端存的是對方的主機金鑰：隧道那把在、客戶端那把缺，RPC 照樣沒得驗。
+        let hostKnown = root.appendingPathComponent("w91b-known-hosts")
+        try put(hostKnown, "[127.0.0.1]:1 " + publicHost)
+        let joinRoot = root.appendingPathComponent("w91b-live")
+        try fm.createDirectory(at: joinRoot, withIntermediateDirectories: true)
+        try fm.copyItem(at: sRegistry.url, to: joinRoot.appendingPathComponent("devices.json"))
+        let joinRegistry = DeviceRegistry(root: joinRoot,
+            authorizedKeysURL: root.appendingPathComponent("w91b-authorized"), knownHostsURL: hostKnown)
+        let expectedHostKey = try DeviceRegistry.fingerprint(publicKey: publicHost)
+        let joinPeer = joinRegistry.list().first { $0.id == pID }!
+        try check("w91b-legacy-host-key-classified", joinPeer.hostKeyFingerprint == expectedHostKey
+            && joinPeer.clientKeyFingerprint == nil && joinPeer.pinnedClientKeyFingerprint == nil
+            && joinPeer.hostKeyFingerprintSource?.source == "legacy_known_hosts")
+        // 補齊不放寬：值不同的補記一律拒絕，缺的那把補不進來就還是缺。
+        try check("w91b-fill-never-overwrites-pin", rejects {
+            _ = try joinRegistry.recordFingerprint(id: pID, role: .host,
+                fingerprint: fingerprint, source: "known_hosts")
+        } && joinRegistry.list().first { $0.id == pID }?.pinnedClientKeyFingerprint == nil)
+        _ = try joinRegistry.recordFingerprint(id: pID, role: .client,
+            fingerprint: fingerprint, source: "rpc_proof")
+        let filled = joinRegistry.list().first { $0.id == pID }!
+        try check("w91b-fill-client-keeps-host-pin", filled.clientKeyFingerprint == fingerprint
+            && filled.hostKeyFingerprint == expectedHostKey && !filled.needsFingerprintRepair)
         try put(pEntry.noteDir.appendingPathComponent("blocked/item.md"), "new note")
         let outside = root.appendingPathComponent("outside")
         try fm.createDirectory(at: outside, withIntermediateDirectories: true)
@@ -4985,6 +5096,13 @@ extension SelfTest {
                   snapshot.skillet.reason == "missing", snapshot.gbrain.reason == "not_configured" else {
                 throw NSError(domain: "unexpected_device_status", code: 1)
             }
+            // W95：容量／佇列一定要有真實數值（記憶體是 free＋inactive 合計），不得缺欄位。
+            guard let capacity = snapshot.capacity?.value, capacity.memoryFreeInactiveGB > 0,
+                  capacity.stagingFreeGB > 0, capacity.systemFreeGB > 0,
+                  capacity.queueLength == 0, capacity.buildLockOwner == nil,
+                  capacity.runningJobID == nil else {
+                throw NSError(domain: "unexpected_device_status_capacity", code: 1)
+            }
         }
         guard before == DeviceStatusReader.digest(try Data(contentsOf: document)) else {
             throw NSError(domain: "document_changed", code: 1)
@@ -5000,6 +5118,7 @@ extension SelfTest {
         print("DEVICESTATUSTEST PASS real RPC repeated three times; live/document.json SHA256 unchanged")
         print("DEVICESTATUSTEST SHA256 before=after=\(before); all fixture files unchanged")
         print("DEVICESTATUSTEST PASS device.json identity, hardware model, missing files, not_configured, parameter rejection")
+        print("DEVICESTATUSTEST PASS capacity free+inactive memory, staging/system free, empty build lock and queue")
     }
 }
 
@@ -5112,5 +5231,159 @@ extension SelfTest {
 
         print("EMPTYSTATETEST RESULT failed=\(failures)")
         return failures == 0
+    }
+}
+
+// MARK: - W95 主設備施工佇列（TATWO2_W95_TEST_ROOT）
+
+extension SelfTest {
+    /// 只用 TMPDIR 裡的 fixture：假入口、假 git repo、假 staging。
+    /// 這裡驗的是「白名單與欄位驗證」與「device_status.capacity」；runner 的守門與收據由 shell fixture 驗。
+    @MainActor static func jobQueueChecks() throws {
+        let fm = FileManager.default
+        let environment = ProcessInfo.processInfo.environment
+        guard let raw = environment["TATWO2_W95_TEST_ROOT"], let tmp = environment["TMPDIR"] else {
+            throw JobQueue.Failure(reason: "missing_fixture_root")
+        }
+        let root = URL(fileURLWithPath: raw).resolvingSymlinksInPath()
+        guard root.path.hasPrefix(URL(fileURLWithPath: tmp).resolvingSymlinksInPath().path + "/") else {
+            throw JobQueue.Failure(reason: "unsafe_fixture_root")
+        }
+        func check(_ name: String, _ value: Bool) throws {
+            guard value else { throw JobQueue.Failure(reason: name) }
+            print("W95TEST PASS \(name)")
+        }
+        func rejectsInvalidParams(_ action: () throws -> Void) -> Bool {
+            do { try action(); return false }
+            catch let error as JobQueue.Failure { return error.invalidParams }
+            catch { return false }
+        }
+
+        let entry = TatwoEntry(environment: ["TATWO_OS_ROOT": root.appendingPathComponent("entry").path],
+                               preference: nil)
+        try fm.createDirectory(at: entry.repoRoot, withIntermediateDirectories: true)
+        let primaryID = "11111111-1111-4111-8111-111111111111"
+        let senderID = "22222222-2222-4222-8222-222222222222"
+        try DeviceIdentity(deviceID: primaryID, name: "Fixture", hardwareModel: "Fixture", role: .primary,
+                           epoch: 1, primaryDeviceID: primaryID, updatedAt: Date()).encoded().write(to: entry.deviceJSON)
+        func git(_ arguments: [String]) throws -> String {
+            let (status, data) = try DeviceDispatch.run("/usr/bin/git",
+                ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                 "-c", "user.name=fixture", "-c", "user.email=test@example.invalid"] + arguments,
+                directory: entry.repoRoot)
+            guard status == 0 else { throw JobQueue.Failure(reason: "fixture_git_failed") }
+            return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        _ = try git(["init", "-b", "beta1/integration"])
+        _ = try git(["commit", "--allow-empty", "-m", "fixture base"])
+        let commit = try git(["rev-parse", "HEAD"])
+        let staging = root.appendingPathComponent("staging")
+        let registry = DeviceRegistry(root: root.appendingPathComponent("live"),
+                                      authorizedKeysURL: root.appendingPathComponent("authorized_keys"))
+        let dispatch = DeviceDispatch(entry: entry, registry: registry, environment: [:])
+        let queue = JobQueue(entry: entry, environment: ["TATWO_STAGING": staging.path], dispatch: dispatch)
+        func payload(_ overrides: [String: Any] = [:]) -> [String: Any] {
+            var base: [String: Any] = ["device": senderID, "branch": "dev/macbook/w95-job-queue",
+                                       "commit": commit, "kind": "build",
+                                       "tests": ["tests/w95-job-queue.test.mjs"]]
+            for (key, value) in overrides { base[key] = value }
+            return base
+        }
+
+        // (a) kind 白名單
+        for kind in JobQueue.kinds {
+            try check("kind-allowed-\(kind)",
+                      (try? queue.validatedShape(payload(["kind": kind]), device: senderID)) != nil)
+        }
+        for kind in ["shell", "Build", "", "build ", "build;rm -rf /", "clean_gate", "rooms"] {
+            try check("kind-rejected-\(kind.isEmpty ? "empty" : kind)",
+                      rejectsInvalidParams { _ = try queue.validatedShape(payload(["kind": kind]), device: senderID) })
+        }
+        try check("kind-non-string-rejected",
+                  rejectsInvalidParams { _ = try queue.validatedShape(payload(["kind": 7]), device: senderID) })
+
+        // (a) commit 與 tests 路徑
+        for (index, bad) in [String(commit.dropLast()), String(repeating: "A", count: 40),
+                             String(repeating: "z", count: 40), commit + "0", "HEAD", ""].enumerated() {
+            try check("commit-rejected-\(index)",
+                      rejectsInvalidParams { _ = try queue.validatedShape(payload(["commit": bad]), device: senderID) })
+        }
+        for (index, bad) in [["../etc/passwd.test.mjs"], ["tests/../../x.test.mjs"], ["tests/sub/x.test.mjs"],
+                             ["/tests/x.test.mjs"], ["tests/x.mjs"], ["tests/.test.mjs"],
+                             ["tests/x.test.mjs;id"]].enumerated() {
+            try check("tests-rejected-\(index)",
+                      rejectsInvalidParams { _ = try queue.validatedShape(payload(["tests": bad]), device: senderID) })
+        }
+        try check("tests-accepts-empty-list",
+                  (try? queue.validatedShape(payload(["tests": [String]()]), device: senderID)) != nil)
+        try check("branch-rejected-parent-traversal",
+                  rejectsInvalidParams { _ = try queue.validatedShape(payload(["branch": "dev/../x"]), device: senderID) })
+        try check("device-must-match-signed-sender",
+                  rejectsInvalidParams { _ = try queue.validatedShape(payload(["device": primaryID]), device: senderID) })
+        try check("unknown-field-rejected",
+                  rejectsInvalidParams { _ = try queue.validatedShape(payload(["command": "rm -rf /"]), device: senderID) })
+
+        // 佇列檔：id 由主設備產生
+        let response = try queue.receive(payload(), sender: senderID)
+        guard let id = response["id"] as? String, JobQueue.validID(id) else {
+            throw JobQueue.Failure(reason: "job-submit-returns-uuid")
+        }
+        try check("job-submit-returns-uuid", response["status"] as? String == "queued")
+        let stored = try queue.job(id: id)
+        try check("queue-file-written", stored?.status == "queued" && stored?.commit == commit
+                  && stored?.kind == "build" && stored?.device == senderID && stored?.tests.count == 1)
+        try check("commit-must-exist-in-primary-repository", rejectsInvalidParams {
+            _ = try queue.receive(payload(["commit": String(repeating: "a", count: 40)]), sender: senderID)
+        })
+        try check("job-status-unknown-id-rejected",
+                  rejectsInvalidParams { _ = try queue.statusResponse(["id": "not-a-uuid"]) })
+
+        // (d) 收據：logTail 上限 200
+        try fm.createDirectory(at: queue.receiptsDir, withIntermediateDirectories: true)
+        let tail = (1...300).map { "line \($0)" }
+        let receipt = JobQueue.Receipt(id: id, kind: "build", branch: "dev/macbook/w95-job-queue", commit: commit,
+                                       startedAt: JobQueue.timestamp(), endedAt: JobQueue.timestamp(), exit: 0,
+                                       logTail: tail, artifacts: [staging.path + "/build-cache/w95-job-queue"],
+                                       runner: "fixture-host")
+        try JSONEncoder().encode(receipt).write(to: queue.receiptsDir.appendingPathComponent(id + ".json"))
+        let readBack = try queue.receipt(id: id)
+        try check("receipt-log-tail-capped-at-200", readBack?.logTail.count == 200
+                  && readBack?.logTail.last == "line 300")
+        let statusResponse = try queue.statusResponse(["id": id])
+        try check("job-status-returns-queue-and-receipt",
+                  (statusResponse["job"] as? [String: Any])?["id"] as? String == id
+                  && (statusResponse["receipt"] as? [String: Any])?["runner"] as? String == "fixture-host")
+
+        // (e) device_status.capacity
+        setenv("TATWO_STAGING", staging.path, 1)
+        defer { unsetenv("TATWO_STAGING") }
+        let capacity = DeviceStatusReader.capacity(entry: entry)
+        guard let value = capacity.value else { throw JobQueue.Failure(reason: "capacity-present") }
+        try check("capacity-present", value.memoryFreeInactiveGB > 0 && value.stagingFreeGB > 0
+                  && value.systemFreeGB > 0)
+        try check("capacity-queue-length-counts-queued", value.queueLength == 1 && value.runningJobID == nil)
+        try check("capacity-build-lock-empty", value.buildLockOwner == nil)
+        let lock = staging.appendingPathComponent("rooms/.build-lock", isDirectory: true)
+        try fm.createDirectory(at: lock, withIntermediateDirectories: true)
+        try Data("dev/macbook/w95-job-queue\n".utf8).write(to: lock.appendingPathComponent("owner"))
+        try Data("\(getpid())\n".utf8).write(to: lock.appendingPathComponent("pid"))
+        try check("capacity-build-lock-owner-reported",
+                  DeviceStatusReader.capacity(entry: entry).value?.buildLockOwner == "dev/macbook/w95-job-queue")
+        try Data("999999\n".utf8).write(to: lock.appendingPathComponent("pid"))
+        try check("capacity-stale-build-lock-is-not-held",
+                  DeviceStatusReader.capacity(entry: entry).value?.buildLockOwner == nil)
+        try fm.removeItem(at: lock)
+        let snapshot = try DeviceStatusReader.read(entry: entry, runtimeURL: root.appendingPathComponent("runtime.md"),
+                                                   bundledURL: nil, appInfo: [:]).jsonObject()
+        let wire = (snapshot["capacity"] as? [String: Any])?["value"] as? [String: Any]
+        try check("device-status-capacity-numeric",
+                  wire?["memoryFreeInactiveGB"] is NSNumber && wire?["stagingFreeGB"] is NSNumber
+                  && wire?["systemFreeGB"] is NSNumber && wire?["queueLength"] is NSNumber)
+        let decoded = try DeviceStatusSnapshot.decode(snapshot)
+        try check("device-status-capacity-decodes", decoded.capacity?.value?.queueLength == 1)
+        var withoutCapacity = snapshot
+        withoutCapacity.removeValue(forKey: "capacity")
+        let legacy = try DeviceStatusSnapshot.decode(withoutCapacity)
+        try check("device-status-without-capacity-still-decodes", legacy.capacity.map { _ in false } ?? true)
     }
 }

@@ -153,12 +153,13 @@ test('D9/D11/D18 wiring and private skill export boundaries', () => {
   for (const text of ['基本附件十個', 'results/<uuid>.json', '重新啟動以更新', 'keptUserEdited']) assert.ok(skill.includes(text));
 });
 
-test('D23 all 333 reviewed allowances constrain every detected value; unknown values fail closed', () => {
+test('D23 all 334 reviewed allowances constrain every detected value; unknown values fail closed', () => {
   const policy = read('scripts/public-safety-allow.txt').split('\n').filter(s => s && !s.startsWith('#'));
   // v2.0.8 has 324 entries; W71–W83 appended 9 reviewed fixture allowances.
   // W84 adds none and restores the immutable W61 prefix (public-privacy.test).
+  // W95b (2026-09-18) appends 1 reviewed allowance for scripts/rooms/functional-check.py.
   // Retain an exact count and check EVERY entry, including those additions.
-  assert.equal(policy.length, 333);
+  assert.equal(policy.length, 334);
   for (const line of policy) {
     const regex = line.split('|').slice(3).join('|').trim();
     assert.ok(regex.startsWith('^') && regex.endsWith('$'));

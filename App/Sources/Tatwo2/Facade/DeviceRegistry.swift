@@ -55,6 +55,13 @@ extension DeviceEndpoint {
     }
 }
 
+/// 一把指紋是怎麼來的、什麼時候記的。只是佐證紀錄，不參與任何信任判斷。
+struct DeviceFingerprintProvenance: Codable, Equatable, Sendable {
+    /// pairing／known_hosts／rpc_proof／legacy_authorized_keys／legacy_known_hosts
+    var source: String
+    var recordedAt: Date
+}
+
 struct DeviceRecord: Codable, Equatable, Identifiable, Sendable {
     let id: String
     var name: String
@@ -72,6 +79,29 @@ struct DeviceRecord: Codable, Equatable, Identifiable, Sendable {
     var endpoints: [DeviceEndpoint]
     var retiredEndpoints: [DeviceEndpoint] = []
     var lastEndpoint: DeviceEndpoint? = nil
+    // 對方有兩把不同用途的公鑰：主機金鑰（建隧道要 pin 的）與客戶端金鑰（驗 RPC 簽章的）。
+    // 舊欄 `publicKeyFingerprint` 依配對方向只會存到其中一把，所以分成兩欄。
+    var hostKeyFingerprint: String? = nil
+    var clientKeyFingerprint: String? = nil
+    var hostKeyFingerprintSource: DeviceFingerprintProvenance? = nil
+    var clientKeyFingerprintSource: DeviceFingerprintProvenance? = nil
+    /// 舊紀錄推定不出方向：兩把皆空，等下次配對或成功連線補齊。
+    var needsFingerprintRepair: Bool = false
+
+    /// 隧道只認主機金鑰。分流過的紀錄缺 host 就是缺，絕不拿客戶端金鑰頂替；
+    /// 完全沒分流過的舊紀錄沿用舊欄（跟分流前同一個值、同樣的比對），不放寬也不收緊。
+    var pinnedHostKeyFingerprint: String? {
+        if let hostKeyFingerprint { return hostKeyFingerprint }
+        guard clientKeyFingerprint == nil, !publicKeyFingerprint.isEmpty else { return nil }
+        return publicKeyFingerprint
+    }
+
+    /// RPC 簽章只認客戶端金鑰，同上規則。
+    var pinnedClientKeyFingerprint: String? {
+        if let clientKeyFingerprint { return clientKeyFingerprint }
+        guard hostKeyFingerprint == nil, !publicKeyFingerprint.isEmpty else { return nil }
+        return publicKeyFingerprint
+    }
 
     var orderedEndpoints: [DeviceEndpoint] {
         [.lan, .tunnel, .alias].flatMap { kind in
@@ -83,13 +113,21 @@ struct DeviceRecord: Codable, Equatable, Identifiable, Sendable {
          publicKeyFingerprint: String, addedAt: Date, lastSeenAt: Date,
          workdirMap: [String: String], lanHost: String? = nil, role: DeviceRole? = nil,
          epoch: Int? = nil, endpoints: [DeviceEndpoint]? = nil,
-         retiredEndpoints: [DeviceEndpoint] = [], lastEndpoint: DeviceEndpoint? = nil) {
+         retiredEndpoints: [DeviceEndpoint] = [], lastEndpoint: DeviceEndpoint? = nil,
+         hostKeyFingerprint: String? = nil, clientKeyFingerprint: String? = nil,
+         hostKeyFingerprintSource: DeviceFingerprintProvenance? = nil,
+         clientKeyFingerprintSource: DeviceFingerprintProvenance? = nil,
+         needsFingerprintRepair: Bool = false) {
         self.id = id; self.name = name; self.host = host; self.user = user; self.sshPort = sshPort
         self.publicKeyFingerprint = publicKeyFingerprint; self.addedAt = addedAt
         self.lastSeenAt = lastSeenAt; self.workdirMap = workdirMap; self.lanHost = lanHost
         self.role = role; self.epoch = epoch
         self.endpoints = endpoints ?? [.init(kind: .lan, host: host, port: sshPort)]
         self.retiredEndpoints = retiredEndpoints; self.lastEndpoint = lastEndpoint
+        self.hostKeyFingerprint = hostKeyFingerprint; self.clientKeyFingerprint = clientKeyFingerprint
+        self.hostKeyFingerprintSource = hostKeyFingerprintSource
+        self.clientKeyFingerprintSource = clientKeyFingerprintSource
+        self.needsFingerprintRepair = needsFingerprintRepair
         syncLegacyAddress()
     }
 
@@ -102,6 +140,8 @@ struct DeviceRecord: Codable, Equatable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, name, host, user, sshPort, publicKeyFingerprint, addedAt, lastSeenAt, workdirMap
         case lanHost, role, epoch, endpoints, retiredEndpoints, lastEndpoint
+        case hostKeyFingerprint, clientKeyFingerprint
+        case hostKeyFingerprintSource, clientKeyFingerprintSource, needsFingerprintRepair
     }
 
     init(from decoder: Decoder) throws {
@@ -116,7 +156,14 @@ struct DeviceRecord: Codable, Equatable, Identifiable, Sendable {
             role: try c.decodeIfPresent(DeviceRole.self, forKey: .role), epoch: try c.decodeIfPresent(Int.self, forKey: .epoch),
             endpoints: try c.decodeIfPresent([DeviceEndpoint].self, forKey: .endpoints),
             retiredEndpoints: try c.decodeIfPresent([DeviceEndpoint].self, forKey: .retiredEndpoints) ?? [],
-            lastEndpoint: try c.decodeIfPresent(DeviceEndpoint.self, forKey: .lastEndpoint))
+            lastEndpoint: try c.decodeIfPresent(DeviceEndpoint.self, forKey: .lastEndpoint),
+            hostKeyFingerprint: try c.decodeIfPresent(String.self, forKey: .hostKeyFingerprint),
+            clientKeyFingerprint: try c.decodeIfPresent(String.self, forKey: .clientKeyFingerprint),
+            hostKeyFingerprintSource: try c.decodeIfPresent(
+                DeviceFingerprintProvenance.self, forKey: .hostKeyFingerprintSource),
+            clientKeyFingerprintSource: try c.decodeIfPresent(
+                DeviceFingerprintProvenance.self, forKey: .clientKeyFingerprintSource),
+            needsFingerprintRepair: try c.decodeIfPresent(Bool.self, forKey: .needsFingerprintRepair) ?? false)
     }
 }
 
@@ -128,6 +175,7 @@ final class DeviceRegistry: @unchecked Sendable {
         case invalidPublicKey
         case deviceNotFound
         case pairingIdentityConflict
+        case fingerprintConflict
 
         var errorDescription: String? {
             switch self {
@@ -136,6 +184,7 @@ final class DeviceRegistry: @unchecked Sendable {
             case .invalidPublicKey: "invalid_public_key"
             case .deviceNotFound: "device_not_found"
             case .pairingIdentityConflict: "pairing_identity_conflict"
+            case .fingerprintConflict: "device_fingerprint_conflict"
             }
         }
     }
@@ -143,6 +192,8 @@ final class DeviceRegistry: @unchecked Sendable {
     let root: URL
     let url: URL
     let authorizedKeysURL: URL
+    /// 只讀，用來判斷舊紀錄那把指紋是主機金鑰還是客戶端金鑰；不寫入、不新增信任。
+    let knownHostsURL: URL
     // UI edits and successful background links create separate registry instances.
     // Serialize their read-modify-write cycles so a touch cannot erase an endpoint edit.
     private static let storageLock = NSLock()
@@ -151,6 +202,7 @@ final class DeviceRegistry: @unchecked Sendable {
     init(
         root: URL? = nil,
         authorizedKeysURL: URL? = nil,
+        knownHostsURL: URL? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.root = root
@@ -162,6 +214,11 @@ final class DeviceRegistry: @unchecked Sendable {
             ?? environment["TATWO2_AUTHORIZED_KEYS"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".ssh/authorized_keys")
+        self.knownHostsURL = knownHostsURL
+            ?? (environment["TATWO2_SSH_KNOWN_HOSTS"] ?? environment["TATWO2_KNOWN_HOSTS"])
+                .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".ssh/known_hosts")
         try? FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
     }
 
@@ -196,7 +253,11 @@ final class DeviceRegistry: @unchecked Sendable {
         workdirMap: [String: String] = [:],
         lanHost: String? = nil,
         role: DeviceRole? = nil,
-        epoch: Int? = nil
+        epoch: Int? = nil,
+        hostKeyFingerprint: String? = nil,
+        clientKeyFingerprint: String? = nil,
+        hostKeyFingerprintSource: DeviceFingerprintProvenance? = nil,
+        clientKeyFingerprintSource: DeviceFingerprintProvenance? = nil
     ) throws -> DeviceRecord {
         try add(DeviceRecord(
             id: id,
@@ -210,7 +271,47 @@ final class DeviceRegistry: @unchecked Sendable {
             workdirMap: workdirMap,
             lanHost: lanHost,
             role: role,
-            epoch: epoch))
+            epoch: epoch,
+            hostKeyFingerprint: hostKeyFingerprint,
+            clientKeyFingerprint: clientKeyFingerprint,
+            hostKeyFingerprintSource: hostKeyFingerprintSource,
+            clientKeyFingerprintSource: clientKeyFingerprintSource))
+    }
+
+    enum FingerprintRole: String, Sendable { case host, client }
+
+    /// 成功用過之後補記一把指紋（隧道成功補 host、RPC 簽章驗過補 client）。
+    /// 只補空的那把或補來源；值不同一律拒絕，絕不覆蓋已經 pin 住的指紋，
+    /// 也不會因為補齊而放寬任何比對——缺的那把在補齊前照樣擋。
+    @discardableResult
+    func recordFingerprint(
+        id: String, role: FingerprintRole, fingerprint: String, source: String, now: Date = Date()
+    ) throws -> DeviceRecord {
+        guard Self.isSafeDeviceID(id) else { throw RegistryError.invalidDeviceID }
+        guard fingerprint.hasPrefix("SHA256:"), fingerprint.count > "SHA256:".count else {
+            throw RegistryError.invalidPublicKey
+        }
+        return try lock.withLock {
+            var rows = try readUnlocked()
+            guard let index = rows.firstIndex(where: { $0.id == id }) else { throw RegistryError.deviceNotFound }
+            let existing = role == .host ? rows[index].hostKeyFingerprint : rows[index].clientKeyFingerprint
+            guard existing == nil || existing == fingerprint else { throw RegistryError.fingerprintConflict }
+            let recorded = role == .host
+                ? rows[index].hostKeyFingerprintSource : rows[index].clientKeyFingerprintSource
+            guard existing == nil || recorded?.source != source else { return rows[index] }
+            let stamp = DeviceFingerprintProvenance(source: source, recordedAt: now)
+            switch role {
+            case .host:
+                rows[index].hostKeyFingerprint = fingerprint
+                rows[index].hostKeyFingerprintSource = stamp
+            case .client:
+                rows[index].clientKeyFingerprint = fingerprint
+                rows[index].clientKeyFingerprintSource = stamp
+            }
+            rows[index].needsFingerprintRepair = false
+            try writeUnlocked(rows)
+            return rows[index]
+        }
     }
 
     /// Re-pairing the same SSH key must retain its UUID; a peer cannot claim another key's ID.
@@ -255,6 +356,16 @@ final class DeviceRegistry: @unchecked Sendable {
                 updated.endpoints = previous.endpoints
                 updated.retiredEndpoints = previous.retiredEndpoints
                 updated.lastEndpoint = previous.lastEndpoint
+                if updated.hostKeyFingerprint == nil {
+                    updated.hostKeyFingerprint = previous.hostKeyFingerprint
+                    updated.hostKeyFingerprintSource = previous.hostKeyFingerprintSource
+                }
+                if updated.clientKeyFingerprint == nil {
+                    updated.clientKeyFingerprint = previous.clientKeyFingerprint
+                    updated.clientKeyFingerprintSource = previous.clientKeyFingerprintSource
+                }
+                updated.needsFingerprintRepair = updated.hostKeyFingerprint == nil
+                    && updated.clientKeyFingerprint == nil && previous.needsFingerprintRepair
                 updated.syncLegacyAddress()
             }
             if let index = rows.firstIndex(where: { $0.id == record.id }) {
@@ -352,7 +463,78 @@ final class DeviceRegistry: @unchecked Sendable {
         let data = try Data(contentsOf: url)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode([DeviceRecord].self, from: data)
+        return classifiedLegacyFingerprints(try decoder.decode([DeviceRecord].self, from: data))
+    }
+
+    /// 舊格式升級：舊欄那把指紋依配對方向可能是主機金鑰或客戶端金鑰。
+    /// 用本機既有的憑據判方向——`authorized_keys` 裡掛著這台 ID 的那行代表「我是產生配對碼端」，
+    /// 舊值就是對方的客戶端金鑰；`known_hosts` 裡有這把代表「我是加入端」，舊值是對方的主機金鑰。
+    /// 兩邊都比不到才判不出來：兩把皆空、標記待修；同時比到（金鑰重用）兩欄都填。只分類，不改值、不寫檔。
+    private func classifiedLegacyFingerprints(_ rows: [DeviceRecord]) -> [DeviceRecord] {
+        guard rows.contains(where: Self.needsLegacyClassification) else { return rows }
+        let authorized = Self.authorizedFingerprintsByDevice(at: authorizedKeysURL)
+        let knownHosts = Self.knownHostFingerprints(at: knownHostsURL)
+        return rows.map { row in
+            guard Self.needsLegacyClassification(row) else { return row }
+            var updated = row
+            let legacy = row.publicKeyFingerprint
+            let asClient = authorized[row.id.lowercased()]?.contains(legacy) ?? false
+            let asHost = knownHosts.contains(legacy)
+            switch (asClient, asHost) {
+            case (true, false):
+                updated.clientKeyFingerprint = legacy
+                updated.clientKeyFingerprintSource = .init(
+                    source: "legacy_authorized_keys", recordedAt: row.addedAt)
+            case (false, true):
+                updated.hostKeyFingerprint = legacy
+                updated.hostKeyFingerprintSource = .init(
+                    source: "legacy_known_hosts", recordedAt: row.addedAt)
+            case (true, true):
+                // 同一把金鑰同時是對方的主機金鑰與客戶端金鑰（金鑰重用）：兩欄都填舊值，兩條路都維持可比對；
+                // 之後任一次成功連線補記到不同值會走 fingerprintConflict 擋下，不會靜默放行。
+                updated.clientKeyFingerprint = legacy
+                updated.clientKeyFingerprintSource = .init(
+                    source: "legacy_authorized_keys", recordedAt: row.addedAt)
+                updated.hostKeyFingerprint = legacy
+                updated.hostKeyFingerprintSource = .init(
+                    source: "legacy_known_hosts", recordedAt: row.addedAt)
+            default:
+                updated.needsFingerprintRepair = true
+            }
+            return updated
+        }
+    }
+
+    private static func needsLegacyClassification(_ row: DeviceRecord) -> Bool {
+        row.hostKeyFingerprint == nil && row.clientKeyFingerprint == nil
+            && row.publicKeyFingerprint.hasPrefix("SHA256:")
+    }
+
+    /// `authorized_keys` 只讀，取出每台設備被授權的客戶端金鑰指紋。
+    private static func authorizedFingerprintsByDevice(at url: URL) -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        for line in readLines(at: url).prefix(4096) where !line.hasPrefix("#") {
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 3, let marker = fields.last.map(String.init),
+                  marker.hasPrefix("tatwo2-device:"),
+                  let fingerprint = try? fingerprint(publicKey: "\(fields[0]) \(fields[1])")
+            else { continue }
+            result[String(marker.dropFirst("tatwo2-device:".count)).lowercased(), default: []].insert(fingerprint)
+        }
+        return result
+    }
+
+    /// `known_hosts` 只讀，取出已知的主機金鑰指紋。
+    private static func knownHostFingerprints(at url: URL) -> Set<String> {
+        var result: Set<String> = []
+        for line in readLines(at: url).prefix(4096) where !line.hasPrefix("#") && !line.hasPrefix("@") {
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 3,
+                  let fingerprint = try? fingerprint(publicKey: "\(fields[1]) \(fields[2])")
+            else { continue }
+            result.insert(fingerprint)
+        }
+        return result
     }
 
     private func writeUnlocked(_ rows: [DeviceRecord]) throws {
@@ -417,6 +599,59 @@ final class DeviceRegistry: @unchecked Sendable {
         !value.isEmpty && value.count <= 128 && value.unicodeScalars.allSatisfy {
             CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0)
         }
+    }
+}
+
+extension DeviceRegistry {
+    /// 本機自己的主機金鑰指紋（配對時報給對方，讓對方之後能 pin 住往這台的隧道）。
+    /// 只讀公開的 `.pub`，不碰任何私鑰。
+    static func localHostKeyFingerprint(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        fingerprintOfPublicKeyFile(
+            environment["TATWO2_SSH_HOST_KEY_PUB"] ?? "/etc/ssh/ssh_host_ed25519_key.pub")
+    }
+
+    /// 本機自己的客戶端金鑰指紋（配對時報給對方，讓對方之後能驗本機送出的 RPC 簽章）。
+    static func localClientKeyFingerprint(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        let base = environment["TATWO2_SSH_KEY_PATH"]
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".ssh/id_ed25519").path
+        return fingerprintOfPublicKeyFile(base + ".pub")
+    }
+
+    private static func fingerprintOfPublicKeyFile(_ path: String) -> String? {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        for line in text.split(whereSeparator: \.isNewline) {
+            if let value = try? fingerprint(publicKey: String(line)) { return value }
+        }
+        return nil
+    }
+}
+
+extension DeviceRecord {
+    static func shortFingerprint(_ value: String) -> String {
+        value.count <= 24 ? value : String(value.prefix(24)) + "…"
+    }
+
+    /// 設備頁用：兩把指紋分別是什麼、來源、缺哪把。只顯示登記表既有內容。
+    var fingerprintSummary: String {
+        guard hostKeyFingerprint != nil || clientKeyFingerprint != nil else {
+            let legacy = publicKeyFingerprint.isEmpty ? "缺" : Self.shortFingerprint(publicKeyFingerprint)
+            return "指紋 \(legacy)・尚未分流" + (needsFingerprintRepair ? "（判不出方向，下次配對補齊）" : "")
+        }
+        func part(_ label: String, _ value: String?, _ origin: DeviceFingerprintProvenance?) -> String {
+            guard let value, !value.isEmpty else { return "\(label) 缺" }
+            return "\(label) \(Self.shortFingerprint(value))" + (origin.map { "（\($0.source)）" } ?? "")
+        }
+        // W98：只換白話字面，欄位與判斷完全不動。
+        let missing = hostKeyFingerprint == nil || hostKeyFingerprint?.isEmpty == true
+            || clientKeyFingerprint == nil || clientKeyFingerprint?.isEmpty == true
+        return part("隧道識別", hostKeyFingerprint, hostKeyFingerprintSource)
+            + "・" + part("簽章識別", clientKeyFingerprint, clientKeyFingerprintSource)
+            + (missing ? "・重新配對即可補齊" : "")
     }
 }
 

@@ -952,6 +952,8 @@ final class TatwoUltraworkAppDelegate: NSObject, NSApplicationDelegate {
         InAppUpdater.reconcileOnLaunch()
         let upstream = OSUpstreamRefresh.applyOnLaunch()
         fputs("tatwo_os_upstream=\(upstream.logMessage)\n", stderr)
+        // W96：公開版 App 也要有 /tatwo-ultrawork。與上游同一套受管判定；手改的技能保留不覆蓋。
+        fputs("tatwo_skills=\(ManagedSkills.logLine(ManagedSkills.applyOnLaunch()))\n", stderr)
         NSApp.setActivationPolicy(TatwoLaunchSurfacePolicy.initialActivationPolicy())
         installMainMenuWithEditCommands()
         installAlternateNewChatShortcutMonitor()

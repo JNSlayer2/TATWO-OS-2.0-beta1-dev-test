@@ -335,3 +335,4 @@ tests/w77-device-status.test.mjs | macos username | Synthetic SSH user and displ
 App/Sources/Tatwo2/Facade/DistillCanvas.swift | macos username | Application MCP client identifier, not a personal operating-system account. | ^(?:tatwo\x2ddistill)$
 tests/w81-distill.test.mjs | macos username | Synthetic device label and public MCP method identifier, not personal accounts. | ^(?:fixture\x2ddevice|get_page)$
 tests/w80b-adapter.test.mjs | provider token | Isolated lifecycle scan uses an explicitly nonfunctional synthetic credential. | ^(?:sk\x2dtest\x2dw80b\x2dnot\x2dreal)$
+scripts/rooms/functional-check.py | provider token | Byte-prefix patterns the leak check greps for, not credentials. | ^(?:sk\x2dproj|sk\x2dant)$

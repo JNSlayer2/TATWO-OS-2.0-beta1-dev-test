@@ -374,7 +374,8 @@ enum EmbeddedBrowserHistoryPersistence: Equatable, Sendable {
 }
 
 enum EmbeddedBrowserSessionPersistenceContract {
-    static let maximumCEFProfileBytes: UInt64 = 512 * 1_024 * 1_024
+    // W99：影片時代的合理值（X 影片快取一天就能吃掉 500 MB）。
+    static let maximumCEFProfileBytes: UInt64 = 2 * 1_024 * 1_024 * 1_024
     static let websiteDataCategories = [
         "cookies",
         "localStorage",
@@ -823,6 +824,7 @@ enum EmbeddedBrowserProfileAccessFailure: Error, Equatable, Sendable {
     case pendingLifecycleIntent(intentID: UUID, stage: EmbeddedBrowserLifecycleStage)
     case capacity(EmbeddedBrowserProfileCapacityError)
     case cefCapacity(String)
+    case cefCeilingExceeded(totalBytes: UInt64, byteCeiling: UInt64)
     case cefLeaseWaitTimedOut(profileKey: UUID)
     case cefLeaseWaitCancelled(profileKey: UUID)
 
@@ -831,14 +833,28 @@ enum EmbeddedBrowserProfileAccessFailure: Error, Equatable, Sendable {
         case let .pendingLifecycleIntent(intentID, stage):
             return "Browser profile blocked by recoverable lifecycle intent \(intentID.uuidString.lowercased()) at \(stage.rawValue)."
         case let .capacity(error):
-            return "Browser profile capacity failed closed: \(error)."
+            return "瀏覽器資料容量檢查沒過，暫時不開新的瀏覽資料；"
+                + "請到設定 › 瀏覽器管理清除資料。（\(error)）"
         case let .cefCapacity(reason):
-            return "CEF profile capacity failed closed: \(reason)."
+            return "瀏覽器資料容量檢查沒過，暫時無法開啟；"
+                + "請到設定 › 瀏覽器管理清除資料。（\(reason)）"
+        case let .cefCeilingExceeded(totalBytes, byteCeiling):
+            return "瀏覽器快取超過上限（"
+                + "\(EmbeddedBrowserProfileAccessFailure.megabytes(totalBytes))"
+                + " MB／"
+                + "\(EmbeddedBrowserProfileAccessFailure.megabytes(byteCeiling))"
+                + " MB），已自動清理仍不足；請到設定 › 瀏覽器管理清除資料。"
+                + "（ceilingUnsatisfied totalBytes=\(totalBytes)"
+                + " byteCeiling=\(byteCeiling)）"
         case let .cefLeaseWaitTimedOut(profileKey):
             return "上一個 Chromium mount 未在期限內關閉（\(profileKey.uuidString.lowercased())）。請重試。"
         case let .cefLeaseWaitCancelled(profileKey):
             return "Chromium profile 等待已取消（\(profileKey.uuidString.lowercased())），未建立 runtime。"
         }
+    }
+
+    private static func megabytes(_ bytes: UInt64) -> String {
+        String(Int((Double(bytes) / (1_024 * 1_024)).rounded()))
     }
 }
 
@@ -936,7 +952,8 @@ struct EmbeddedBrowserProfileAccessCoordinator {
                 let ledger = try await Task.detached(priority: .utility) {
                     try ledgerStore.snapshot()
                 }.value
-                _ = try TatwoCEFProfileCeilingController(store: cefStore)
+                let ceilingResult =
+                    try TatwoCEFProfileCeilingController(store: cefStore)
                     .enforce(
                         byteCeiling: cefProfileByteCeiling,
                         currentIdentifier: identifier,
@@ -950,6 +967,7 @@ struct EmbeddedBrowserProfileAccessCoordinator {
                                 storageKind: row.storageKind,
                                 generation: row.generation)
                         })
+                TatwoCEFProfileCacheStatus.record(result: ceilingResult)
                 try await Task.detached(priority: .utility) {
                     try ledgerStore.recordAccess(
                         profile: profile,
@@ -962,6 +980,16 @@ struct EmbeddedBrowserProfileAccessCoordinator {
             return .success(())
         } catch let error as EmbeddedBrowserProfileCapacityError {
             return .failure(.capacity(error))
+        } catch let error as TatwoCEFProfileCeilingError {
+            guard case let .ceilingUnsatisfied(totalBytes, byteCeiling) = error
+            else {
+                return .failure(
+                    .cefCapacity("\(type(of: error)):\(error)"))
+            }
+            return .failure(
+                .cefCeilingExceeded(
+                    totalBytes: totalBytes,
+                    byteCeiling: byteCeiling))
         } catch {
             return .failure(.cefCapacity("\(type(of: error)):\(error)"))
         }

@@ -231,6 +231,11 @@ extension ChatPage {
                                     emptySidebarText("尚無專案")
                                         .padding(.horizontal, 4)
                                 }
+                                // W98（使用者 2026-09-18 裁決）：本機專案之後，每台已配對設備各一個「遠端設備（名稱）」項目。
+                                ForEach(model.devices) { device in
+                                    remoteDeviceProjectRow(device)
+                                }
+                                // W98b：設備清單暫時追不上工作階段時，沒有對應項目的那幾台才照舊各列一段（fallback）。
                                 RemoteDevicesSidebarSections(model: model)   // 2.0：已配對設備各一段（New/RemoteDevicesSidebarSections.swift）
                             }
 
@@ -259,12 +264,22 @@ extension ChatPage {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .scrollIndicators(.hidden)
+                // W98：設備頁按「遠端設備專案」時把「專案」區打開（展開狀態留在側欄這邊）。
+                .onReceive(model.$sidebarProjectsExpandRequest) { request in
+                    guard request > 0, !projectsSectionExpanded else { return }
+                    withAnimation(.easeInOut(duration: 0.12)) { projectsSectionExpanded = true }
+                }
 
                 workspaceSidebarFooter
             }
             .frame(maxHeight: .infinity, alignment: .topLeading)
         }
         .ignoresSafeArea(.container, edges: [.top, .bottom])
+    }
+
+    /// W98：側欄「專案」區的遠端設備項目（W98b 改成可展開列，見 `RemoteDeviceProjectRow`）。
+    func remoteDeviceProjectRow(_ device: DeviceRecord) -> some View {
+        RemoteDeviceProjectRow(model: model, device: device)
     }
 
     var workspaceSidebarFooter: some View {
@@ -1489,4 +1504,67 @@ extension ChatPage {
         return String(trimmed[..<end]) + "…"
     }
 
+}
+
+/// W98：側欄「專案」區的遠端設備項目。列本身點了＝進那台的遠端模式（`enterRemoteMode`，行為沒改，只是換入口）；
+/// 點回本機任一討論串或「回到本機」就會離開（`selectLocalThread` 已清掉 selectedRemote）。
+/// W98b：左邊 chevron 只管展開／收合（不進遠端模式），展開後的子層沿用原本
+/// `RemoteDevicesSidebarSections` 的內容（專案→討論串、「這台還沒有專案」、離線時間），文字一字不改。
+/// 展開狀態只在這個 View 裡，不持久化、預設收合。
+struct RemoteDeviceProjectRow: View {
+    @ObservedObject var model: ChatPageModel
+    let device: DeviceRecord
+    @State private var isExpanded = false
+
+    var body: some View {
+        let section = model.remoteSidebarSections.first { $0.deviceID == device.id }
+        let isOnline = RemoteDevicePresentation.isOnline(device, sections: model.remoteSidebarSections)
+        let isActive = model.remoteMode?.id == device.id
+        LazyVStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 0) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.12)) { isExpanded.toggle() }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? "收起這台的專案" : "展開這台的專案")
+                .accessibilityLabel(isExpanded ? "收起遠端設備內容" : "展開遠端設備內容")
+
+                Button {
+                    _ = model.enterRemoteMode(device)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: RemoteDevicePresentation.icon(device))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 12)
+                        Text("遠端設備（\(device.name)）" + (isOnline ? "" : "・離線"))
+                            .font(ChatTypography.sidebarProject)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minHeight: 36)
+                    .opacity(isOnline ? 1 : 0.55)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(isActive ? LiquidGlassTokens.brandAccent.opacity(0.14) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .chatMenuRowHover()
+                .help(isOnline ? "在「\(device.name)」上工作" : "「\(device.name)」目前離線，點了會再試一次連線")
+                .accessibilityIdentifier("chat-sidebar-remote-device")
+            }
+
+            if isExpanded, let section {
+                RemoteDeviceSectionContent(model: model, section: section)
+            }
+        }
+    }
 }

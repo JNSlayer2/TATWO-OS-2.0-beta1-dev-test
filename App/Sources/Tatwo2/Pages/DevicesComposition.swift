@@ -1279,6 +1279,8 @@ enum DeviceConsistencyPresentation {
         case "work_branch_distance_unavailable": return "工作分支距離未知"
         case "comparison_objects_unavailable": return "缺少比較所需 commit，未執行 fetch"
         case "info_plist_missing": return "Info.plist 版本未知"
+        case "capacity_unavailable": return "容量未知"
+        case "job_queue_absent": return "尚無施工佇列目錄"
         default: return value ?? "未知"
         }
     }
@@ -1370,6 +1372,18 @@ enum DeviceConsistencyPresentation {
                     if userKept { detail += "\n保留自訂，不算已收斂" }
                 }
             }
+        case .capacity:
+            // W95：容量／佇列。記憶體一律是 free＋inactive 合計；紅黃綠沿用本面板既有規則。
+            if let field = snapshot?.capacity {
+                acquiredAt = field.acquiredAt; failure = field.reason
+                if let value = field.value {
+                    known = true; matches = value.healthy
+                    title = String(format: "記憶體 %.1f GB", value.memoryFreeInactiveGB)
+                    detail = String(format: "staging %.0f GB · 系統碟 %.0f GB", value.stagingFreeGB, value.systemFreeGB)
+                    detail += "\n建置鎖：" + (value.buildLockOwner ?? "空") + " · 佇列 \(value.queueLength)"
+                    if let running = value.runningJobID { detail += "\n進行中 " + String(running.prefix(8)) }
+                } else { title = reason(field.reason) }
+            } else { title = reason("capacity_unavailable"); failure = "capacity_unavailable" }
         case .gbrain:
             if let field = snapshot?.gbrain {
                 acquiredAt = field.acquiredAt; failure = field.reason

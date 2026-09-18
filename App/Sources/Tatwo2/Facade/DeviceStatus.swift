@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Wire values only. No registry/store initializers, document projection, migration or save.
@@ -33,6 +34,24 @@ struct DeviceStatusRules: Codable, Sendable {
     var generatedFromConstitutionHash: String?
 }
 
+/// W95 硬體與佇列容量。數值單位一律 GB（1024^3），由本機讀取，不接受對方回報。
+struct DeviceStatusCapacity: Codable, Sendable {
+    /// 記憶體一律以 free＋inactive 合計計算，不用 raw free。
+    var memoryFreeInactiveGB: Double
+    var stagingFreeGB: Double
+    var systemFreeGB: Double
+    var buildLockOwner: String?
+    var queueLength: Int
+    var runningJobID: String?
+
+    static let minMemoryGB = 4.0, minStagingGB = 30.0, minSystemGB = 10.0
+    /// 面板用的同一組門檻；runner 自己的門檻可由環境變數覆寫，這裡只做顯示判斷。
+    var healthy: Bool {
+        memoryFreeInactiveGB >= Self.minMemoryGB && stagingFreeGB >= Self.minStagingGB
+            && systemFreeGB >= Self.minSystemGB && buildLockOwner == nil
+    }
+}
+
 struct DeviceStatusSnapshot: Codable, Sendable {
     var schema = "tatwo.device-status.v1"
     var identity: DeviceStatusField<DeviceIdentity>
@@ -42,6 +61,8 @@ struct DeviceStatusSnapshot: Codable, Sendable {
     var skillet: DeviceStatusField<DeviceStatusFile>
     var rules: DeviceStatusField<DeviceStatusRules>
     var gbrain: DeviceStatusField<String>
+    /// 選填：舊版主／副設備的 device_status 沒有這個欄位，解碼必須仍然成立。
+    var capacity: DeviceStatusField<DeviceStatusCapacity>? = nil
 
     static func decode(_ object: [String: Any]) throws -> Self {
         let decoder = JSONDecoder()
@@ -135,6 +156,83 @@ enum DeviceStatusReader {
         return parts.count == 2 ? (parts[0], parts[1]) : nil
     }
 
+    /// W95：入口／staging 位置一律由環境變數推出，絕不寫死任何一台機器的路徑。
+    static func stagingRoot(entry: TatwoEntry,
+                            environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        let raw = environment["TATWO_STAGING"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let raw, !raw.isEmpty, raw.hasPrefix("/") { return URL(fileURLWithPath: raw, isDirectory: true) }
+        return entry.root.appendingPathComponent("staging", isDirectory: true)
+    }
+
+    /// free＋inactive 合計（GB）。用 Mach 介面，不開子行程。
+    static func memoryFreeInactiveGB() -> Double? {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let status = withUnsafeMutablePointer(to: &stats) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard status == KERN_SUCCESS else { return nil }
+        let pages = Double(stats.free_count) + Double(stats.inactive_count)
+        return pages * Double(vm_kernel_page_size) / 1_073_741_824
+    }
+
+    /// 取最近一個存在的祖先目錄所在的卷；不建立任何目錄。
+    static func volumeFreeGB(_ url: URL) -> Double? {
+        var candidate = url
+        while !FileManager.default.fileExists(atPath: candidate.path), candidate.path != "/" {
+            candidate.deleteLastPathComponent()
+        }
+        guard let values = try? candidate.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]) else { return nil }
+        if let bytes = values.volumeAvailableCapacityForImportantUsage, bytes > 0 {
+            return Double(bytes) / 1_073_741_824
+        }
+        return values.volumeAvailableCapacity.map { Double($0) / 1_073_741_824 }
+    }
+
+    /// 建置鎖與 W95 佇列都只是唯讀觀察；過期（持有者已死）的鎖不算有人持有。
+    static func buildLockOwner(staging: URL) -> String? {
+        let lock = staging.appendingPathComponent("rooms/.build-lock", isDirectory: true)
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: lock.path, isDirectory: &directory), directory.boolValue else {
+            return nil
+        }
+        if let raw = try? String(contentsOf: lock.appendingPathComponent("pid"), encoding: .utf8),
+           let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0,
+           Darwin.kill(pid, 0) != 0, errno == ESRCH { return nil }
+        let owner = (try? String(contentsOf: lock.appendingPathComponent("owner"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return owner.flatMap { $0.isEmpty ? nil : String($0.prefix(120)) } ?? "unknown"
+    }
+
+    static func capacity(entry: TatwoEntry,
+                         environment: [String: String] = ProcessInfo.processInfo.environment,
+                         now: Date = Date()) -> DeviceStatusField<DeviceStatusCapacity> {
+        let staging = stagingRoot(entry: entry, environment: environment)
+        guard let memory = memoryFreeInactiveGB(), let stagingFree = volumeFreeGB(staging),
+              let systemFree = volumeFreeGB(URL(fileURLWithPath: "/")) else {
+            return .init(value: nil, acquiredAt: now, reason: "capacity_unavailable")
+        }
+        let queue = staging.appendingPathComponent("jobs/queue", isDirectory: true)
+        var queued = 0, running: String?
+        var missingQueue = false
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: queue.path) {
+            for name in names.sorted().prefix(512) where name.hasSuffix(".json") {
+                guard let data = try? Data(contentsOf: queue.appendingPathComponent(name)), data.count <= 262_144,
+                      let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                let status = row["status"] as? String
+                if status == "queued" { queued += 1 }
+                if status == "running", running == nil { running = row["id"] as? String ?? String(name.dropLast(5)) }
+            }
+        } else { missingQueue = true }
+        let value = DeviceStatusCapacity(memoryFreeInactiveGB: memory, stagingFreeGB: stagingFree,
+                                         systemFreeGB: systemFree, buildLockOwner: buildLockOwner(staging: staging),
+                                         queueLength: queued, runningJobID: running)
+        return .init(value: value, acquiredAt: now, reason: missingQueue ? "job_queue_absent" : nil)
+    }
+
     static func read(
         entry: TatwoEntry = TatwoEntry(),
         runtimeURL: URL = URL(fileURLWithPath: OSUpstream.overridePath),
@@ -202,7 +300,8 @@ enum DeviceStatusReader {
                      rules: .init(value: rules, acquiredAt: Date(),
                                   reason: runtime.reason ?? (bundledHash == nil ? "bundled_missing"
                                                               : provenance == nil ? "provenance_unavailable" : nil)),
-                     gbrain: GBrainHealth.read(entry: entry))
+                     gbrain: GBrainHealth.read(entry: entry),
+                     capacity: capacity(entry: entry))
     }
 
     static func registry(environment: [String: String] = ProcessInfo.processInfo.environment) -> [DeviceRecord] {
@@ -252,7 +351,7 @@ struct DeviceStatusProbe: Sendable {
 
 enum DeviceStatusLight: String, CaseIterable, Sendable { case green, yellow, red, gray }
 enum DeviceStatusColumn: String, CaseIterable, Sendable {
-    case identity, connection, app, code, constitution, rules, gbrain
+    case identity, connection, app, code, constitution, rules, gbrain, capacity
 }
 
 /// Policy is deliberately independent from presentation. Unknown is never equality.

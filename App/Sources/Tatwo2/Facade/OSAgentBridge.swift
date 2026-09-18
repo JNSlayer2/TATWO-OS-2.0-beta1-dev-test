@@ -344,6 +344,19 @@ final class OSAgentBridge: @unchecked Sendable {
             // Notification only; no claimed sender, epoch, or content is trusted.
             if (try? DeviceDispatch.shared.identity().role) == .secondary { DeviceDispatch.shared.align() }
             return ["scheduled": true]
+        case "job_submit", "job_status":
+            // W95：施工工作只是 W78 通道上多一種 payload，用同一套簽章／信任／指紋驗證（authenticate），
+            // 這裡沒有第二條通道。沒有簽章證明的呼叫是本機 os.sock 呼叫：副設備轉發、主設備只准查詢。
+            do {
+                if params["signature"] is String, params["body"] is String {
+                    let (sender, payload) = try DeviceDispatch.shared.authenticate(method: method, proof: params)
+                    if method == "job_submit" { return try JobQueue.shared.receive(payload, sender: sender) }
+                    return try JobQueue.shared.statusResponse(payload)
+                }
+                return try JobQueue.shared.localCall(method: method, params: params)
+            } catch let error as JobQueue.Failure where error.invalidParams {
+                throw BridgeError.invalidParams
+            }
         case "dispatch_fetch", "dispatch_ack", "document_propose", "document_inspect", "inbox_target", "inbox_receive":
             let (sender, payload) = try DeviceDispatch.shared.authenticate(method: method, proof: params)
             switch method {

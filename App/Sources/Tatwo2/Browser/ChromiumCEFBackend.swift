@@ -1333,6 +1333,58 @@ struct TatwoCEFProfileCeilingResult: Equatable, Sendable {
     let evictedProfiles: [TatwoCEFProfileCapacityRowKey]
     let evictedLedgerRows: [TatwoCEFProfileCapacityRowKey]
     let reconciledMissingLedgerRowCount: Int
+    // W99：當前設定檔自己超標時先清可重建快取，這裡記清了什麼、清了多少。
+    // 預設值保留既有 memberwise 呼叫端不變。
+    var evictedCacheDirectories: [String] = []
+    var cacheBytesFreed: UInt64 = 0
+    var currentProfileBytes: UInt64 = 0
+}
+
+// W99：設定 › 瀏覽器管理要顯示的兩個唯讀欄位（當前設定檔大小、最近一次清理）。
+// 資料只來自 enforce 結果，存在 UserDefaults，不動 lease／ledger 協定。
+struct TatwoCEFProfileCacheStatus: Codable, Equatable, Sendable {
+    static let defaultsKey = "tatwo.browser.cefProfileCacheStatus"
+
+    let measuredAt: Date
+    let currentProfileBytes: UInt64
+    let lastEvictionAt: Date?
+    let lastEvictedDirectories: [String]
+    let lastEvictionBytesFreed: UInt64
+
+    static func load(
+        defaults: UserDefaults = .standard
+    ) -> TatwoCEFProfileCacheStatus? {
+        guard let data = defaults.data(forKey: defaultsKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(
+            TatwoCEFProfileCacheStatus.self,
+            from: data)
+    }
+
+    @discardableResult
+    static func record(
+        result: TatwoCEFProfileCeilingResult,
+        now: Date = Date(),
+        defaults: UserDefaults = .standard
+    ) -> TatwoCEFProfileCacheStatus {
+        let previous = load(defaults: defaults)
+        let didEvict = !result.evictedCacheDirectories.isEmpty
+        let status = TatwoCEFProfileCacheStatus(
+            measuredAt: now,
+            currentProfileBytes: result.currentProfileBytes,
+            lastEvictionAt: didEvict ? now : previous?.lastEvictionAt,
+            lastEvictedDirectories: didEvict
+                ? result.evictedCacheDirectories
+                : (previous?.lastEvictedDirectories ?? []),
+            lastEvictionBytesFreed: didEvict
+                ? result.cacheBytesFreed
+                : (previous?.lastEvictionBytesFreed ?? 0))
+        if let data = try? JSONEncoder().encode(status) {
+            defaults.set(data, forKey: Self.defaultsKey)
+        }
+        return status
+    }
 }
 
 struct TatwoCEFProfileCapacityRowKey: Equatable, Hashable, Sendable {
@@ -1343,6 +1395,33 @@ struct TatwoCEFProfileCapacityRowKey: Equatable, Hashable, Sendable {
 
 struct TatwoCEFProfileCeilingController: Sendable {
     let store: TatwoCEFProfileStore
+
+    // W99：當前設定檔內可重建、清掉只是重下載的快取目錄，依序淘汰。
+    // 對應 spec 七條；DawnCache／GraphiteDawnCache 是兩個實際目錄，分列。
+    static let defaultCurrentProfileCachePaths = [
+        "Service Worker/CacheStorage",
+        "Cache",
+        "Code Cache",
+        "GPUCache",
+        "Media Cache",
+        "DawnCache",
+        "GraphiteDawnCache",
+        "Service Worker/ScriptCache",
+    ]
+
+    // W99：登入態與使用者資料。只用來斷言「絕不碰」，不做任何清理。
+    static let defaultProtectedPaths = [
+        "Cookies",
+        "Local Storage",
+        "IndexedDB",
+        "Session Storage",
+        "Login Data",
+        "Login Data For Account",
+        "Web Data",
+        "History",
+        "Preferences",
+        "Network",
+    ]
 
     @MainActor
     func enforce(
@@ -1373,7 +1452,12 @@ struct TatwoCEFProfileCeilingController: Sendable {
             try FileManager.default.trashItem(
                 at: url,
                 resultingItemURL: &resultingURL)
-        }
+        },
+        currentProfileCachePaths: [String] =
+            TatwoCEFProfileCeilingController
+                .defaultCurrentProfileCachePaths,
+        protectedPaths: [String] =
+            TatwoCEFProfileCeilingController.defaultProtectedPaths
     ) throws -> TatwoCEFProfileCeilingResult {
         guard byteCeiling > 0 else {
             throw TatwoCEFProfileCeilingError.invalidByteCeiling
@@ -1428,6 +1512,10 @@ struct TatwoCEFProfileCeilingController: Sendable {
             rootSnapshot: rootSnapshot)
         let allRows = rows + orphanRows
         let bytesBefore = try totalBytes(in: allRows)
+        let currentProfileBytesBefore = try totalBytes(
+            in: allRows.filter {
+                $0.key.profileIdentifier == currentIdentifier
+            })
         guard bytesBefore > byteCeiling else {
             return TatwoCEFProfileCeilingResult(
                 bytesBefore: bytesBefore,
@@ -1435,7 +1523,8 @@ struct TatwoCEFProfileCeilingController: Sendable {
                 evictedProfiles: [],
                 evictedLedgerRows: [],
                 reconciledMissingLedgerRowCount:
-                    reconciledMissingLedgerRowCount)
+                    reconciledMissingLedgerRowCount,
+                currentProfileBytes: currentProfileBytesBefore)
         }
 
         let candidates = allRows
@@ -1465,7 +1554,23 @@ struct TatwoCEFProfileCeilingController: Sendable {
             }
 
         let eligibleBytes = try totalBytes(in: candidates)
-        guard bytesBefore - eligibleBytes <= byteCeiling else {
+        // W99：當前設定檔的可重建快取也是可回收量，先量過再決定要不要拒開。
+        let cacheCandidates = try currentProfileCacheCandidates(
+            rows: allRows,
+            currentIdentifier: currentIdentifier,
+            relativePaths: currentProfileCachePaths,
+            protectedPaths: protectedPaths)
+        var reclaimableBytes = eligibleBytes
+        for candidate in cacheCandidates {
+            let addition = reclaimableBytes.addingReportingOverflow(
+                candidate.measuredBytes)
+            guard !addition.overflow else {
+                throw TatwoCEFProfileCeilingError.byteCountOverflow
+            }
+            reclaimableBytes = addition.partialValue
+        }
+        guard bytesBefore - min(bytesBefore, reclaimableBytes) <= byteCeiling
+        else {
             throw TatwoCEFProfileCeilingError.ceilingUnsatisfied(
                 totalBytes: bytesBefore,
                 byteCeiling: byteCeiling)
@@ -1512,6 +1617,27 @@ struct TatwoCEFProfileCeilingController: Sendable {
             evictedProfiles.append(candidate.key)
         }
 
+        // W99：淘汰其他設定檔後仍超標，才清當前設定檔的可重建快取。
+        var evictedCacheDirectories: [String] = []
+        var cacheBytesFreed: UInt64 = 0
+        for candidate in cacheCandidates where bytesAfter > byteCeiling {
+            do {
+                try disposer(candidate.url)
+            } catch {
+                throw TatwoCEFProfileCeilingError.reversibleDisposalFailed(
+                    identifier: candidate.profileIdentifier,
+                    generation: candidate.generation)
+            }
+            let freed = cacheBytesFreed.addingReportingOverflow(
+                candidate.measuredBytes)
+            guard !freed.overflow else {
+                throw TatwoCEFProfileCeilingError.byteCountOverflow
+            }
+            cacheBytesFreed = freed.partialValue
+            bytesAfter -= min(bytesAfter, candidate.measuredBytes)
+            evictedCacheDirectories.append(candidate.relativePath)
+        }
+
         guard bytesAfter <= byteCeiling else {
             throw TatwoCEFProfileCeilingError.ceilingUnsatisfied(
                 totalBytes: bytesAfter,
@@ -1524,7 +1650,89 @@ struct TatwoCEFProfileCeilingController: Sendable {
             evictedProfiles: evictedProfiles,
             evictedLedgerRows: evictedLedgerRows,
             reconciledMissingLedgerRowCount:
-                reconciledMissingLedgerRowCount)
+                reconciledMissingLedgerRowCount,
+            evictedCacheDirectories: evictedCacheDirectories,
+            cacheBytesFreed: cacheBytesFreed,
+            currentProfileBytes: currentProfileBytesBefore
+                - min(currentProfileBytesBefore, cacheBytesFreed))
+    }
+
+    // W99：把當前設定檔的可重建快取目錄挑出來（存在、是真目錄、在設定檔底下、
+    // 不是受保護的登入態路徑）。挑不到就回空陣列，行為與既有流程一致。
+    private func currentProfileCacheCandidates(
+        rows: [ProfileRow],
+        currentIdentifier: UUID?,
+        relativePaths: [String],
+        protectedPaths: [String]
+    ) throws -> [CacheCandidate] {
+        guard let currentIdentifier else {
+            return []
+        }
+        let currentRows = rows.filter {
+            $0.key.profileIdentifier == currentIdentifier
+        }
+        guard !currentRows.isEmpty else {
+            return []
+        }
+        let protectedComponents = Set(
+            protectedPaths.flatMap {
+                $0.split(separator: "/").map {
+                    String($0).lowercased()
+                }
+            })
+        var candidates: [CacheCandidate] = []
+        for relativePath in relativePaths {
+            let components = relativePath
+                .split(separator: "/")
+                .map(String.init)
+            guard !components.isEmpty,
+                  components.allSatisfy({
+                      !$0.isEmpty && $0 != "." && $0 != ".."
+                  }),
+                  components.allSatisfy({
+                      !protectedComponents.contains($0.lowercased())
+                  })
+            else {
+                continue
+            }
+            for row in currentRows {
+                var cacheURL = row.url
+                for component in components {
+                    cacheURL.appendPathComponent(component)
+                }
+                let canonicalProfile = row.url.standardizedFileURL
+                let canonicalCache = cacheURL.standardizedFileURL
+                guard canonicalCache.path == cacheURL.path,
+                      TatwoCEFProfileStore.isDescendant(
+                        canonicalCache,
+                        of: canonicalProfile)
+                else {
+                    continue
+                }
+                // lstat：symlink 一律跳過，不跟著連出設定檔。
+                var metadata = stat()
+                guard Darwin.lstat(canonicalCache.path, &metadata) == 0,
+                      (metadata.st_mode & S_IFMT) == S_IFDIR
+                else {
+                    continue
+                }
+                let bytes = try measuredBytes(
+                    at: canonicalCache,
+                    identifier: row.key.profileIdentifier,
+                    generation: row.key.generation)
+                guard bytes > 0 else {
+                    continue
+                }
+                candidates.append(
+                    CacheCandidate(
+                        profileIdentifier: row.key.profileIdentifier,
+                        generation: row.key.generation,
+                        relativePath: relativePath,
+                        url: canonicalCache,
+                        measuredBytes: bytes))
+            }
+        }
+        return candidates
     }
 
     private func totalBytes(
@@ -1668,6 +1876,14 @@ struct TatwoCEFProfileCeilingController: Sendable {
         let lexicalRoot: URL
         let canonicalRoot: URL
         let children: [URL]
+    }
+
+    private struct CacheCandidate {
+        let profileIdentifier: UUID
+        let generation: UInt64
+        let relativePath: String
+        let url: URL
+        let measuredBytes: UInt64
     }
 
     private struct ProfileRow {

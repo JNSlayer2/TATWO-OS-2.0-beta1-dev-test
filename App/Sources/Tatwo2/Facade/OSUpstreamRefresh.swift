@@ -2,6 +2,57 @@ import Foundation
 import CryptoKit
 import Darwin
 
+/// 受管檔的共用底座（W96 從 OSUpstreamRefresh 抽出，不另創機制）：
+/// App 內建一份，種到使用者目錄，並用「上次種下的雜湊」標記記住它。
+/// 只有標記與現況完全相符才代表這份檔案仍是受管的；沒標記／標記不符（＝使用者手改）
+/// 一律保留使用者的檔案。判定、寫入順序與 `<前綴>.installed.sha256`／
+/// `.update-available.md`／`.kept-custom.sha256` 的命名慣例都由這裡提供，
+/// OS 上游與 App 內建技能共用，不各寫一份。既有檔名由呼叫端明寫，抽共用不改名。
+enum ManagedFile {
+    static func url(in directory: URL, named name: String) -> URL {
+        directory.appendingPathComponent(name)
+    }
+
+    static func markerURL(in directory: URL, stem: String) -> URL {
+        url(in: directory, named: "\(stem).installed.sha256")
+    }
+
+    static func noticeURL(in directory: URL, stem: String) -> URL {
+        url(in: directory, named: "\(stem).update-available.md")
+    }
+
+    static func choiceURL(in directory: URL, stem: String) -> URL {
+        url(in: directory, named: "\(stem).kept-custom.sha256")
+    }
+
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 讀不到或格式壞掉都回 nil：不可讀的標記／決定不是同意採用。
+    static func trimmedText(at url: URL) -> String? {
+        (try? String(contentsOf: url, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func clearNotice(at notice: URL) throws {
+        if FileManager.default.fileExists(atPath: notice.path) {
+            // 只收回這個產生出來的提示；備份與使用者檔案永不清除。
+            try FileManager.default.removeItem(at: notice)
+        }
+    }
+
+    /// 先確認標記可寫（寫回它原本的位元組），再寫受管檔，最後才讓標記認領新雜湊。
+    /// 中途失敗時，標記不會宣稱一份它沒有真的種下去的內容。
+    static func writeManaged(_ content: Data, digest: String, runtime: URL, marker: URL) throws {
+        let previous = FileManager.default.fileExists(atPath: marker.path)
+            ? try Data(contentsOf: marker) : Data()
+        try previous.write(to: marker, options: .atomic)
+        try content.write(to: runtime, options: .atomic)
+        try Data((digest + "\n").utf8).write(to: marker, options: .atomic)
+    }
+}
+
 enum OSUpstreamRefresh {
     static var generatedContent: ((String, Date) throws -> Data)?
     private static func source(runtime: URL, bundled: URL?, now: Date = Date()) throws -> Data {
@@ -54,7 +105,7 @@ enum OSUpstreamRefresh {
         let fm = FileManager.default
         let runtime = URL(fileURLWithPath: runtimePath)
         let directory = runtime.deletingLastPathComponent()
-        let marker = directory.appendingPathComponent("os-upstream.installed.sha256")
+        let marker = markerURL(in: directory)
         do {
             let content = try source(runtime: runtime, bundled: bundled, now: now)
             let digest = sha256(content)
@@ -163,14 +214,14 @@ enum OSUpstreamRefresh {
     static func isUserEdited(runtimePath: String = OSUpstream.overridePath) -> Bool {
         let runtime = URL(fileURLWithPath: runtimePath)
         guard let bytes = try? Data(contentsOf: runtime) else { return false }
-        let marker = runtime.deletingLastPathComponent().appendingPathComponent("os-upstream.installed.sha256")
-        let installed = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let marker = markerURL(in: runtime.deletingLastPathComponent())
+        let installed = ManagedFile.trimmedText(at: marker)
         return installed != sha256(bytes)
     }
 
     private static func replace(_ content: Data, current: String, runtime: URL, now: Date) throws -> Outcome {
         let directory = runtime.deletingLastPathComponent()
-        let marker = directory.appendingPathComponent("os-upstream.installed.sha256")
+        let marker = markerURL(in: directory)
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -195,40 +246,37 @@ enum OSUpstreamRefresh {
         return .updated(backup: backup.path)
     }
 
+    // W96：判定與寫入順序都在 ManagedFile（App 內建技能共用同一套）；
+    // 這三個磁碟上的既有檔名寫在這裡，抽共用不改名。
+    private static func markerURL(in directory: URL) -> URL {
+        ManagedFile.url(in: directory, named: "os-upstream.installed.sha256")
+    }
+
     private static func noticeURL(in directory: URL) -> URL {
-        directory.appendingPathComponent("os-upstream.update-available.md")
+        ManagedFile.url(in: directory, named: "os-upstream.update-available.md")
     }
 
     private static func choiceURL(in directory: URL) -> URL {
-        directory.appendingPathComponent("os-upstream.kept-custom.sha256")
+        ManagedFile.url(in: directory, named: "os-upstream.kept-custom.sha256")
     }
 
     private static func keptChoice(in directory: URL) -> String? {
-        let url = choiceURL(in: directory)
         // An unreadable/invalid decision is not consent. Still expose the diff
         // so the user can apply it; a failed new decision write remains visible.
-        return (try? String(contentsOf: url, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        ManagedFile.trimmedText(at: choiceURL(in: directory))
     }
 
     private static func clearNotice(in directory: URL) throws {
-        let notice = noticeURL(in: directory)
-        if FileManager.default.fileExists(atPath: notice.path) {
-            // Only this generated notification is retired. Backups are never pruned.
-            try FileManager.default.removeItem(at: notice)
-        }
+        // Only this generated notification is retired. Backups are never pruned.
+        try ManagedFile.clearNotice(at: noticeURL(in: directory))
     }
 
     // Preflight marker writability, preserving its actual previous bytes (or an
     // untrusted empty marker). In particular, approving a custom file must NOT
     // claim its old hash if replacement fails. Only a successful write owns digest.
     private static func writeManaged(_ content: Data, digest: String, runtime: URL, marker: URL) throws {
-        let previous = FileManager.default.fileExists(atPath: marker.path) ? try Data(contentsOf: marker) : Data()
-        try previous.write(to: marker, options: .atomic)
-        try content.write(to: runtime, options: .atomic)
-        try Data((digest + "\n").utf8).write(to: marker, options: .atomic)
+        try ManagedFile.writeManaged(content, digest: digest, runtime: runtime, marker: marker)
     }
 
-    private static func sha256(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
+    private static func sha256(_ data: Data) -> String { ManagedFile.sha256(data) }
 }

@@ -37,6 +37,8 @@ final class RemoteHostLink: @unchecked Sendable {
     private var statusProbeOnly = false
     private var pinnedHostsFile: URL?
     private var pinnedHostAlgorithm: String?
+    /// 這次 pin 中的主機金鑰指紋，隧道成功後用來補記來源。
+    private var pinnedHostFingerprint: String?
     private var activeEndpoint: DeviceEndpoint?
     private var endpointDeadline: Date?
 
@@ -198,7 +200,14 @@ final class RemoteHostLink: @unchecked Sendable {
                 remoteSocketPath = environment["TATWO2_REMOTE_OS_SOCKET"]
                     ?? URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/tatwo2/live/os.sock").path
                 try startTunnelLocked(device: device)
-                _ = try? DeviceRegistry(environment: environment).touch(id: device.id, endpoint: endpoint)
+                let registry = DeviceRegistry(environment: environment)
+                _ = try? registry.touch(id: device.id, endpoint: endpoint)
+                // 隧道走通了，把這次實際比中的 known_hosts 指紋補記成 host 那一把（含來源與時間）。
+                // recordFingerprint 只補空的或補來源，值不同會拒絕，不會覆蓋已 pin 的指紋。
+                if let pinned = pinnedHostFingerprint {
+                    _ = try? registry.recordFingerprint(
+                        id: device.id, role: .host, fingerprint: pinned, source: "known_hosts")
+                }
                 return
             } catch {
                 lastError = error
@@ -216,7 +225,10 @@ final class RemoteHostLink: @unchecked Sendable {
     }
 
     private func prepareHostPin(_ device: DeviceRecord) throws {
-        guard device.publicKeyFingerprint.hasPrefix("SHA256:") else {
+        // 隧道只認對方的主機金鑰。分流過的紀錄若沒有 host 指紋（例如自己是產生配對碼端，
+        // 手上只有對方的客戶端金鑰）就直接擋掉，不會退回用另一把或 TOFU。
+        pinnedHostFingerprint = nil
+        guard let pinned = device.pinnedHostKeyFingerprint, pinned.hasPrefix("SHA256:") else {
             throw RemoteHostLinkError.remoteError("paired_host_key_not_found")
         }
         if let pinnedHostsFile { try? FileManager.default.removeItem(at: pinnedHostsFile) }
@@ -230,7 +242,7 @@ final class RemoteHostLink: @unchecked Sendable {
             let parts = line.split(whereSeparator: \.isWhitespace)
             guard parts.count >= 3 else { continue }
             let key = "\(parts[1]) \(parts[2])"
-            if (try? DeviceRegistry.fingerprint(publicKey: key)) == device.publicKeyFingerprint {
+            if (try? DeviceRegistry.fingerprint(publicKey: key)) == pinned {
                 match = (key, String(parts[1])); break
             }
         }
@@ -240,6 +252,7 @@ final class RemoteHostLink: @unchecked Sendable {
         _ = chmod(file.path, 0o600)
         pinnedHostsFile = file
         pinnedHostAlgorithm = match.1 == "ssh-rsa" ? "rsa-sha2-512,rsa-sha2-256" : match.1
+        pinnedHostFingerprint = pinned
     }
 
     /// GUI launches do not inherit a terminal's Homebrew PATH. Keep the caller's

@@ -2,12 +2,21 @@
 // 使用者 2026-09-05：遠端跟本地並行，不做遙控模式開關。
 import SwiftUI
 
+// W98b：這一段已改由側欄「專案」區的「遠端設備（名稱）」項目展開顯示（見 ChatPage+Sidebar 的
+// RemoteDeviceProjectRow）；這裡只留給沒有對應設備項目的工作階段當 fallback。
 struct RemoteDevicesSidebarSections: View {
     @ObservedObject var model: ChatPageModel
     @State private var collapsed: Set<String> = []
 
+    /// 已經在專案區有「遠端設備（名稱）」項目的那幾台不再重複列。
+    private var unmatchedSections: [RemoteSidebarSection] {
+        model.remoteSidebarSections.filter { section in
+            !model.devices.contains { $0.id == section.deviceID }
+        }
+    }
+
     var body: some View {
-        ForEach(model.remoteSidebarSections) { section in
+        ForEach(unmatchedSections) { section in
             VStack(alignment: .leading, spacing: 5) {
                 Button {
                     if collapsed.contains(section.id) { collapsed.remove(section.id) } else { collapsed.insert(section.id) }
@@ -39,24 +48,7 @@ struct RemoteDevicesSidebarSections: View {
                 .buttonStyle(.plain)
 
                 if !isCollapsed(section), section.isOnline {
-                    if section.projects.isEmpty {
-                        Text("這台還沒有專案")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 20)
-                    }
-                    ForEach(section.projects) { project in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(project.name)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .padding(.leading, 20)
-                            ForEach(project.threads) { thread in
-                                RemoteThreadRowView(model: model, deviceID: section.deviceID, thread: thread)
-                            }
-                        }
-                    }
+                    RemoteDeviceSectionContent(model: model, section: section, showsOfflineLine: false)
                 }
             }
             .padding(.top, 6)
@@ -65,12 +57,50 @@ struct RemoteDevicesSidebarSections: View {
 
     private func isCollapsed(_ section: RemoteSidebarSection) -> Bool { collapsed.contains(section.id) }
 
-    private static func seen(_ date: Date) -> String {
+    static func seen(_ date: Date) -> String {
         let now = ChatPageModel.exportChatScene != nil ? Date(timeIntervalSinceReferenceDate: 800_000_000) : Date()
         let s = Int(now.timeIntervalSince(date))
         if s < 3_600 { return "\(max(1, s / 60)) 分鐘前" }
         if s < 86_400 { return "\(s / 3_600) 小時前" }
         let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"; return f.string(from: date)
+    }
+}
+
+/// W98b：一台遠端設備的子層內容（專案→討論串）。從上面那段原封不動抽出來，讓側欄「專案」區的
+/// 「遠端設備（名稱）」項目展開時重用；顯示文字、狀態與離線格式都沒改。
+struct RemoteDeviceSectionContent: View {
+    @ObservedObject var model: ChatPageModel
+    let section: RemoteSidebarSection
+    /// 舊的段落把離線時間放在自己的標題列，展開的新項目則要在子層顯示。
+    var showsOfflineLine = true
+
+    var body: some View {
+        if section.isOnline {
+            if section.projects.isEmpty {
+                Text("這台還沒有專案")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 20)
+            }
+            ForEach(section.projects) { project in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(project.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.leading, 20)
+                    ForEach(project.threads) { thread in
+                        RemoteThreadRowView(model: model, deviceID: section.deviceID, thread: thread)
+                    }
+                }
+            }
+        } else if showsOfflineLine {
+            Text("離線・\(RemoteDevicesSidebarSections.seen(section.lastSeenAt))")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .padding(.leading, 20)
+        }
     }
 }
 

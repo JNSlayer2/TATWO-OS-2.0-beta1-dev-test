@@ -329,9 +329,12 @@ struct DeviceConsistencyPanel: View {
     @State private var submissionMessage = ""
     @State private var submissionStatus = ""
     @State private var submitting = false
+    @State private var jobs: [JobQueue.Row] = []
+    @State private var jobsExpanded = false
     private let columns: [(DeviceStatusColumn, String, CGFloat)] = [
         (.identity, "設備／角色", 190), (.connection, "連線", 132), (.app, "App 版本", 144),
         (.code, "程式碼", 180), (.constitution, "憲法", 152), (.rules, "規則產物", 154), (.gbrain, "GBrain", 112),
+        (.capacity, "容量／佇列", 208),
     ]
 
     var body: some View {
@@ -361,6 +364,26 @@ struct DeviceConsistencyPanel: View {
                             .font(.caption).foregroundStyle(receipt.phase == "converged" ? Color.green : Color.orange)
                             .textSelection(.enabled)
                     }
+                }
+                DisclosureGroup(isExpanded: $jobsExpanded) {
+                    if jobs.isEmpty {
+                        Text("沒有施工工作").font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(jobs) { job in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(job.kind).font(.caption.monospaced()).frame(width: 78, alignment: .leading)
+                            Text(job.branch.split(separator: "/").last.map(String.init) ?? job.branch)
+                                .font(.caption).frame(width: 150, alignment: .leading)
+                            Text(DeviceJobPresentation.status(job.status)).font(.caption)
+                                .foregroundStyle(DeviceJobPresentation.tint(job.status))
+                            Text((job.startedAt ?? "—") + " → " + (job.endedAt ?? "—"))
+                                .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                            Text(job.exit.map { "exit \($0)" } ?? (job.reason ?? ""))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }.textSelection(.enabled)
+                    }
+                } label: {
+                    Text("施工工作（\(jobs.count)）").font(.headline)
                 }
                 if OSDocuments.isPrimary {
                     Text("收件箱").font(.headline)
@@ -395,11 +418,13 @@ struct DeviceConsistencyPanel: View {
             while !Task.isCancelled {
                 await model.refresh()
                 let dispatchState = await Task.detached {
-                    (DeviceDispatch.shared.receipts(), DeviceInbox.shared.branches(), DeviceRegistry().list())
+                    (DeviceDispatch.shared.receipts(), DeviceInbox.shared.branches(), DeviceRegistry().list(),
+                     JobQueue.shared.rows())
                 }.value
                 dispatchReceipts = dispatchState.0
                 inbox = dispatchState.1
                 endpointDevices = dispatchState.2
+                jobs = dispatchState.3
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
             }
         }
@@ -470,6 +495,13 @@ struct DeviceConsistencyPanel: View {
                         "\($0.user)@\($0.host):\($0.sshPort)" == row.id
                     }) {
                         DeviceEndpointsRow(device: device)
+                        // 兩把指紋與來源；缺一把就代表對應的路徑（隧道／RPC）會被擋。
+                        Text(device.fingerprintSummary)
+                            .font(.footnote)
+                            .foregroundStyle(
+                                device.hostKeyFingerprint == nil || device.clientKeyFingerprint == nil
+                                    ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -506,6 +538,21 @@ struct DeviceConsistencyPanel: View {
     }
     private func label(_ light: DeviceStatusLight) -> String {
         switch light { case .green: return "符合政策"; case .yellow: return "待確認"; case .red: return "不符合政策"; case .gray: return "未知或過期" }
+    }
+}
+
+/// W95 施工工作清單的字面呈現；狀態字串由主設備佇列檔決定，這裡只翻譯不判斷。
+enum DeviceJobPresentation {
+    static func status(_ value: String) -> String {
+        ["queued": "排隊中", "running": "執行中", "done": "完成", "failed": "失敗"][value] ?? value
+    }
+    static func tint(_ value: String) -> Color {
+        switch value {
+        case "done": return .green
+        case "failed": return .red
+        case "running": return .orange
+        default: return .secondary
+        }
     }
 }
 

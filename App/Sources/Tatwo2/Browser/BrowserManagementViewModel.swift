@@ -49,6 +49,8 @@ struct TatwoBrowserManagementSnapshot: Equatable, Sendable {
     let byteLimit: UInt64
     let sessions: [TatwoBrowserManagementSession]
     let source: TatwoBrowserManagementSnapshotSource
+    // W99：當前設定檔大小與最近一次快取清理（唯讀，來自 enforce 結果）。
+    var cacheStatus: TatwoCEFProfileCacheStatus? = nil
 }
 
 enum TatwoBrowserManagementProviderError: Error, Equatable {
@@ -123,7 +125,13 @@ struct TatwoBrowserManagementFixtureProvider:
                     isArchived: false,
                     currentOriginURL: nil),
             ],
-            source: .fixture)
+            source: .fixture,
+            cacheStatus: TatwoCEFProfileCacheStatus(
+                measuredAt: base,
+                currentProfileBytes: 184 * 1_024 * 1_024,
+                lastEvictionAt: base.addingTimeInterval(-3_600),
+                lastEvictedDirectories: ["Service Worker/CacheStorage"],
+                lastEvictionBytesFreed: 577 * 1_024 * 1_024))
     }
 }
 
@@ -266,7 +274,8 @@ struct TatwoBrowserManagementLiveProvider:
                 EmbeddedBrowserSessionPersistenceContract
                     .maximumCEFProfileBytes,
             sessions: rows,
-            source: .live)
+            source: .live,
+            cacheStatus: TatwoCEFProfileCacheStatus.load())
     }
 
     private func measuredBytes(

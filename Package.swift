@@ -241,7 +241,12 @@ let package = Package(
                 .process("Resources/ProviderIcons"),
                 .copy("Resources/os-upstream.md"),
                 .copy("Resources/os.md"),
-                .copy("Resources/tatwo2-git-credential")
+                .copy("Resources/tatwo2-git-credential"),
+                // W96：技能隨 App 出貨。正本是 repo 的 skills/tatwo-ultrawork/，
+                // 直接打包那兩項，不在 Resources/ 再放一份會走樣的複本；
+                // references/ 是私人封存，逐項列出就不會被帶進去。
+                .copy("../../../skills/tatwo-ultrawork/SKILL.md"),
+                .copy("../../../skills/tatwo-ultrawork/agents")
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

@@ -1,6 +1,6 @@
-Source commit: c7031efe14323377f7865030fd03d73afbab56c1
+Source commit: b899d68c1505db5a7362e33aa0a905238dfe9a29
 Source worktree: clean
-Files: 1658
+Files: 1675
 .gitignore
 App/Sources/Tatwo2/Bot/BotPage.swift
 App/Sources/Tatwo2/Bot/BotPageState.swift
@@ -242,7 +242,9 @@ App/Sources/Tatwo2/Facade/IslandSpaces.swift
 App/Sources/Tatwo2/Facade/IslandWorkProvider.swift
 App/Sources/Tatwo2/Facade/IssueCommandAcceptance.swift
 App/Sources/Tatwo2/Facade/IssueImageAssets.swift
+App/Sources/Tatwo2/Facade/JobQueue.swift
 App/Sources/Tatwo2/Facade/JobsIndexAcceptance.swift
+App/Sources/Tatwo2/Facade/ManagedSkills.swift
 App/Sources/Tatwo2/Facade/ModelPreferencesAcceptance.swift
 App/Sources/Tatwo2/Facade/ModesStubs.swift
 App/Sources/Tatwo2/Facade/OS1Stubs.swift
@@ -1252,6 +1254,7 @@ scripts/build-cef-proprietary.sh
 scripts/bundle-cli-runtime.sh
 scripts/bundle-engines.sh
 scripts/bundle-gbrain.py
+scripts/cef-local-patches.sh
 scripts/check-appstorage-registry.sh
 scripts/clean-install-gate.sh
 scripts/copy-audit-waivers.txt
@@ -1266,6 +1269,15 @@ scripts/public-export.sh
 scripts/public-safety-allow.txt
 scripts/public-safety-scan.mjs
 scripts/published-release-cache.py
+scripts/rooms/build-room.sh
+scripts/rooms/functional-check.py
+scripts/rooms/gate-template.sh
+scripts/rooms/install-candidate.sh
+scripts/rooms/job-runner.sh
+scripts/rooms/make-offline-release.py
+scripts/rooms/quit-tatwo.sh
+scripts/rooms/terminal-run.sh
+scripts/rooms/thrice-candidate-full.sh
 scripts/run-r1-debug.sh
 scripts/runtime-layer.py
 scripts/runtime-layer.sh
@@ -1654,6 +1666,11 @@ tests/w87a-download-speed.test.mjs
 tests/w89-space-from-zero.test.mjs
 tests/w90-empty-state.test.mjs
 tests/w91-remote-endpoints.test.mjs
+tests/w91b-fingerprints.test.mjs
+tests/w95-job-queue.test.mjs
+tests/w96-skills-shipping.test.mjs
+tests/w98-devices-page.test.mjs
+tests/w99-cef-ceiling.test.mjs
 tests/webmcp-runtime.test.mjs
 tests/window-traffic-lights.test.mjs
 tests/work-space-add.test.mjs

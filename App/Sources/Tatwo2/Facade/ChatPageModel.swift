@@ -199,6 +199,8 @@ final class ChatPageModel: ObservableObject {
     @Published var devices: [DeviceRecord] = []
     @Published var remoteSessions: [RemoteDeviceSession] = []
     @Published var remoteSidebarSections: [RemoteSidebarSection] = []
+    /// W98：請側欄展開「專案」區的訊號（每次 +1）；不存狀態、不做別的事。
+    @Published var sidebarProjectsExpandRequest = 0
     @Published var selectedRemote: (deviceID: String, threadID: UUID)? {
         didSet {
             if selectedRemote?.deviceID != oldValue?.deviceID || selectedRemote?.threadID != oldValue?.threadID {
@@ -1900,6 +1902,9 @@ final class ChatPageModel: ObservableObject {
         }
         return selectRemote(deviceID: device.id, threadID: threadID)
     }
+
+    /// W98：設備頁按「遠端設備專案」時，請側欄把「專案」區展開（展開狀態是側欄的 @State，靠這個訊號同步）。
+    func requestSidebarProjectsExpanded() { sidebarProjectsExpandRequest += 1 }
 
     func exitRemoteMode() {
         guard selectedRemote != nil else { return }

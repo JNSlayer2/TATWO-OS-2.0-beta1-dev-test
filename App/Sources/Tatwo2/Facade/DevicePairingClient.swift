@@ -9,6 +9,10 @@ final class DevicePairingClient: @unchecked Sendable {
         let name: String
         var user: String?      // 副機自己的登入名，主機記名單用（2026-09-05 真雙機抓到兩邊都記成自己）
         var deviceID: String?
+        // 加入端自報的兩把公鑰指紋：客戶端金鑰讓主機交叉核對送來的公鑰，
+        // 主機金鑰讓主機之後能 pin 住反向隧道（舊版主機沒有這兩欄，照樣相容）。
+        var clientKeyFingerprint: String?
+        var hostKeyFingerprint: String?
     }
 
     private struct PairResponse: Codable {
@@ -18,6 +22,10 @@ final class DevicePairingClient: @unchecked Sendable {
         var hostUser: String?   // 主機的登入名，副機之後 ssh 要用
         var reason: String?
         var hostDeviceID: String?
+        // 產生配對碼端自報的兩把公鑰指紋。主機金鑰用來跟 ssh-keyscan 的結果交叉核對，
+        // 客戶端金鑰讓加入端之後能驗主機送來的 RPC 簽章。
+        var hostKeyFingerprint: String?
+        var clientKeyFingerprint: String?
     }
 
     private final class ReplyBox: @unchecked Sendable {
@@ -64,6 +72,7 @@ final class DevicePairingClient: @unchecked Sendable {
 
     private let registry: DeviceRegistry
     private let entry: TatwoEntry
+    private let environment: [String: String]
     private let privateKeyURL: URL
     private let sshVerifier: (String) -> Bool
     private let hostFingerprintResolver: (String) -> String?
@@ -78,6 +87,7 @@ final class DevicePairingClient: @unchecked Sendable {
     ) {
         self.registry = registry ?? DeviceRegistry(environment: environment)
         self.entry = TatwoEntry(environment: environment)
+        self.environment = environment
         let resolvedPrivateKeyURL = privateKeyURL
             ?? environment["TATWO2_SSH_KEY_PATH"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/id_ed25519")
@@ -102,7 +112,9 @@ final class DevicePairingClient: @unchecked Sendable {
         let local = try DeviceIdentityStore.readLocal(entry: entry)
         let request = PairRequest(
             code: code.uppercased(), publicKey: publicKey, name: name, user: NSUserName(),
-            deviceID: local?.deviceID)
+            deviceID: local?.deviceID,
+            clientKeyFingerprint: try? DeviceRegistry.fingerprint(publicKey: publicKey),
+            hostKeyFingerprint: DeviceRegistry.localHostKeyFingerprint(environment: environment))
         var payload = try JSONEncoder().encode(request)
         payload.append(0x0A)
 
@@ -167,6 +179,12 @@ final class DevicePairingClient: @unchecked Sendable {
         guard let fingerprint = hostFingerprintResolver(cleanHost) else {
             throw ClientError.hostFingerprintUnavailable
         }
+        // pin 住的永遠是這裡實際掃到的主機金鑰（跟分流前同一個值）。主機自報的那把只當佐證：
+        // 一致就把來源記成 pairing，不一致（例如 sshd 用的不是預設 host key）就記成 ssh_keyscan，
+        // 不會改掉 pin 的值，也不會因為對方自報而多信任什麼。
+        let hostKeySource = response.hostKeyFingerprint == fingerprint ? "pairing" : "ssh_keyscan"
+        // 主機的客戶端金鑰指紋只在格式正確時收下；收不到就留空，之後 RPC 照樣擋。
+        let peerClientKey = response.clientKeyFingerprint.flatMap { $0.hasPrefix("SHA256:") ? $0 : nil }
         _ = try DeviceIdentityStore.forLocalDevice(entry: entry, pairedDeviceID: deviceID, name: name)
         let now = Date()
         return try registry.recordPairedHost(DeviceRecord(
@@ -176,7 +194,12 @@ final class DevicePairingClient: @unchecked Sendable {
             user: hostUser,
             sshPort: 22,
             publicKeyFingerprint: fingerprint,
-            addedAt: now, lastSeenAt: now, workdirMap: [:]),
+            addedAt: now, lastSeenAt: now, workdirMap: [:],
+            hostKeyFingerprint: fingerprint,
+            clientKeyFingerprint: peerClientKey,
+            hostKeyFingerprintSource: .init(source: hostKeySource, recordedAt: now),
+            clientKeyFingerprintSource: peerClientKey.map { _ in
+                .init(source: "pairing", recordedAt: now) }),
             localDeviceID: deviceID)
     }
 

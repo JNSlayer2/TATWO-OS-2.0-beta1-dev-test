@@ -44,7 +44,8 @@ test('availability published by App launch; display only; installer and signatur
   assert.match(updater, /consumeResultOnLaunch\(\) \{\s+Task \{ await PeerUpdateSource\.publishInstalled/);
   assert.match(peer, /"--verify", "--deep", "--strict"/);
   assert.match(peer, /entries\[key\]\?\.installedApp = nil/);
-  assert.match(card, /Text\(PeerUpdateSource\.summary/);
+  // W98：設備列收納後 summary 先存進 let 再畫成徽章，仍是純顯示。
+  assert.match(card, /(?:Text\(|let update = )PeerUpdateSource\.summary\(/);
   assert.match(card, /\.task\(id: model\.devices\)/);
   assert.equal(read('install.sh'), read('public/install.sh'));
   assert.match(read('install.sh'), /actual="\$\(shasum -a 256 "\$output"\)"[\s\S]*== "\$expected"/);

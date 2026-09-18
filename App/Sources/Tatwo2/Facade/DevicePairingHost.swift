@@ -9,6 +9,9 @@ final class DevicePairingHost: @unchecked Sendable {
         let name: String
         var user: String?
         var deviceID: String?
+        // 加入端自報的兩把公鑰指紋（舊版加入端沒有這兩欄，照樣相容）。
+        var clientKeyFingerprint: String?
+        var hostKeyFingerprint: String?
     }
 
     private struct PairResponse: Codable {
@@ -18,6 +21,9 @@ final class DevicePairingHost: @unchecked Sendable {
         var hostUser: String?
         var reason: String?
         var hostDeviceID: String?
+        // 本機自報的兩把公鑰指紋，讓加入端把主機／客戶端金鑰分開存。
+        var hostKeyFingerprint: String?
+        var clientKeyFingerprint: String?
     }
 
     private final class StartProbe: @unchecked Sendable {
@@ -236,6 +242,15 @@ final class DevicePairingHost: @unchecked Sendable {
                 publicKey: request.publicKey, requestedID: request.deviceID,
                 localDeviceID: local.deviceID)
             let previous = registry.list().first { $0.id.lowercased() == deviceID }
+            // 加入端自報的客戶端金鑰指紋必須跟它送來的公鑰一致，不一致就不授權、不配對。
+            if let declared = request.clientKeyFingerprint {
+                guard try DeviceRegistry.fingerprint(publicKey: request.publicKey) == declared else {
+                    throw DeviceRegistry.RegistryError.fingerprintConflict
+                }
+            }
+            // 加入端的主機金鑰指紋只在格式正確時收下；收不到就留空，之後往它的隧道照樣擋。
+            let peerHostKey = request.hostKeyFingerprint.flatMap { $0.hasPrefix("SHA256:") ? $0 : nil }
+            let paired = DeviceFingerprintProvenance(source: "pairing", recordedAt: Date())
             let fingerprint = try registry.authorize(publicKey: request.publicKey, deviceID: deviceID)
             do {
                 _ = try registry.add(
@@ -248,7 +263,12 @@ final class DevicePairingHost: @unchecked Sendable {
                     workdirMap: previous?.workdirMap ?? [:],
                     lanHost: previous?.lanHost,
                     role: previous?.role,
-                    epoch: previous?.epoch)
+                    epoch: previous?.epoch,
+                    hostKeyFingerprint: peerHostKey ?? previous?.hostKeyFingerprint,
+                    clientKeyFingerprint: fingerprint,
+                    hostKeyFingerprintSource: peerHostKey == nil
+                        ? previous?.hostKeyFingerprintSource : paired,
+                    clientKeyFingerprintSource: paired)
             } catch {
                 // A failed re-pair must not revoke the previously authorized device.
                 if previous == nil { try? registry.removeAuthorizedKey(deviceID: deviceID) }
@@ -259,7 +279,9 @@ final class DevicePairingHost: @unchecked Sendable {
                 deviceID: deviceID,
                 hostName: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
                 hostUser: NSUserName(),
-                hostDeviceID: local.deviceID)
+                hostDeviceID: local.deviceID,
+                hostKeyFingerprint: DeviceRegistry.localHostKeyFingerprint(environment: environment),
+                clientKeyFingerprint: DeviceRegistry.localClientKeyFingerprint(environment: environment))
             send(response, to: connection) { [weak self] in
                 self?.finishCurrentWindow(token: token)
             }

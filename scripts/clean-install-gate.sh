@@ -54,11 +54,14 @@ if [ "$DRY_RUN" = 1 ]; then
     step "5/8 RPC $rpc → 逐項 PASS/FAIL"
   done
   step "6/8 空狀態斷言：list_devices 0 筆、get_document 0 專案 0 討論串、bot_list 0 隻 bot"
+  step "6b/8 W96 技能出貨斷言：\$HOME/Library/Application Support/tatwo2/skills/tatwo-ultrawork/SKILL.md"
+  step "     存在，且 sha256 ＝ App 內建（bundle 的 SKILL.md）；agents/openai.yaml 同樣種入；"
+  step "     私人封存 references/ 不得出現在 App 內建或使用者目錄"
   step "7/8 有 GUI／輔助使用權限時，osascript 開設定並逐 section 截圖到："
   step "     $EVIDENCE/settings-<section>.png（${#SECTIONS[@]} 個 section：${SECTIONS[*]}）"
   step "     沒有權限就跳過截圖，只留 RPC 結果，並在輸出中明說退化原因"
   step "8/8 關閉候選 App；隔離根保留供檢查（不自動刪）"
-  echo "DRYRUN OK steps=8 rpcs=${#RPCS[@]} sections=${#SECTIONS[@]}"
+  echo "DRYRUN OK steps=9 rpcs=${#RPCS[@]} sections=${#SECTIONS[@]}"
   exit 0
 fi
 
@@ -138,7 +141,12 @@ fi
 step "3/8 啟動候選 App（隔離 env）"
 "$BINARY" > "$ROOT/app.log" 2>&1 &
 APP_PID=$!
-cleanup() { kill "$APP_PID" 2>/dev/null; wait "$APP_PID" 2>/dev/null; }
+cleanup() {
+  # 候選 App 收到 SIGTERM 會走自己的結束確認流程（可能卡在確認片）；15 秒沒退出就 SIGKILL，閘門不能吊死。
+  kill "$APP_PID" 2>/dev/null
+  for _ in $(seq 1 15); do kill -0 "$APP_PID" 2>/dev/null || break; sleep 1; done
+  kill -9 "$APP_PID" 2>/dev/null; wait "$APP_PID" 2>/dev/null
+}
 trap cleanup EXIT
 sleep 1
 if kill -0 "$APP_PID" 2>/dev/null; then ok "候選 App 啟動 pid=$APP_PID"; else
@@ -210,6 +218,36 @@ empty_check list_devices 'JSON.stringify(d).match(/"(devices|result)"/) ? (d.dev
 empty_check get_document '(d.ok === false && d.error === "remote_access_disabled_no_paired_devices") || (((d.projects ?? d.result?.projects ?? []).length <= 1) && (d.threads ?? d.result?.threads ?? []).length === 0)'
 empty_check bot_list '(d.bots ?? d.result?.bots ?? []).length === 0'
 
+# ---- 6b/8 W96：技能隨 App 出貨，首次啟動要種進隔離 HOME 的 Application Support ----
+step "6b/8 App 內建技能種檔斷言"
+SKILLS_DIR="$HOME/Library/Application Support/tatwo2/skills/tatwo-ultrawork"
+BUNDLE_RES="$(dirname "$(dirname "${BINARY}")")/Resources/TatwoUltrawork_Tatwo2.bundle/Contents/Resources"
+[ -d "$BUNDLE_RES" ] || BUNDLE_RES="$(dirname "${BINARY}")/TatwoUltrawork_Tatwo2.bundle/Contents/Resources"
+if [ ! -f "$BUNDLE_RES/SKILL.md" ]; then
+  bad "App 內建少了技能：$BUNDLE_RES/SKILL.md"
+elif [ ! -f "$SKILLS_DIR/SKILL.md" ]; then
+  bad "全新安裝沒有種入 tatwo-ultrawork：$SKILLS_DIR/SKILL.md"
+else
+  bundled_sha="$(shasum -a 256 < "$BUNDLE_RES/SKILL.md" | cut -d' ' -f1)"
+  seeded_sha="$(shasum -a 256 < "$SKILLS_DIR/SKILL.md" | cut -d' ' -f1)"
+  if [ "$bundled_sha" = "$seeded_sha" ]; then ok "SKILL.md 雜湊＝App 內建（${bundled_sha:0:12}…）"; else
+    bad "SKILL.md 與 App 內建不一致：內建 ${bundled_sha:0:12}… 種入 ${seeded_sha:0:12}…"
+  fi
+  if [ "$(cat "$SKILLS_DIR/SKILL.installed.sha256" 2>/dev/null)" = "$bundled_sha" ]; then
+    ok "受管標記 SKILL.installed.sha256 認領內建雜湊"
+  else
+    bad "受管標記缺漏或不符：$SKILLS_DIR/SKILL.installed.sha256"
+  fi
+  if [ -f "$SKILLS_DIR/agents/openai.yaml" ]; then ok "agents/openai.yaml 一併種入"; else
+    bad "缺 $SKILLS_DIR/agents/openai.yaml"
+  fi
+  if [ -e "$BUNDLE_RES/references" ] || [ -e "$SKILLS_DIR/references" ]; then
+    bad "私人封存 references/ 不該出貨"
+  else
+    ok "references/ 未出貨"
+  fi
+fi
+
 # ---- 7/8 截圖 ----
 step "7/8 設定各 section 截圖"
 gui_ready=1
@@ -218,7 +256,14 @@ command -v screencapture >/dev/null 2>&1 || gui_ready=0
 if [ "$gui_ready" = 1 ]; then
   osascript -e 'tell application "System Events" to get name of first process' >/dev/null 2>&1 || gui_ready=0
 fi
-if [ "$gui_ready" = 0 ]; then
+screen_locked=0
+if [ "$gui_ready" = 1 ]; then
+  # 螢幕鎖定時 screencapture 會回「could not create image from display」；用 IOKit 的鎖定旗標判斷（System Events 的 first process 永遠是 loginwindow，不能拿來判）
+  ioreg -n Root -d1 2>/dev/null | grep -q '"CGSSessionScreenIsLocked" = Yes' && screen_locked=1
+fi
+if [ "$screen_locked" = 1 ]; then
+  note "mini 螢幕鎖定中（最前程序 loginwindow），無法截圖；本次不留截圖。解鎖螢幕後重跑本閘門即可補截圖"
+elif [ "$gui_ready" = 0 ]; then
   note "沒有 GUI／輔助使用權限（或無 osascript/screencapture）；退化成只做 RPC 檢查，本次不留截圖"
   note "要補截圖：在有登入視窗階段的 mini 上，授權終端機的「輔助使用」與「螢幕錄製」後重跑"
 else
@@ -229,7 +274,7 @@ else
       if screencapture -x "$EVIDENCE/settings-$section.png" >/dev/null 2>&1; then
         ok "截圖 settings-$section.png"
       else
-        bad "截圖失敗 settings-${section}（螢幕錄製權限？）"
+        bad "截圖失敗 settings-${section}（螢幕錄製權限？或螢幕已鎖定）"
       fi
     else
       bad "osascript 無法操作設定視窗 section=$section"

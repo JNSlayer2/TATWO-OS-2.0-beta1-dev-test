@@ -482,7 +482,10 @@ final class DeviceDispatch: @unchecked Sendable {
               body["method"] as? String == method, body["recipient"] as? String == local.deviceID,
               let sender = body["sender"] as? String,
               let peer = registry.list().first(where: { $0.id == sender }),
-              try DeviceRegistry.fingerprint(publicKey: publicKey) == peer.publicKeyFingerprint,
+              // RPC 簽章只認對方的客戶端金鑰。分流過的紀錄若缺這把（例如自己是加入端，
+              // 手上只有對方的主機金鑰）就當作沒配對，直接拒絕，不退回用另一把。
+              let pinnedClientKey = peer.pinnedClientKeyFingerprint,
+              try DeviceRegistry.fingerprint(publicKey: publicKey) == pinnedClientKey,
               let epoch = body["epoch"] as? Int, let seq = body["seq"] as? UInt64,
               let payload = body["payload"] as? [String: Any]
         else { throw Failure(reason: "untrusted_rpc_sender") }
@@ -511,6 +514,12 @@ final class DeviceDispatch: @unchecked Sendable {
             throw Failure(reason: "stale_epoch_or_replayed_sequence")
         }
         state.epoch = max(state.epoch, local.epoch!); state.received[sender] = seq; try save(state)
+        // 簽章驗過（且金鑰仍在 authorized_keys）之後才補記這把客戶端金鑰的來源與時間。
+        // 補記不影響上面的判斷；值不同 recordFingerprint 會拒絕，不會覆蓋已 pin 的指紋。
+        if let verified = try? DeviceRegistry.fingerprint(publicKey: publicKey) {
+            _ = try? registry.recordFingerprint(
+                id: sender, role: .client, fingerprint: verified, source: "rpc_proof")
+        }
         return (sender, payload)
     }
     func transferEvidence() -> PrimaryTransfer.Evidence {

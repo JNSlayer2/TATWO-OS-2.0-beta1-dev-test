@@ -3,7 +3,7 @@ import SwiftUI
 
 enum TatwoBrowserManagementCopy {
     static let capacityExplanation =
-        "超過上限時，會先清掉最久沒用、已封存的資料。"
+        "超過上限時，會先清掉最久沒用、已封存的資料，再清這個設定檔可重新下載的快取；登入不會被清掉。"
 
     static func dataSize(_ bytes: UInt64) -> String {
         let megabytes = Double(bytes) / (1_024 * 1_024)
@@ -16,6 +16,25 @@ enum TatwoBrowserManagementCopy {
         return megabytes.rounded() == megabytes
             ? "\(Int(megabytes)) MB"
             : String(format: "%.1f MB", megabytes)
+    }
+
+    // W99：當前設定檔大小＋最近一次清理（時間、目錄、MB），唯讀一行。
+    static func cacheStatusText(
+        _ status: TatwoCEFProfileCacheStatus
+    ) -> String {
+        let size = "這個設定檔目前 \(dataSize(status.currentProfileBytes))"
+        guard let evictedAt = status.lastEvictionAt,
+              !status.lastEvictedDirectories.isEmpty
+        else {
+            return size + "；還沒清過快取。"
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hant_TW")
+        formatter.dateFormat = "yyyy/MM/dd HH:mm"
+        return size
+            + "；最近一次清理 \(formatter.string(from: evictedAt))，清掉 "
+            + status.lastEvictedDirectories.joined(separator: "、")
+            + " 共 \(dataSize(status.lastEvictionBytesFreed))。"
     }
 
     static func capacityHeadline(
@@ -164,6 +183,13 @@ struct TatwoBrowserManagementView: View {
                     : TatwoBrowserManagementCopy.capacityExplanation)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
+            if let status = viewModel.snapshot?.cacheStatus {
+                Text(TatwoBrowserManagementCopy.cacheStatusText(status))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        "browser-management-cache-status")
+            }
         }
         .padding(12)
         .background(
