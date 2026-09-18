@@ -7,11 +7,12 @@ struct EmbeddedBrowserView: View {
     @ObservedObject var model: ChatPageModel
     var isPanelResizing = false
     var agentControllable = false
+    var onClose: (() -> Void)? = nil
 
     var body: some View {
         if let sessionID {
             ChatBrowserPanel(sessionID: sessionID, model: model,
-                agentControllable: agentControllable, isPanelResizing: isPanelResizing)
+                agentControllable: agentControllable, isPanelResizing: isPanelResizing, onClose: onClose)
                 .id(sessionID)
         } else {
             Text("請先選擇討論串").foregroundStyle(.secondary)
@@ -33,6 +34,8 @@ private struct ChatBrowserPanel: View {
     @ObservedObject var model: ChatPageModel
     let agentControllable: Bool
     let isPanelResizing: Bool
+    let onClose: (() -> Void)?
+    @State private var downloadsPresented = false
     @ObservedObject private var registry: BrowserTabRegistry
     @ObservedObject private var runtime: BrowserWorkSpaceRuntime
     @State private var browserFocused = false
@@ -49,7 +52,8 @@ private struct ChatBrowserPanel: View {
     @FocusState private var addressFieldFocused: Bool
     @State private var addressExpansionRequested = false
 
-    init(sessionID: String, model: ChatPageModel, agentControllable: Bool, isPanelResizing: Bool) {
+    init(sessionID: String, model: ChatPageModel, agentControllable: Bool, isPanelResizing: Bool, onClose: (() -> Void)?) {
+        self.onClose = onClose
         self.sessionID = sessionID
         self.model = model
         self.agentControllable = agentControllable
@@ -64,15 +68,48 @@ private struct ChatBrowserPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Label("瀏覽器", systemImage: "globe").font(.caption.weight(.semibold))
+                Spacer()
+                Button { downloadsPresented.toggle() } label: { Image(systemName: "arrow.down.circle") }
+                    .help("下載項目").accessibilityLabel("下載項目")
+                    .popover(isPresented: $downloadsPresented) { ChatBrowserDownloadsView() }
+                Menu {
+                    Button("在網頁中尋找…") { performBrowserAction(.findInPage) }
+                    Button("放大") { changeZoom(1) }
+                    Button("縮小") { changeZoom(-1) }
+                    Button("原始大小") { issue(.zoom(0)) }
+                    Divider()
+                    Button("重新開啟已關閉分頁") { _ = registry.reopenClosedTab(owner: owner) }
+                    Button("列印…") { issue(.printPage) }.disabled(selected == nil || selected?.usesAgentContext == true)
+                    Button("匯出 PDF 並開啟…") { issue(.printPDF) }.disabled(selected == nil || selected?.usesAgentContext == true)
+                    Button("瀏覽器診斷") { diagnosticsPresented = true }
+                } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton).fixedSize()
+                    .accessibilityLabel("瀏覽器選單")
+                if let onClose {
+                    Button(action: onClose) { Image(systemName: "sidebar.right") }
+                        .help("收合瀏覽器，保留分頁").accessibilityLabel("收合瀏覽器")
+                }
+            }.buttonStyle(.plain).padding(.horizontal, 12).padding(.vertical, 8)
+            .background(NonWindowDraggingView())
             HStack(spacing: BrowserSidebarMetrics.childGap) {
+                ScrollViewReader { tabScroll in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: BrowserSidebarMetrics.childGap) {
                         ForEach(tabs) { tab in
+                            HStack(spacing: 0) {
                             BrowserTabRow(title: tab.usesAgentContext ? "AI · \(tab.title)" : tab.title,
                                 tabID: tab.id.uuidString, host: tab.url?.host ?? "about:blank",
                                 favicon: tab.faviconPNG, selected: selected?.id == tab.id,
                                 sleeping: tab.isSleeping, onSelect: { select(tab.id) })
+                                Button { registry.close(tab.id) } label: { Image(systemName: "xmark").font(.caption2).padding(6) }
+                                    .buttonStyle(.plain).help("關閉分頁")
+                                    .accessibilityLabel("關閉分頁：\(tab.title)")
+                                    .accessibilityIdentifier("browser.closeTab.\(tab.id.uuidString)")
+                            }
                                 .frame(width: BrowserSidebarMetrics.chatTabWidth)
+                                .id(tab.id)
                                 .contextMenu {
                                     Button("關閉") { registry.close(tab.id) }
                                     Button(tab.isPinned ? "取消釘選" : "釘選") { registry.setPinned(tab.id, !tab.isPinned) }
@@ -85,6 +122,10 @@ private struct ChatBrowserPanel: View {
                                 }
                         }
                     }
+                }
+                .onChange(of: selected?.id, initial: true) { _, id in
+                    if let id { tabScroll.scrollTo(id, anchor: .center) }
+                }
                 }
                 Button(action: openNewTab) { Image(systemName: "plus")
                     .frame(width: BrowserSidebarMetrics.controlHitSize, height: BrowserSidebarMetrics.controlHitSize) }
@@ -129,8 +170,29 @@ private struct ChatBrowserPanel: View {
                 BrowserWorkSpaceCEFSurface(tabID: tab.id, spaceID: BrowserTabRegistry.sessionSpaceID,
                     command: command, onPopup: { _, _ in }, runtime: runtime,
                     isGeometryDragInProgress: isPanelResizing, surfaceID: panelID)
+                    .overlay {
+                        if (tab.url == nil || tab.url?.absoluteString == "about:blank"),
+                           !runtime.navigationState.isLoading,
+                           runtime.navigationState.visibleError == nil {
+                            VStack(spacing: 12) {
+                                Image(systemName: "globe").font(.largeTitle)
+                                Text("開始瀏覽").font(.headline)
+                                Text("輸入網址或搜尋，同時繼續左側的工作。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button("輸入網址或搜尋") { addressFocusRequest &+= 1 }
+                                if tab.usesAgentContext {
+                                    Text("AI 分頁使用獨立環境；本機預覽請新增一般分頁。")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }.padding().frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color(nsColor: .controlBackgroundColor))
+                        }
+                    }
             } else {
-                Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 12) {
+                    Text("沒有開啟的分頁").font(.headline)
+                    Button("新增分頁", action: openNewTab)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(BrowserDailyFocusScope(focused: $browserFocused))
@@ -146,7 +208,6 @@ private struct ChatBrowserPanel: View {
                     }, onAction: performBrowserAction)
             }
         }
-        .accessibilityLabel("內嵌瀏覽器")
         .sheet(isPresented: $diagnosticsPresented) { BrowserDiagnosticsView() }
         .sheet(isPresented: $annotationsPresented) {
             if let tab = selected { BrowserAnnotationSheet(tab: tab).background(BrowserAnnotationShortcutDismiss()) }
@@ -203,7 +264,13 @@ private struct ChatBrowserPanel: View {
         }
     }
 
+    private func changeZoom(_ delta: Double) {
+        let host = URL(string: runtime.navigationState.urlString ?? "")?.host?.lowercased() ?? ""
+        let current = BrowserGeneralSettings.load().zoomByHost[host] ?? 0
+        issue(.zoom(BrowserDailyNavigation.zoom(current, delta: delta)))
+    }
     private func syncSelection() {
+        validationMessage = nil
         findPresented = false
         if commandTabID != selected?.id { command = nil; commandTabID = nil }
         addressFieldFocused = false

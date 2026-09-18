@@ -12,7 +12,14 @@ final class TatwoTerminationCoordinator {
 
     init(present: Presenter? = nil, schedule: Scheduler? = nil) {
         self.present = present ?? Self.presentNativeConfirmation
-        self.schedule = schedule ?? { action in DispatchQueue.main.async(execute: action) }
+        // CEF can invoke terminate from inside a main-queue message-pump block.
+        // AppKit then runs a nested event loop waiting for terminateLater.
+        // Another main-queue block cannot execute until the outer block returns.
+        // A run-loop source remains serviceable during that nested wait.
+        self.schedule = schedule ?? { action in
+            RunLoop.main.perform(inModes: [.common, .modalPanel, .eventTracking], block: action)
+            CFRunLoopWakeUp(CFRunLoopGetMain())
+        }
     }
 
     func request(requiresConfirmation: Bool, window: NSWindow?, reply: @escaping (Bool) -> Void) -> NSApplication.TerminateReply {

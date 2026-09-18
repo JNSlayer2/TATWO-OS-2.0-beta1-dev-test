@@ -7,7 +7,11 @@ import UniformTypeIdentifiers
 import Darwin
 
 struct ChatPage: View {
-    @StateObject var browserWorkSpaceStore = BrowserWorkSpaceStore()
+    /// Standalone Browser mode keeps the app-wide workspace registry.
+    @StateObject var browserWorkSpaceStore: BrowserWorkSpaceStore
+    /// Chat's inspector owns a separate registry and CEF profile.
+    @StateObject private var chatBrowserWorkSpaceStore: BrowserWorkSpaceStore
+    private let chatBrowserRuntime: BrowserWorkSpaceRuntime
     @State var islandFooterHovering = false
     @StateObject var islandExceptionsCount = IslandExceptionsCount()
     @State var globalNoteOpen = ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_EXPORT_WINDOW_SNAPSHOT"] != nil && ["1", "2"].contains(ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_EXPORT_GLOBAL_NOTE"] ?? "")
@@ -120,7 +124,7 @@ struct ChatPage: View {
     @State var planInspectorPresented = false
     // 瀏覽器改用原生 inspector 承載（使用者 2026-09-01：「Plan 模式的拖拽
     // 表現非常好…照搬」）——系統邊緣拖拽、無把手、內容跟比例、頂部由系統管。
-    @State var browserInspectorPresented = false
+    @AppStorage("chat.sharedBrowserPanelOpen") var browserInspectorPresented = false
     let snapshotMenu = ChatSnapshotMenu.current
     private let exportRequestedWidth = Double(ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_EXPORT_WIDTH"] ?? "") ?? Double.greatestFiniteMagnitude
     let chatProjectRailEdgeGuardWidth: CGFloat = 10
@@ -156,9 +160,60 @@ struct ChatPage: View {
         _rightPanelPreference = rightPanelPreference
         _isRightPanelOpen = isRightPanelOpen
         _model = ObservedObject(wrappedValue: model)
+        _browserWorkSpaceStore = StateObject(wrappedValue: BrowserWorkSpaceStore(registry: model.browserTabRegistry))
+        let chatRegistry = BrowserTabRegistry.makeChatInspectorRegistry(source: model.browserTabRegistry)
+        _chatBrowserWorkSpaceStore = StateObject(wrappedValue: BrowserWorkSpaceStore(registry: chatRegistry))
+        chatBrowserRuntime = BrowserWorkSpaceRuntime.forChat("chat-browser-inspector", registry: chatRegistry)
     }
 
+    @AppStorage("chat.sharedBrowserPanelWidth") private var sharedBrowserPanelWidth = 0.0
+    @State private var sharedBrowserDragStart: CGFloat?
+
     var body: some View {
+        GeometryReader { proxy in
+            let layout = ChatBrowserInspectorLayout.resolve(windowWidth: proxy.size.width)
+            let visible = browserInspectorPresented && model.mode == .chat
+            let width = layout.clampedWidth(CGFloat(sharedBrowserPanelWidth))
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    workspaceBody.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if visible && layout.canDock {
+                        ChatBrowserDivider(
+                            onStart: { sharedBrowserDragStart = width },
+                            onDrag: { delta in
+                                sharedBrowserPanelWidth = Double(layout.clampedWidth((sharedBrowserDragStart ?? width) - delta))
+                            },
+                            onEnd: { sharedBrowserDragStart = nil })
+                            .frame(width: 10)
+                            .padding(.horizontal, -(10 - ChatBrowserInspectorLayout.dividerWidth) / 2)
+                            .frame(width: ChatBrowserInspectorLayout.dividerWidth)
+                            .zIndex(10)
+                        browserInspectorContent.frame(width: width)
+                    }
+                }
+                if visible && !layout.canDock {
+                    Divider()
+                    browserInspectorContent
+                        .frame(height: ChatBrowserInspectorLayout.compactPanelHeight(windowHeight: proxy.size.height))
+                }
+            }
+        }
+        .onChange(of: model.mode) { _, mode in
+            if mode == .browser {
+                browserInspectorPresented = false
+                if rightPanelContent == .browser { rightPanelContent = .none }
+            }
+        }
+    }
+
+    private var browserInspectorContent: some View {
+        BrowserWorkSpaceDesignView(store: chatBrowserWorkSpaceStore,
+            onClose: { browserInspectorPresented = false }, runtime: chatBrowserRuntime)
+            .modifier(BrowserWorkSpaceLifecycleModifier(store: chatBrowserWorkSpaceStore,
+                registry: chatBrowserWorkSpaceStore.registry, isWindow: surface == .window))
+    }
+
+    private var workspaceBody: some View {
         VStack(spacing: isPanel ? 10 : 0) {
             if isPanel {
                 topChrome
@@ -477,13 +532,6 @@ struct ChatPage: View {
                 onPRSubmit: model.submitActivePRPlan,
                 onPRDiscuss: model.returnActivePRToDiscussion)
                 .id(model.activePlanArtifact?.planID)
-        }
-        .inspector(isPresented: $browserInspectorPresented) {
-            EmbeddedBrowserView(
-                sessionID: model.selectedThreadID?.uuidString.lowercased(),
-                model: model,
-                agentControllable: true)
-                .inspectorColumnWidth(min: 420, ideal: 640, max: 960)
         }
         .onAppear {
             model.updateGatewayLiveStatus(gatewayLiveStatus)

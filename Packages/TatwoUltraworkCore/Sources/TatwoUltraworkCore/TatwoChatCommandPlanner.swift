@@ -1069,19 +1069,16 @@ public enum TatwoChatCommandPlanner {
               + "\"]",
           ]
           : []
-      let controlArgs = [cdFlag, workingDirectoryPath]
-        + interactionMode.codexArguments(fallback: permissionPreset)
-        + (
-          interactionMode == .standard
-            && permissionPreset.codexSandboxMode == .workspaceWrite
-            ? writableDirectories.flatMap { ["--add-dir", $0] }
-            : []
-        )
-        + gitWritableRootArgs
-        + (route.modelArgument.map { ["-m", $0] } ?? [])
-        + (nativeEffort?.codexArguments ?? [])
-        + (nativeSpeedTier?.codexArguments ?? [])
-        + appManagementCodexArgs
+      var controlArgs: [String] = [cdFlag, workingDirectoryPath]
+      controlArgs += interactionMode.codexArguments(fallback: permissionPreset)
+      if interactionMode == .standard && permissionPreset.codexSandboxMode == .workspaceWrite {
+        controlArgs += writableDirectories.flatMap { ["--add-dir", $0] }
+      }
+      controlArgs += gitWritableRootArgs
+      controlArgs += route.modelArgument.map { ["-m", $0] } ?? []
+      controlArgs += nativeEffort?.codexArguments ?? []
+      controlArgs += nativeSpeedTier?.codexArguments ?? []
+      controlArgs += appManagementCodexArgs
       let repoTrustArgs = (mode == .chat && skipGitRepoCheck) ? ["--skip-git-repo-check"] : []
       // Chat turns are one-shot JSONL exec calls with no need for codex's
       // interactive shell-alias snapshot machinery. That subsystem forks a
@@ -1118,15 +1115,20 @@ public enum TatwoChatCommandPlanner {
         mode == .chat && imageTransport == .codexExecImage
         ? chatImagePaths.flatMap { ["--image", $0] }
         : []
-      let args: [String]
+      var args: [String] = ["exec"]
+      args += controlArgs
+      args += shellSnapshotDisableArgs
+      args += repoTrustArgs
       let codexPromptArgument = mode == .chat ? "-" : prompt
       let codexStandardInput = mode == .chat ? prompt : nil
       if let codexResumeSessionID {
-        args = ["exec"] + controlArgs + shellSnapshotDisableArgs + repoTrustArgs + ["resume", "--json"] + imageArgs + [codexResumeSessionID, codexPromptArgument]
+        args += ["resume", "--json"]
+        args += imageArgs
+        args += [codexResumeSessionID, codexPromptArgument]
       } else {
-        // `codex exec --image <FILE>...` is variadic on initial turns, so a
-        // trailing positional prompt is consumed as another image path.
-        args = ["exec"] + controlArgs + shellSnapshotDisableArgs + repoTrustArgs + ["--json", codexPromptArgument] + imageArgs
+        // Keep the prompt before variadic image arguments on initial turns.
+        args += ["--json", codexPromptArgument]
+        args += imageArgs
       }
       return TatwoChatCommandPlan(
         routeID: route.id,

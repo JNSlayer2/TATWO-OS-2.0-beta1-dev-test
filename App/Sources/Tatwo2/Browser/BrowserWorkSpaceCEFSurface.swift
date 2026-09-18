@@ -390,7 +390,7 @@ private struct BrowserWorkSpaceNativeSurface: NSViewRepresentable {
         init(id: UUID, runtime: BrowserWorkSpaceRuntime) { self.id = id; self.runtime = runtime }
     }
     func makeCoordinator() -> Coordinator { Coordinator(id: surfaceID, runtime: runtime) }
-    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+    func makeNSView(context: Context) -> NSView { BrowserChromeAwareContainerView(frame: .zero) }
     func updateNSView(_ container: NSView, context: Context) {
         let coordinator = context.coordinator
         coordinator.revision += 1

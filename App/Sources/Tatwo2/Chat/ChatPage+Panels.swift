@@ -541,6 +541,15 @@ extension ChatPage {
             .buttonStyle(.plain)
             .help("資訊卡")
 
+            Button { applyRightPanelInteraction(.toggleBrowser) } label: {
+                controlStripGlyph("globe")
+            }
+            .buttonStyle(.plain)
+            .help(browserInspectorPresented ? "收合瀏覽器" : "在聊天旁開啟瀏覽器")
+            .accessibilityLabel(browserInspectorPresented ? "收合瀏覽器" : "在聊天旁開啟瀏覽器")
+            .accessibilityIdentifier("chat.browser.toggle")
+            .keyboardShortcut("b", modifiers: [.command, .option])
+
             // 工具箱：變更收據、瀏覽器、檔案（收進 Menu）。
             let browserFileActive = (rightPanelContent == .browser || rightPanelContent == .file || rightPanelContent == .diff) && isRightPanelOpen
             Menu {

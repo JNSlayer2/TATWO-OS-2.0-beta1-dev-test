@@ -233,6 +233,21 @@ final class BrowserAgentRequestTests: XCTestCase {
         }
     }
 
+    func testBlockedAgentDestinationReportsPolicyInsteadOfDispatchTimeout() throws {
+        for text in ["http://127.0.0.1:3000/songs", "http://localhost:3000/songs",
+                     "http://[::1]:3000/songs", "http://10.0.0.1/", "file:///fixture"] {
+            let url = try XCTUnwrap(URL(string: text))
+            XCTAssertThrowsError(try BrowserAgentNavigation.validateDestination(url)) {
+                XCTAssertTrue(String(describing: $0).hasPrefix("browser_navigation_blocked_by_policy"))
+                XCTAssertFalse(String(describing: $0).contains("timed_out"))
+            }
+        }
+    }
+
+    func testPublicAgentDestinationStillReachesNativeValidation() throws {
+        try BrowserAgentNavigation.validateDestination(XCTUnwrap(URL(string: "https://example.com/")))
+    }
+
     private func request(epoch: UInt64 = 7) -> BrowserAgentRequest {
         BrowserAgentRequest(caller: caller, scope: "test-chat|test-project|test-space", epoch: epoch, now: 100)
     }

@@ -396,7 +396,22 @@ final class BrowserWorkSpaceStore: ObservableObject {
 
 struct BrowserWorkSpaceDesignView: View {
     @ObservedObject var store: BrowserWorkSpaceStore
-    @ObservedObject private var runtime = BrowserWorkSpaceRuntime.shared
+    var onClose: (() -> Void)? = nil
+    init(store: BrowserWorkSpaceStore, onClose: (() -> Void)? = nil,
+         runtime: BrowserWorkSpaceRuntime? = nil) {
+        _store = ObservedObject(wrappedValue: store)
+        self.onClose = onClose
+        _runtime = ObservedObject(wrappedValue: runtime ?? BrowserWorkSpaceRuntime.shared)
+    }
+    @State private var embeddedSidebarPresented = false
+    @State private var embeddedToolbarHovered = false
+    @State private var embeddedToolsHovered = false
+    @State private var embeddedToolsPinned = false
+    private var embeddedToolbarVisible: Bool {
+        embeddedToolbarHovered || embeddedToolsHovered || embeddedToolsPinned || addressFocused || addressExpansionRequested || findPresented
+            || embeddedSidebarPresented || extensionsPresented || diagnosticsPresented || loginHelpPresented
+    }
+    @ObservedObject private var runtime: BrowserWorkSpaceRuntime
     @FocusState private var addressFocused: Bool
     @State private var addressExpansionRequested = false
     @State private var diagnosticsPresented = false
@@ -423,13 +438,41 @@ struct BrowserWorkSpaceDesignView: View {
     private var shadowColor: Color { LiquidGlassTokens.browserShadowColor }
 
     var body: some View {
-        VStack(spacing: BrowserOmniboxMetrics.zero) {
-            workspaceToolbar
-                .zIndex(BrowserOmniboxMetrics.chromeZIndex)
-            Group {
-                if EmbeddedBrowserEnginePolicy.current != .chromiumCEF { BrowserEngineUnavailablePlaceholder() }
-                else if store.selectedSpace.isSessionSpace { sessionContent }
-                else { browserContent }
+        Group {
+            if onClose != nil {
+                browserPageContent
+                    .overlay(alignment: .top) {
+                        ZStack(alignment: .top) {
+                            BrowserToolbarHoverRegion { embeddedToolbarHovered = $0 }
+                                .frame(height: 40 + 2)
+                            workspaceToolbar
+                                .background {
+                                    GeometryReader { geometry in
+                                        ZStack {
+                                            BrowserToolbarMaterial()
+                                            Color.clear
+                                        }
+                                        .frame(height: geometry.size.height + 16)
+                                        .mask {
+                                            LinearGradient(stops: [
+                                                .init(color: .black, location: 0),
+                                                .init(color: .black, location: geometry.size.height / (geometry.size.height + 16)),
+                                                .init(color: .clear, location: 1)
+                                            ], startPoint: .top, endPoint: .bottom)
+                                        }
+                                    }.allowsHitTesting(false)
+                                }
+                                .opacity(embeddedToolbarVisible ? 1 : 0)
+                                .allowsHitTesting(embeddedToolbarVisible)
+                                .accessibilityHidden(!embeddedToolbarVisible)
+                        }
+                        .zIndex(BrowserOmniboxMetrics.chromeZIndex)
+                    }
+            } else {
+                VStack(spacing: BrowserOmniboxMetrics.zero) {
+                    workspaceToolbar.zIndex(BrowserOmniboxMetrics.chromeZIndex)
+                    browserPageContent
+                }
             }
         }
             .background(palette.canvasBase)
@@ -447,6 +490,10 @@ struct BrowserWorkSpaceDesignView: View {
                 shortcutMap = BrowserGeneralSettings.load().shortcuts
             }
             .overlay { if tabSearchPresented { tabSearchOverlay } }
+            .popover(isPresented: $embeddedSidebarPresented) {
+                BrowserWorkSpaceSidebarList(store: store)
+                    .frame(width: 240, height: 480).padding(8)
+            }
             .sheet(isPresented: $diagnosticsPresented) { BrowserDiagnosticsView() }
             .sheet(isPresented: $extensionsPresented) { BrowserExtensionsView() }
             .sheet(isPresented: $loginHelpPresented) { BrowserLoginHelpView(currentURL: store.selectedTab.url) }
@@ -486,6 +533,12 @@ struct BrowserWorkSpaceDesignView: View {
                     onCommand: send, onReopen: store.reopenClosedTab, onTabNumber: store.selectTabNumber,
                     onAction: performBrowserAction)
             }
+    }
+
+    @ViewBuilder private var browserPageContent: some View {
+        if EmbeddedBrowserEnginePolicy.current != .chromiumCEF { BrowserEngineUnavailablePlaceholder() }
+        else if store.selectedSpace.isSessionSpace { sessionContent }
+        else { browserContent }
     }
 
     private var sessionContent: some View {
@@ -569,20 +622,63 @@ struct BrowserWorkSpaceDesignView: View {
         query = store.showsStartPage ? "" : store.selectedTab.url
     }
 
-    private var workspaceToolbar: some View {
-        VStack(spacing: BrowserOmniboxMetrics.zero) {
-            HStack(spacing: BrowserOmniboxMetrics.controlGap) {
-                if store.focusMode {
-                    Color.clear.frame(width: WindowChromeMetrics.trafficLightSafeWidth)
+    private var embeddedTabStrip: some View {
+        GeometryReader { geometry in
+            let tabWidth = min(136.0, max(56.0, (geometry.size.width - 44) / CGFloat(max(1, store.tabs.count)) - 4))
+            HStack(spacing: 2) {
+                ScrollViewReader { scroll in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(store.tabs) { tab in
+                                HStack(spacing: 3) {
+                                    Button { store.select(tab.id) } label: {
+                                        Text(tab.title.isEmpty ? "新分頁" : tab.title)
+                                            .font(.system(size: 12)).lineLimit(1)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .accessibilityLabel("切換分頁：\(tab.title)")
+                                    .accessibilityIdentifier("browser.chatTab.\(tab.registryID?.uuidString ?? String(tab.id))")
+                                    Button { store.close(tab.id) } label: {
+                                        Image(systemName: "xmark").font(.system(size: 9))
+                                            .frame(width: 16, height: 20).contentShape(Rectangle())
+                                    }
+                                    .accessibilityLabel("關閉分頁：\(tab.title)")
+                                    .accessibilityIdentifier("browser.chatCloseTab.\(tab.registryID?.uuidString ?? String(tab.id))")
+                                }
+                                .buttonStyle(.plain).padding(.horizontal, 5).frame(width: tabWidth, height: 28)
+                                .background(Color.primary.opacity(tab.id == store.selectedID ? 0.10 : 0.025),
+                                    in: RoundedRectangle(cornerRadius: 5))
+                                .id(tab.id)
+                            }
+                        }
+                    }
+                    .onChange(of: store.selectedID, initial: true) { _, selected in
+                        scroll.scrollTo(selected, anchor: .trailing)
+                    }
                 }
-                BrowserSidebarControls(store: store)
-                EmbeddedBrowserToolbar(addressText: $query, addressFieldFocused: $addressFocused,
-                    state: runtime.navigationTabID == store.selectedRegistryID ? runtime.navigationState : .blank,
-                    enabled: store.canAddTab, onSubmit: submitSearch, onCommand: send,
-                    openTabs: store.tabs.map { BrowserAddressSuggestion(id: String($0.id), title: $0.title, url: $0.url) },
-                    onSelectTab: { if let id = Int($0) { store.select(id) } }, expansionRequest: $addressExpansionRequested,
-                    showsAddress: !store.showsStartPage)
-                Menu {
+                .frame(width: min(max(0, geometry.size.width - 40), CGFloat(store.tabs.count) * (tabWidth + 4)))
+                newTabButton.frame(width: 28, height: 30)
+                Spacer(minLength: 0)
+            }.padding(.horizontal, 6)
+        }.frame(height: 30)
+    }
+
+    private var newTabButton: some View {
+                Button {
+                    if store.canAddTab { store.addTab(); store.searchFocusRequest += 1 }
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: onClose == nil ? 32 : 24, height: onClose == nil ? 32 : 24)
+                }
+                .buttonStyle(.plain).disabled(!store.canAddTab)
+                .accessibilityLabel("新增分頁")
+                .accessibilityIdentifier("browser.toolbar.newTab")
+                .help("新增分頁；右鍵開啟分頁、下載與瀏覽器功能")
+                .contextMenu {
+                    if onClose != nil {
+                        Button("分頁、書籤與下載…") { embeddedSidebarPresented = true }
+                        Divider()
+                    }
                     Button("在網頁中尋找…") { performBrowserAction(.findInPage) }
                     Button("列印…") { send(.printPage) }
                     Button("存成 PDF 並用系統預覽開啟") { send(.printPDF) }
@@ -610,12 +706,10 @@ struct BrowserWorkSpaceDesignView: View {
                             }
                         }
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: BrowserOmniboxMetrics.collapsedHeight, height: BrowserOmniboxMetrics.collapsedHeight)
                 }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .accessibilityLabel("瀏覽器功能")
+    }
+
+    @ViewBuilder private var auxiliaryBrowserControls: some View {
                 Button { extensionsPresented = true } label: {
                     Image(systemName: "puzzlepiece.extension")
                         .frame(width: BrowserOmniboxMetrics.collapsedHeight, height: BrowserOmniboxMetrics.collapsedHeight)
@@ -626,13 +720,65 @@ struct BrowserWorkSpaceDesignView: View {
                 }
                 .buttonStyle(.plain).disabled(store.selectedRegistryID == nil)
                 .help("註解").accessibilityLabel("註解").fixedSize()
+                if let onClose {
+                    Button(action: onClose) { Image(systemName: "sidebar.right") }
+                        .buttonStyle(.plain).accessibilityLabel("收合聊天旁瀏覽器")
+                }
+    }
+
+    private var workspaceToolbar: some View {
+        VStack(spacing: BrowserOmniboxMetrics.zero) {
+            HStack(spacing: BrowserOmniboxMetrics.controlGap) {
+                if store.focusMode && onClose == nil {
+                    Color.clear.frame(width: WindowChromeMetrics.trafficLightSafeWidth)
+                }
+                if onClose == nil { BrowserSidebarControls(store: store) }
+                EmbeddedBrowserToolbar(addressText: $query, addressFieldFocused: $addressFocused,
+                    state: runtime.navigationTabID == store.selectedRegistryID ? runtime.navigationState : .blank,
+                    enabled: store.canAddTab, onSubmit: submitSearch, onCommand: send,
+                    openTabs: store.tabs.map { BrowserAddressSuggestion(id: String($0.id), title: $0.title, url: $0.url) },
+                    onSelectTab: { if let id = Int($0) { store.select(id) } }, expansionRequest: $addressExpansionRequested,
+                    showsAddress: !store.showsStartPage, compactChrome: onClose != nil)
+                    .frame(width: onClose == nil ? nil : 148)
+                if onClose != nil { embeddedTabStrip }
+                if onClose == nil { newTabButton }
+                if onClose == nil {
+                    auxiliaryBrowserControls
+                } else {
+                    Button { embeddedToolsPinned.toggle() } label: {
+                        Image(systemName: embeddedToolsPinned ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                            .background(Color.primary.opacity(0.07), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("向下展開瀏覽器工具")
+                    .accessibilityIdentifier("browser.toolbar.expandTools")
+                    .help("移入向下展開工具；點擊固定，再點收合")
+                    .background(alignment: .topTrailing) {
+                        BrowserToolbarHoverRegion { embeddedToolsHovered = $0 }
+                            .frame(width: 44, height: embeddedToolsHovered || embeddedToolsPinned ? 142 : 28)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if embeddedToolsHovered || embeddedToolsPinned {
+                            VStack(spacing: 8) { auxiliaryBrowserControls }
+                                .padding(8)
+                                .frame(width: 44)
+                                .background {
+                                    BrowserToolbarMaterial().clipShape(RoundedRectangle(cornerRadius: 12))
+                                        .allowsHitTesting(false)
+                                }
+                                .offset(y: 34)
+                        }
+                    }
+                }
             }
             .font(.system(size: BrowserOmniboxMetrics.iconSize))
             .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
             .padding(.horizontal, BrowserOmniboxMetrics.horizontalInset)
-            .frame(height: BrowserOmniboxMetrics.toolbarHeight)
-            .background(palette.canvasBase)
-            .background(NonWindowDraggingView())
+            .frame(height: onClose == nil ? BrowserOmniboxMetrics.toolbarHeight : 40)
+            .background { if onClose == nil { palette.canvasBase } }
+            .background(NonWindowDraggingView().allowsHitTesting(false))
             .zIndex(BrowserOmniboxMetrics.chromeZIndex)
             BrowserNavigationProgress(tabID: store.selectedRegistryID,
                 state: runtime.navigationTabID == store.selectedRegistryID ? runtime.navigationState : .blank)

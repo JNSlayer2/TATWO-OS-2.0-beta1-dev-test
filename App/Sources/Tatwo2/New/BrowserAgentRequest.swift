@@ -129,6 +129,17 @@ final class BrowserAgentNavigation: @unchecked Sendable {
         self.request = request
     }
 
+    static func validateDestination(_ url: URL) throws {
+        switch EmbeddedBrowserNavigationPolicy.decision(for: url, actor: .strict) {
+        case .allow: return
+        case let .block(reason):
+            throw BrowserAgentRequestError("browser_navigation_blocked_by_policy: " +
+                EmbeddedBrowserVisibleError.blockedNavigation(reason).message)
+        case .askOncePerHost:
+            throw BrowserAgentRequestError("browser_navigation_blocked_by_policy")
+        }
+    }
+
     /// Attempt bookkeeping only, never permission or proof of a loaded page.
     var hasAttempted: Bool {
         lock.lock(); defer { lock.unlock() }

@@ -9902,8 +9902,11 @@ extern "C" uint64_t TatwoCEFMessagePumpLoadingActiveLifecycleProbe(void) {
       state->client->pdf_print_pending_) { completion(nil); return; }
   // mkdtemp reserves a private directory, so another process cannot preplant the file.
   NSString *pattern = [NSTemporaryDirectory() stringByAppendingPathComponent:@"browser-print-XXXXXX"];
-  std::vector<char> buffer(pattern.fileSystemRepresentation,
-                           pattern.fileSystemRepresentation + strlen(pattern.fileSystemRepresentation) + 1);
+  // NSString may return a different conversion buffer on each call. Both
+  // iterators must refer to the same allocation (otherwise vector can abort).
+  const char *patternBytes = pattern.fileSystemRepresentation;
+  if (!patternBytes) { completion(nil); return; }
+  std::vector<char> buffer(patternBytes, patternBytes + strlen(patternBytes) + 1);
   char *directory = mkdtemp(buffer.data());
   if (!directory) { completion(nil); return; }
   NSString *path = [[NSString stringWithUTF8String:directory] stringByAppendingPathComponent:@"page.pdf"];

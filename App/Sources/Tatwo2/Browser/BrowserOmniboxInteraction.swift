@@ -50,11 +50,12 @@ struct BrowserOmniboxDismissMonitor: NSViewRepresentable {
             super.viewDidMoveToWindow()
             stop()
             guard let window else { return }
-            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] event in
                 guard let self else { return event }
                 let inside = event.window === self.window
                     && self.bounds.contains(self.convert(event.locationInWindow, from: nil))
-                if !inside {
+                let insideChrome = event.window.map { BrowserToolbarHoverRegion.HoverView.containsInteractionPoint(event.locationInWindow, in: $0) } ?? false
+                if !inside && !insideChrome {
                     // Preserve the destination click (menu, annotation, CEF).
                     DispatchQueue.main.async { [weak self] in self?.onDismiss() }
                 }

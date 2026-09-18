@@ -1302,6 +1302,7 @@ final class BrowserAgentBridge: @unchecked Sendable {
     private func requestBrowserPanel(url: URL, request: BrowserAgentRequest) throws -> BrowserAgentNavigation {
         let navigation = BrowserAgentNavigation(url: url, request: request)
         try checkedOnMain(request) {
+            try BrowserAgentNavigation.validateDestination(url)
             self.model?.queueBrowserAgentNavigation(navigation)
         }
         return navigation

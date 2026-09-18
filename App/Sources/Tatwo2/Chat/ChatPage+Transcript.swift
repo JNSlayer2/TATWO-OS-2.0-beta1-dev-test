@@ -337,6 +337,13 @@ extension ChatPage {
                                 using: proxy,
                                 viewportHeight: viewport.size.height)
                         }
+                        .onChange(of: viewport.size.width) { _, _ in
+                            // Docking a browser reflows LazyVStack without changing
+                            // message IDs. Keep the latest anchor visible, but never
+                            // pull a reader away from intentionally scrolled history.
+                            guard followState.shouldAutoScrollOnContentChange else { return }
+                            scrollToLatest(using: proxy, viewportHeight: viewport.size.height)
+                        }
                         .onChange(of: selectedSessionReference) { _, _ in
                             followState.jumpToLatest()
                             scrollToLatest(

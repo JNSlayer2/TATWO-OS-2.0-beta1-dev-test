@@ -97,3 +97,35 @@ enum ChatRightPanelLayoutPolicy {
         )
     }
 }
+
+struct ChatBrowserInspectorLayout: Equatable {
+    static let dividerWidth: CGFloat = 1
+
+    func clampedWidth(_ requested: CGFloat) -> CGFloat {
+        guard canDock else { return 0 }
+        let preferred = requested.isFinite && requested > 0 ? requested : idealWidth
+        return min(maximumWidth, max(minimumWidth, preferred))
+    }
+
+    let canDock: Bool
+    let minimumWidth: CGFloat
+    let idealWidth: CGFloat
+    let maximumWidth: CGFloat
+
+    static func compactPanelHeight(windowHeight: CGFloat) -> CGFloat {
+        guard windowHeight.isFinite else { return 0 }
+        return min(420, max(0, windowHeight) * 0.42)
+    }
+
+    static func resolve(windowWidth: CGFloat) -> Self {
+        let width = windowWidth.isFinite ? max(0, windowWidth) : 0
+        let workspaceReserve = WorkspaceSidebarMetrics.width + WorkspaceSidebarMetrics.contentGap
+            + ChatRightPanelLayoutPolicy.minimumMainContentWidth
+        let available = max(0, width - workspaceReserve - dividerWidth)
+        let maximum = min(960, available)
+        let canDock = maximum >= 320
+        return Self(canDock: canDock, minimumWidth: canDock ? 320 : 0,
+            idealWidth: canDock ? min(max(320, width * 0.40), maximum) : 0,
+            maximumWidth: canDock ? maximum : 0)
+    }
+}

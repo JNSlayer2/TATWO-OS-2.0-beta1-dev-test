@@ -489,6 +489,7 @@ struct EmbeddedBrowserToolbar: View {
     // Consume an explicit request from the existing browser shortcut action.
     var expansionRequest: Binding<Bool> = .constant(false)
     var showsAddress = true
+    var compactChrome = false
     // 提示只能顯示使用者實際綁定的快捷鍵。⌘L 是系統保留鍵且不在 defaults 裡，
     // 寫死「⌘L 編輯」等於向使用者宣告一個按下去沒反應的功能。
     @State private var addressShortcutHint: String? = EmbeddedBrowserToolbar.focusAddressHint()
@@ -533,9 +534,13 @@ struct EmbeddedBrowserToolbar: View {
             if showsAddress {
                 Button(action: expandEditor) {
                     HStack(spacing: BrowserOmniboxMetrics.controlGap) {
-                        Text(BrowserOmniboxPresentation.domain(for: state.urlString))
-                            .font(.system(size: BrowserOmniboxMetrics.domainFontSize))
-                            .lineLimit(1).truncationMode(.middle)
+                        if compactChrome {
+                            Image(systemName: "magnifyingglass")
+                        } else {
+                            Text(BrowserOmniboxPresentation.domain(for: state.urlString))
+                                .font(.system(size: BrowserOmniboxMetrics.domainFontSize))
+                                .lineLimit(1).truncationMode(.middle)
+                        }
                     }
                     .frame(maxWidth: .infinity, minHeight: BrowserOmniboxMetrics.collapsedHeight, alignment: .leading)
                     .padding(.leading, BrowserOmniboxMetrics.horizontalInset)
@@ -552,11 +557,12 @@ struct EmbeddedBrowserToolbar: View {
         .foregroundStyle(LiquidGlassTokens.browserOmniboxInk)
         .padding(.horizontal, BrowserOmniboxMetrics.horizontalInset)
         .frame(height: BrowserOmniboxMetrics.collapsedHeight)
-        .background(NonWindowDraggingView())
+        .background(NonWindowDraggingView().allowsHitTesting(false))
         .accessibilityIdentifier("browser-navigation-bar")
-        .overlay(alignment: .top) {
+        .overlay(alignment: compactChrome ? .topLeading : .top) {
             if showsAddress && isExpanded {
                 editorPanel
+                    .frame(width: compactChrome ? 280 : nil)
                     .offset(y: BrowserOmniboxMetrics.collapsedHeight + BrowserOmniboxMetrics.panelGap)
                     .transition(reduceMotion ? .identity : .move(edge: .top).combined(with: .opacity))
             }

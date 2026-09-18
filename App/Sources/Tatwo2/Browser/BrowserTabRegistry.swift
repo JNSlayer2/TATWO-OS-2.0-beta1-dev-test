@@ -79,6 +79,13 @@ final class BrowserTabRegistry: ObservableObject {
     static let defaultURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/TATWO OS/Browser/tabs.json")
     static let shared = BrowserTabRegistry(storageURL: defaultURL)
+    /// Chat's embedded browser is a separate human workspace.  It gets a
+    /// one-time snapshot of the standalone Browser workspace, then persists
+    /// independently so navigation and tab selection cannot cross surfaces.
+    static let chatInspectorURL = defaultURL.deletingLastPathComponent()
+        .appendingPathComponent("chat-tabs.json")
+    private static let chatInspectorMigrationURL = defaultURL.deletingLastPathComponent()
+        .appendingPathComponent("chat-tabs.migrated-v1")
     static let sessionSpaceID = UUID(uuidString: "00000000-0000-0000-0000-000000000046")!
     typealias TitleProvider = (String) -> (threadTitle: String, projectName: String)
 
@@ -250,6 +257,46 @@ final class BrowserTabRegistry: ObservableObject {
                 guard let self else { return }
                 do { try self.flush() } catch { self.persistenceError = error.localizedDescription }
             }
+    }
+
+    /// Returns the persistent registry used by Chat's browser inspector.
+    /// The first launch copies the current workspace records as a starting
+    /// point; the source registry is never mutated by the copy.
+    static func makeChatInspectorRegistry(source: BrowserTabRegistry) -> BrowserTabRegistry {
+        let registry = BrowserTabRegistry(storageURL: chatInspectorURL)
+        guard source !== registry,
+              !FileManager.default.fileExists(atPath: chatInspectorMigrationURL.path) else { return registry }
+
+        let sourceSpaces = source.spaces.filter { !$0.isSessionSpace }
+        var destinationBySourceID: [UUID: UUID] = [:]
+        for (index, sourceSpace) in sourceSpaces.enumerated() {
+            let destination: BrowserSpace
+            if index == 0, let first = registry.spaces.first(where: { !$0.isSessionSpace }) {
+                destination = first
+                if first.name != sourceSpace.name { registry.renameSpace(first.id, to: sourceSpace.name) }
+            } else {
+                destination = registry.addSpace(name: sourceSpace.name)
+            }
+            destinationBySourceID[sourceSpace.id] = destination.id
+            for folder in sourceSpace.folders {
+                guard let copiedFolder = registry.addFolder(spaceID: destination.id, name: folder.name) else { continue }
+                for bookmark in folder.bookmarks {
+                    _ = registry.addBookmark(folderID: copiedFolder.id, url: bookmark.url, title: bookmark.title)
+                }
+            }
+        }
+        for tab in source.tabs {
+            guard case let .workSpace(sourceSpaceID) = tab.owner,
+                  let destinationSpaceID = destinationBySourceID[sourceSpaceID] else { continue }
+            let copied = registry.openTab(owner: .workSpace(spaceID: destinationSpaceID),
+                url: tab.url, title: tab.title, isAgentTab: tab.isAgentTab == true)
+            registry.update(copied.id, url: tab.url, title: tab.title, favicon: tab.faviconPNG)
+            registry.setPinned(copied.id, tab.isPinned)
+        }
+        try? FileManager.default.createDirectory(at: chatInspectorMigrationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try? Data("v1\n".utf8).write(to: chatInspectorMigrationURL, options: .atomic)
+        return registry
     }
 
     func tabs(ownedBy owner: BrowserTabOwner) -> [BrowserTab] { tabs.filter { $0.owner == owner } }
