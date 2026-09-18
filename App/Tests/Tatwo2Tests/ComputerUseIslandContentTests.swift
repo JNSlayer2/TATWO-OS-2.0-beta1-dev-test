@@ -16,6 +16,20 @@ final class ComputerUseIslandContentTests: XCTestCase {
         )
     }
 
+    func testExpandedWorkInboxUsesWorkContentWhenRequested() {
+        XCTAssertEqual(
+            ComputerUseIslandContentKind.select(isExpanded: true, hasPendingConsent: false, showsWork: true),
+            .work
+        )
+    }
+
+    func testConsentTakesPriorityOverWork() {
+        XCTAssertEqual(
+            ComputerUseIslandContentKind.select(isExpanded: true, hasPendingConsent: true, showsWork: true),
+            .consent
+        )
+    }
+
     func testCollapsedHidesContentRegardlessOfConsent() {
         for hasPendingConsent in [false, true] {
             XCTAssertEqual(

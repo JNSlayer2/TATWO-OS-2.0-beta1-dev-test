@@ -35,11 +35,12 @@ final class ComputerUseConsentPrompt: ObservableObject {
 }
 
 enum ComputerUseIslandContentKind: Equatable {
-    case collapsed, consent, blankTemplate
+    case collapsed, consent, work, blankTemplate
 
-    static func select(isExpanded: Bool, hasPendingConsent: Bool) -> Self {
+    static func select(isExpanded: Bool, hasPendingConsent: Bool, showsWork: Bool = false) -> Self {
         guard isExpanded else { return .collapsed }
-        return hasPendingConsent ? .consent : .blankTemplate
+        if hasPendingConsent { return .consent }
+        return showsWork ? .work : .blankTemplate
     }
 }
 
@@ -48,16 +49,19 @@ typealias ComputerUseIslandContent = IslandNoticeContent
 
 struct IslandNoticeContent: View {
     @ObservedObject private var prompt = IslandNotice.shared
+    @ObservedObject private var inbox = IslandExceptionsCount.shared
     let isExpanded: Bool
 
     var body: some View {
         switch ComputerUseIslandContentKind.select(
-            isExpanded: isExpanded, hasPendingConsent: prompt.current != nil
+            isExpanded: isExpanded, hasPendingConsent: prompt.current != nil, showsWork: inbox.showsWork
         ) {
         case .consent:
             if let request = prompt.current {
                 ComputerUseConsentCard(request: request)
             }
+        case .work:
+            IslandWorkInboxView(inbox: inbox)
         case .blankTemplate:
             IslandBlankTemplate()
         case .collapsed:

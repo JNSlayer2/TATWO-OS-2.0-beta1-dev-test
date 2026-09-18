@@ -191,6 +191,10 @@ final class TatwoIslandShellState: ObservableObject {
     private func setExpanded(_ isExpanded: Bool) {
         guard self.isExpanded != isExpanded else { return }
         self.isExpanded = isExpanded
+        // Keep optional Island providers in the same visibility lifecycle. A
+        // media/web provider must be suspended before the collapsed shell is
+        // painted, otherwise its controls can remain above the desktop.
+        IslandExceptionsNavigation.pager?.isVisible = isExpanded
         withAnimation(TatwoIslandShellMetrics.transitionAnimation(expanding: isExpanded)) {
             self.expansionProgress = isExpanded ? 1 : 0
         }
@@ -536,6 +540,10 @@ struct TatwoIslandHoverTrackingView: NSViewRepresentable {
         private var isHovering = false
 
         override var isFlipped: Bool { true }
+
+        // Hover tracking must not win hit testing over Inbox buttons layered on
+        // top of the shell. Active tracking areas continue to report movement.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()

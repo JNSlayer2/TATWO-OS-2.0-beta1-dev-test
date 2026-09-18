@@ -4,15 +4,31 @@ import Combine
 /// The footer owns a lightweight count subscription; it never activates the Island pager.
 /// Updates are bounded to one read/publication per second, including overlapping requests.
 @MainActor final class IslandExceptionsCount: ObservableObject {
-    @Published private(set) var count = 0
+    static let shared = IslandExceptionsCount()
+    /// One bounded snapshot is shared by the footer and the Island list. Keeping
+    /// one source prevents the two surfaces from racing separate reads.
+    @Published private(set) var data = IslandWorkSnapshot()
+    @Published private(set) var hasLoaded = false
+    @Published var showsWork = false
+    var count: Int { data.exceptions.count }
     private var lastRead: TimeInterval = -.infinity
     private var reading = false
-    private let read: @MainActor () async -> Int
-    init(read: @escaping @MainActor () async -> Int = {
-        if IslandWorkSnapshot.isWaitingFixture { return IslandWorkSnapshot.waitingFixture.exceptions.count }
-        guard let model = CLISessionsTermination.model else { return 0 }
-        return await IslandWorkProvider.read(model: model, includeLastLine: false).exceptions.count
-    }) { self.read = read }
+    private let read: @MainActor () async -> IslandWorkSnapshot
+    init() {
+        self.read = {
+            if IslandWorkSnapshot.isWaitingFixture { return IslandWorkSnapshot.waitingFixture }
+            guard let model = CLISessionsTermination.model else { return .init() }
+            return await IslandWorkProvider.read(model: model, includeLastLine: false)
+        }
+    }
+    init(read: @escaping @MainActor () async -> Int) {
+        self.read = {
+            let count = await read()
+            return .init(exceptions: Array(repeating: .init(kind: .failed, title: "待處理事項",
+                                                           target: .init(), since: Date(), hint: "需要查看原因"), count: count))
+        }
+    }
+    init(read: @escaping @MainActor () async -> IslandWorkSnapshot) { self.read = read }
     var text: String { count > 0 ? "有 \(count) 件等你" : "無額外提醒" }
     func refresh(now: TimeInterval = ProcessInfo.processInfo.systemUptime) async {
         guard !reading, now - lastRead >= 1 else { return }
@@ -20,7 +36,8 @@ import Combine
         let value = await read()
         reading = false
         guard !Task.isCancelled else { return }
-        count = max(0, min(20, value))
+        data = IslandWorkSnapshot.ordered(value.exceptions + value.normal)
+        hasLoaded = true
     }
     func observe() async {
         while !Task.isCancelled {
@@ -40,6 +57,7 @@ import Combine
     static var requestedWork = false
     static func openWork() {
         requestedWork = true
+        IslandExceptionsCount.shared.showsWork = true
         selectWork()
         shell?.expandForNavigation()
     }
@@ -65,6 +83,12 @@ import Combine
                 return
             }
         }
+        if target.threadID == nil, target.jobID != nil {
+            // A detached background job has no chat room to select. Route to
+            // the CLI work surface instead of rendering a dead "查看" button.
+            CLISessionsTermination.model?.mode = .cli
+            return
+        }
         guard let model = CLISessionsTermination.model, let threadID = target.threadID,
               model.live?.doc.threads.contains(where: { $0.id == threadID }) == true else { return }
         model.mode = .chat
@@ -77,6 +101,7 @@ import Combine
         if let botID = target.botID, let state = botPage,
            state.fixture.principals.contains(where: { $0.id == botID || $0.subs.contains(where: { $0.id == botID }) }) { return true }
         if let botID = target.botID, botPage == nil, libraryHasBot(botID) { return true }
+        if target.threadID == nil, target.jobID != nil { return CLISessionsTermination.model != nil }
         guard let id = target.threadID else { return false }
         return CLISessionsTermination.model?.live?.doc.threads.contains(where: { $0.id == id }) == true
     }

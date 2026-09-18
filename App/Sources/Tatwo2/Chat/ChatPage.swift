@@ -13,7 +13,7 @@ struct ChatPage: View {
     @StateObject private var chatBrowserWorkSpaceStore: BrowserWorkSpaceStore
     private let chatBrowserRuntime: BrowserWorkSpaceRuntime
     @State var islandFooterHovering = false
-    @StateObject var islandExceptionsCount = IslandExceptionsCount()
+    @StateObject var islandExceptionsCount = IslandExceptionsCount.shared
     @State var globalNoteOpen = ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_EXPORT_WINDOW_SNAPSHOT"] != nil && ["1", "2"].contains(ProcessInfo.processInfo.environment["TATWO_ULTRAWORK_EXPORT_GLOBAL_NOTE"] ?? "")
     @Environment(\.tatwoSurfaceKind) var surface
     @ObservedObject var model: ChatPageModel
